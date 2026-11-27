@@ -7,7 +7,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_ra
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{font_milli_round_px, spaced_advances_milli, spaced_glyph_xs_milli, backdrop_blur_milli, HNode, font_milli_of, web_argb, attr_value, parse_color, parse_color_any, parse_int, decl_get, svg_number_milli, svg_view_box_milli, simple_web_backdrop_admission, _wsc_on, _wsc_now_us, _wlay_add, attr_present, web_font_style_trace_enabled}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, SIMPLE_WEB_STICKY_TOP_AUTO, _html_text_language, split_top_level_commas}
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{parse_box_shadow_layers}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, linear_gradient_line_q10_at_angle, background_gradient_clip_shape, border_dash_runs, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{radial_gradient_box_paintable, radial_gradient_box_geometry, BackgroundGradientLayer, background_gradient_layers_paintable, background_gradient_layers, background_gradient_box_rects, linear_gradient_line_q10_at_angle, background_gradient_clip_shape, border_dash_runs, border_dash_aa_runs, border_color_at_coverage, border_dot_row_spans, border_rounded_dash_spans, _rounded_dash_style, _rounded_solid_sides}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language, resolve_font_metrics_with_language_milli, browser_face_ascent_descent_milli_px, browser_face_line_units}
 use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
@@ -1363,12 +1363,58 @@ fn _html_draw_ir_styled_span_commands(
             return cmds
         cmds.push(_html_draw_ir_overlay_rect(base_id + "_s0", ClipRect(x0: x, y0: y, x1: x + w, y1: y + h), color, clip))
         return cmds
-    if style_name == "dashed" or style_name == "dotted":
-        val runs = border_dash_runs(if horizontal: w else: h, if horizontal: h else: w, style_name == "dotted", layout_device_scale())
+    if style_name == "dashed":
+        # Dashes sit at fractional DEVICE px with partly covered end pixels
+        # (`border_dash_aa_runs`); at k > 1 each run is a `device-rect` on the
+        # side's CSS origin, as the native form-control spans are.
+        # The whole side is ONE command: `dash-runs` = "<vertical 0|1>,
+        # <offset>,<length>,<colour>..." in device px along the side from its
+        # device origin (Engine2D paints each run as a fill). ~480 run
+        # commands per 800 px side paid the per-command pipeline cost each.
+        val k = layout_device_scale()
+        val side_t = if horizontal: h else: w
+        val aa = border_dash_aa_runs(if horizontal: w * k else: h * k, side_t * k, not horizontal)
+        var enc = if horizontal: "0" else: "1"
+        var q = 0
+        # cpu-lane-loop-ok: encodes one triple per dash run of one border edge; bound is the run count
+        while q + 2 < aa.len():
+            val run_color = border_color_at_coverage(color, aa[q + 2])
+            if run_color != 0u32:
+                enc = enc + ",{aa[q]},{aa[q + 1]},{run_color}"
+            q = q + 3
+        if enc.len() <= 60000:
+            var edge = _html_draw_ir_overlay_rect(base_id, ClipRect(x0: x, y0: y, x1: x + w, y1: y + h), color, clip)
+            edge.computed_style = [draw_ir_style_prop("dash-runs", enc)]
+            cmds.push(edge)
+            return cmds
+        q = 0
+        # cpu-lane-loop-ok: emits one overlay rect per dash run along one border edge; bound is the run count
+        while q + 2 < aa.len():
+            val run_color = border_color_at_coverage(color, aa[q + 2])
+            if run_color != 0u32:
+                if k <= 1:
+                    val seg_rect = if horizontal:
+                        ClipRect(x0: x + aa[q], y0: y, x1: x + aa[q] + aa[q + 1], y1: y + h)
+                    else:
+                        ClipRect(x0: x, y0: y + aa[q], x1: x + w, y1: y + aa[q] + aa[q + 1])
+                    cmds.push(_html_draw_ir_overlay_rect("{base_id}_{q / 3}", seg_rect, run_color, clip))
+                else:
+                    var device = _html_draw_ir_overlay_rect("{base_id}_{q / 3}", ClipRect(x0: x, y0: y, x1: x + 1, y1: y + 1), run_color, clip)
+                    device.computed_style = [
+                        draw_ir_style_prop(
+                            "device-rect",
+                            if horizontal: "{aa[q]},0,{aa[q + 1]},{side_t * k}" else: "0,{aa[q]},{side_t * k},{aa[q + 1]}"
+                        )
+                    ]
+                    cmds.push(device)
+            q = q + 3
+        return cmds
+    if style_name == "dotted":
+        val runs = border_dash_runs(if horizontal: w else: h, if horizontal: h else: w, true, layout_device_scale())
         var r = 0
         # cpu-lane-loop-ok: emits one overlay rect per dash along one border edge; bound is the run count
         val t = if horizontal: h else: w
-        val dot = if style_name == "dotted": border_dot_row_spans(t) else: []
+        val dot = border_dot_row_spans(t)
         while r + 1 < runs.len():
             val cx = if horizontal: x + runs[r] else: x
             val cy = if horizontal: y else: y + runs[r]

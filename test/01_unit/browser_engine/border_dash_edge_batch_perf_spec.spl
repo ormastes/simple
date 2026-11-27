@@ -1,0 +1,83 @@
+"""
+## Purpose and audience
+Purpose: Bound the cpu_simd paint cost of Chrome-exact `dashed` borders. A
+1px dashed side of 800 px is ~160 dashes and ~480 runs once the partly covered
+end pixels get their own alpha; one Draw IR command per run paid the fixed
+per-command pipeline cost (device scale, plan, executor) ~480 times per side.
+The pixels must stay exactly those of the per-run lane (FNV-1a pins below,
+measured on lane head eb131122c6c), at device scale 1 and 4.
+Audience: browser-engine maintainers.
+
+Scene: six 1px `dashed #000` boxes of 800 x 40 CSS px on white, 820 x 300.
+"""
+
+"""
+Traceability: doc/00_llm_process/feature_expert/web_render_css_parity/skill.md
+("2026-11-27 -- device-px dashed borders re-landed (csslayout lane)").
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+
+val DB_W = 820
+val DB_H = 300
+val DB_HASH_K1: i64 = -6376573294231629803
+val DB_HASH_K4: i64 = -4208428848533820091
+# Lane head eb131122c6c (one command per run): 4.95 s k1+k4; one command per side: 2.27 s.
+val DB_BUDGET_MS: i64 = 3500
+# Software raster (k=1), same scene: one framebuffer-returning call per dash run (the coverage ends triple the runs) measured 12392 ms at d5e2d102d1a; the hash is that lane's pixels.
+val DB_HASH_RASTER: i64 = -4875511540076212779
+val DB_RASTER_BUDGET_MS: i64 = 2500
+
+fn db_page() -> text:
+    var body = ""
+    var i = 0
+    # cpu-lane-loop-ok: six boxes of the scene
+    while i < 6:
+        body = body + "<div style='position:absolute;box-sizing:border-box;left:10px;top:{10 + i * 48}px;width:800px;height:40px;border:1px dashed #000'></div>"
+        i = i + 1
+    "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'>" + body + "</body></html>"
+
+# FNV-1a 64 over the RGB bytes of every pixel.
+fn db_hash(px: [u32]) -> i64:
+    var h: i64 = -3750763034362895579
+    # cpu-lane-loop-ok: test hash; bound is the frame size
+    for p in px:
+        h = (h ^ ((p & 0xFFFFFFu32) as i64)) * 1099511628211
+    h
+
+describe "dashed border edge batching (cpu_simd)":
+    it "paints six 1px dashed 800px boxes at k=1 and k=4 with the per-run pixels, within the time budget":
+        val clock = default_frame_clock()
+        val page = db_page()
+        val t0 = clock.now_micros()
+        val p1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, DB_W, DB_H, 1, "cpu_simd")
+        val t1 = clock.now_micros()
+        val p4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, DB_W, DB_H, 4, "cpu_simd")
+        val t4 = clock.now_micros()
+        val h1 = db_hash(p1)
+        val h4 = db_hash(p4)
+        print "dash-edge-batch: k1 {(t1 - t0) / 1000} ms hash {h1}; k4 {(t4 - t1) / 1000} ms hash {h4}"
+        expect(p1.len()).to_equal(DB_W * DB_H)
+        expect(p4.len()).to_equal(DB_W * DB_H * 16)
+        expect(h1).to_equal(DB_HASH_K1)
+        expect(h4).to_equal(DB_HASH_K4)
+        expect((t4 - t0) / 1000 < DB_BUDGET_MS).to_equal(true)
+
+describe "dashed border runs on the k=1 software raster":
+    it "paints six 1px dashed 800px boxes with every run of a side in one framebuffer pass, within the time budget":
+        val clock = default_frame_clock()
+        val page = db_page()
+        val t0 = clock.now_micros()
+        val px = simple_web_layout_render_html_software_pixels(page, DB_W, DB_H)
+        val t1 = clock.now_micros()
+        val h = db_hash(px)
+        print "dash-raster: {(t1 - t0) / 1000} ms hash {h}"
+        expect(px.len()).to_equal(DB_W * DB_H)
+        expect(h).to_equal(DB_HASH_RASTER)
+        expect((t1 - t0) / 1000 < DB_RASTER_BUDGET_MS).to_equal(true)
