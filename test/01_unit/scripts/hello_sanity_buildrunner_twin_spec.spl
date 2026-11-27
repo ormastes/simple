@@ -12,7 +12,7 @@ hello-sanity-matrix twin that calls `hello_buildrunner_run_lane`.
 Parity: every verdict and reason text asserted here equals the Python
 adapter's on the same fixture (checked by running both over identical
 fixtures). Known, intended divergences: the trust anchor is the running stage
-binary pin (`producer_sha256` replaces `python_sha256`); SDN evidence accepts
+binary pin (record key `python_sha256` kept; value = stage-binary digest); SDN evidence accepts
 only the literal forms the matrix writer emits; zip CRCs are not re-checked
 (the executable digest bound by the worker result is).
 """
@@ -20,7 +20,7 @@ only the literal forms the matrix writer emits; zip CRCs are not re-checked
 use std.spec.*
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_write, file_write_bytes, file_hash_sha256_or_empty, mkdir_p, is_dir, getpid, dir_remove_all, remove_file_if_exists}
 use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField, sdn_str, sdn_int, sdn_bool, task_budget_seconds, lane_status, target_matches_host, verify_memory_receipt, expected_lane_identity, sdn_record_text, parse_sdn_record, hello_forms, ZipInput, zip_stored}
-use scripts.bootstrap.lib.hello_sanity_buildrunner_lane.{HelloMatrixPort, HelloLaneContext, HelloProvider, RuntimeHash, hello_buildrunner_run_lane, verified_memory_receipt, unpack_verified_lane, verify_stage_binary_pin, prepare_private_roots}
+use scripts.bootstrap.lib.hello_sanity_buildrunner_lane.{HelloMatrixPort, HelloLaneContext, HelloProvider, RuntimeHash, hello_buildrunner_run_lane, pass_fields, verified_memory_receipt, unpack_verified_lane, verify_stage_binary_pin, prepare_private_roots}
 
 val HEX_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val HEX_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -385,3 +385,26 @@ describe "hello BuildRunner twin: memory admission":
         expect(verify_memory_receipt(kv_text(set_kv(monitor, "enforcement", "job-memory")), HEX_A, 1024, "monitor").unwrap_err()).to_equal("monitor receipt claims enforcement it did not request")
         expect(verify_memory_receipt(kv_text(set_kv(monitor, "peak_metric", "job-commit-peak")), HEX_A, 1024, "monitor").unwrap_err()).to_equal("monitor receipt peak metric is not monitor-only")
         expect(verify_memory_receipt(kv_text(monitor), HEX_A, 1024, "enforce").unwrap_err()).to_equal("worker did not prove the requested memory enforcement")
+
+fn python_pass_keys() -> [text]:
+    """PASS-record keys in order, read from the Python adapter (the oracle)."""
+    val src = file_read("scripts/bootstrap/hello-sanity-buildrunner.py")
+    val start = src.index_of("values.update(status=lane_status(policy)") ?? -1
+    val stop = src.index_of("if policy == \"monitor\":", start) ?? -1
+    var keys: [text] = []
+    for part in src.substring(start + 14, stop).split(","):
+        val p = part.trim()
+        val eq = p.index_of("=") ?? -1
+        if eq > 0 and p.substring(0, eq) != "status": keys.push(p.substring(0, eq))
+    for k in ["memory_policy", "evidence_scope", "verdict"]:
+        keys.push(k)
+    keys
+
+describe "hello BuildRunner twin: record keys":
+    it "keeps the Python PASS record key set and order, python_sha256 included":
+        var keys: [text] = []
+        for f in pass_fields("e", "r", "m", "b", "p", "g", "w", "t", "monitor"):
+            keys.push(f.key)
+        expect(python_pass_keys().len()).to_equal(11)
+        expect(keys).to_equal(python_pass_keys())
+        expect(pass_fields("e", "r", "m", "b", "p", "g", "w", "t", "enforce").len()).to_equal(8)

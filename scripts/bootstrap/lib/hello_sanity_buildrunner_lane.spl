@@ -429,17 +429,28 @@ fn lane_body(port: HelloMatrixPort, ctx: HelloLaneContext, lane: text, backend: 
     if digest(provider.manager)? != manager_sha or digest(provider.manifest_writer)? != writer_sha or digest(provider.template)? != template_sha or verify_stage_binary_pin(ctx.producer_path, producer_sha).is_err():
         return Err("BuildRunner provider identity changed during execution")
     val status = lane_status(ctx.memory_policy)?
+    val fields = pass_fields(digest(artifact)?, digest(receipt)?, digest(memory)?, digest(bundle)?,
+        producer_sha, manager_sha, writer_sha, template_sha, ctx.memory_policy)
+    if ctx.memory_policy == MEMORY_POLICY_MONITOR: print(MONITOR_VERDICT)
+    Ok(PassEvidence(status: status, fields: fields))
+
+pub fn pass_fields(exe: text, receipt: text, memory: text, bundle: text, producer: text, manager: text, writer: text, template: text, policy: text) -> [SdnField]:
+    """Python run_lane's PASS `values.update(...)` keys, same names and order.
+
+    `python_sha256` keeps the Python key so every record consumer is unchanged;
+    in the twin it carries the pinned running stage binary's digest (the
+    producer that replaces the Python interpreter as trust anchor).
+    """
     var fields: [SdnField] = [
-        sdn_str("executable_sha256", digest(artifact)?), sdn_str("receipt_sha256", digest(receipt)?),
-        sdn_str("memory_receipt_sha256", digest(memory)?), sdn_str("bundle_sha256", digest(bundle)?),
-        sdn_str("producer_sha256", producer_sha), sdn_str("manager_sha256", manager_sha),
-        sdn_str("manifest_writer_sha256", writer_sha), sdn_str("template_sha256", template_sha)]
-    if ctx.memory_policy == MEMORY_POLICY_MONITOR:
+        sdn_str("executable_sha256", exe), sdn_str("receipt_sha256", receipt),
+        sdn_str("memory_receipt_sha256", memory), sdn_str("bundle_sha256", bundle),
+        sdn_str("python_sha256", producer), sdn_str("manager_sha256", manager),
+        sdn_str("manifest_writer_sha256", writer), sdn_str("template_sha256", template)]
+    if policy == MEMORY_POLICY_MONITOR:
         fields.push(sdn_str("memory_policy", "monitor"))
         fields.push(sdn_str("evidence_scope", "functional-only-memory-deferred"))
         fields.push(sdn_str("verdict", MONITOR_VERDICT))
-        print(MONITOR_VERDICT)
-    Ok(PassEvidence(status: status, fields: fields))
+    fields
 
 pub fn hello_buildrunner_run_lane(port: HelloMatrixPort, ctx: HelloLaneContext, backend: text, name: text, provider: HelloProvider, target: text) -> Result<[SdnField], text>:
     """Dispatch compile, explicit link and execution within one enforced task."""
