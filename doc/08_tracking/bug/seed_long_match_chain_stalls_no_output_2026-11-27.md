@@ -44,3 +44,28 @@ sweep propagated liveness one hop: N sweeps x N blocks x per-block set clones.
 when a successor's live-in changed). Regression test:
 `test_compute_live_ins_long_reverse_ordered_chain` (5000-block reverse-ordered
 chain) in `compiler/src/mir/function.rs`.
+
+## Second cause and final result
+
+After the liveness fix a 1100-arm match still took 10 s (stack in
+`cranelift_frontend::SSABuilder::seal_one_block`): `compile_function_body`
+translated blocks in storage order and sealed ALL blocks at the end, so every
+cross-block `use_var` was resolved through the whole chain. Now (non-generator,
+non-async functions) blocks are translated in reverse post-order and each block
+is sealed once all its predecessors are emitted; the liveness worklist is also
+seeded in post-order.
+
+JIT timings (seed r before -> seed t after), 1500 arms: >300 s -> 3.0 s.
+
+| arms | r (before) | t (after) |
+|---|---|---|
+| 100 | 0.2 s | 0.4 s |
+| 700 | 0.3 s | 0.25 s |
+| 900 | 0.23 s | - |
+| 1100 | >100 s | 2.0 s |
+| 1500 | >300 s | 3.0 s |
+| 3000 | - | 9.2 s |
+
+Interpret mode was never affected (~150 ms at 1500). Residual: growth from
+1100 to 3000 arms is still mildly superlinear (~n^1.5); not profiled further.
+Seed t: `C:/dev/keep/seeds/simple-local-20261127t.exe`.
