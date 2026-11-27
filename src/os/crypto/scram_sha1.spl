@@ -1,6 +1,6 @@
 # SCRAM-SHA-1 — RFC 5802
 
-use os.crypto.scram_common.{_u8_to_list, _list_to_u8, _text_to_list, _u8_concat, _u8_xor, _ct_eq_bytes, _base64_encode, _u8_to_text, _u8_to_text_from, _text_to_u8, _parse_field, _parse_field_b64, _parse_field_b64_u8, _text_to_i64}
+use os.crypto.scram_common.{_u8_concat, _u8_xor, _ct_eq_bytes, _base64_encode, _u8_to_text, _u8_to_text_from, _text_to_u8, _parse_field, _parse_field_b64, _parse_field_b64_u8, _text_to_i64}
 use std.crypto.pbkdf2.{pbkdf2_sha1_bytes}
 use std.crypto.hmac.{hmac_sha1_bytes}
 use std.crypto.sha1.{sha1_bytes}
@@ -27,19 +27,11 @@ fn _scram_sha1_derive(password: [u8], salt: [u8], iterations: i64) -> ([u8], [u8
     ClientKey      = HMAC-SHA-1(SaltedPassword, "Client Key")
     ServerKey      = HMAC-SHA-1(SaltedPassword, "Server Key")
     """
-    val pw_list = _u8_to_list(password)
-    val salt_list = _u8_to_list(salt)
+    val salted_pw = pbkdf2_sha1_bytes(password, salt, iterations, 20)
 
-    val salted_pw_list = pbkdf2_sha1_bytes(pw_list, salt_list, iterations, 20)
-    val salted_pw = _list_to_u8(salted_pw_list)
+    val client_key = hmac_sha1_bytes(salted_pw, _text_to_u8("Client Key"))
 
-    val ck_label = _text_to_list("Client Key")
-    val client_key_list = hmac_sha1_bytes(salted_pw_list, ck_label)
-    val client_key = _list_to_u8(client_key_list)
-
-    val sk_label = _text_to_list("Server Key")
-    val server_key_list = hmac_sha1_bytes(salted_pw_list, sk_label)
-    val server_key = _list_to_u8(server_key_list)
+    val server_key = hmac_sha1_bytes(salted_pw, _text_to_u8("Server Key"))
 
     (salted_pw, server_key, client_key)
 
@@ -55,18 +47,13 @@ fn _scram_sha1_proof_and_server_sig(
     ClientProof     = ClientKey XOR ClientSignature
     ServerSignature = HMAC-SHA-1(ServerKey, AuthMessage)
     """
-    val ck_list = _u8_to_list(client_key)
-    val stored_key_list = sha1_bytes(ck_list)
+    val stored_key = sha1_bytes(client_key)
 
-    val am_list = _u8_to_list(auth_message)
-    val client_sig_list = hmac_sha1_bytes(stored_key_list, am_list)
-    val client_sig = _list_to_u8(client_sig_list)
+    val client_sig = hmac_sha1_bytes(stored_key, auth_message)
 
     val client_proof = _u8_xor(client_key, client_sig)
 
-    val sk_list = _u8_to_list(server_key)
-    val server_sig_list = hmac_sha1_bytes(sk_list, am_list)
-    val server_sig = _list_to_u8(server_sig_list)
+    val server_sig = hmac_sha1_bytes(server_key, auth_message)
 
     (client_proof, server_sig)
 
@@ -153,17 +140,13 @@ fn scram_sha1_server_verify(
 
     val (_, _, client_key) = _scram_sha1_derive(password, salt, iterations)
 
-    val ck_list = _u8_to_list(client_key)
-    val stored_key_list = sha1_bytes(ck_list)
+    val stored_key = sha1_bytes(client_key)
 
-    val am_list = _u8_to_list(auth_message)
-    val client_sig_list = hmac_sha1_bytes(stored_key_list, am_list)
-    val client_sig = _list_to_u8(client_sig_list)
+    val client_sig = hmac_sha1_bytes(stored_key, auth_message)
 
     val recovered_ck = _u8_xor(received_proof, client_sig)
-    val rck_list = _u8_to_list(recovered_ck)
-    val recovered_stored = _list_to_u8(sha1_bytes(rck_list))
-    val expected_stored = _list_to_u8(stored_key_list)
+    val recovered_stored = sha1_bytes(recovered_ck)
+    val expected_stored = stored_key
 
     _ct_eq_bytes(recovered_stored, expected_stored)
 

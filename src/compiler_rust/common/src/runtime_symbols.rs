@@ -885,6 +885,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_capture_stderr_start",
     // Environment & Process operations
     "rt_env_get",
+    "rt_env_get_raw",
     "rt_env_get_i64",
     "rt_lexer_source_set",
     "rt_lexer_source_slice",
@@ -1208,6 +1209,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_canonicalize",
     "rt_file_read_text",
     "rt_file_read_regular_no_follow_bounded",
+    "rt_file_read_regular_no_follow_bounded_raw",
+    "rt_file_read_text_raw",
     "rt_file_read_regular_no_follow_bounded_bytes",
     "rt_file_read_regular_no_follow_last_failure",
     "rt_file_read_text_rv",

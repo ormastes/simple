@@ -48,6 +48,7 @@ use std.nogc_sync_mut.io.linux_container_containment_v1.{LinuxContainerContainme
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.distributed_operation_state_v2.*
 use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_workload_read_action_v3
 use std.common.contracts.container.effect_deadline_v1.*
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_sync_mut.database.wal.WalEntry
@@ -895,6 +896,20 @@ pub class MachineFreshWorkloadTransferV2:
     pub fn run_action_v2(action: LinuxFreshWorkloadActionV2,
             deadline: Option<ContainerEffectDeadlineV1> = None) -> Result<MachineFreshWorkloadActionResultV2, text>:
         self.state.after_action_v2(self.run_named_v2(action, self.state.name_v2(linux_fresh_workload_action_name_v2(action))?, deadline))
+
+    # Bounded once-only `wait`/`logs` read of this owner's own CPU workload. A completed read is replayed from
+    # the retained result (no second helper); an attempted but unresolved one stays refused by action_begin_v2.
+    # @allow(primitive_api) reason: name is the closed shared-API read action text, checked against the two-value selector first
+    pub fn read_output_v3(name: text) -> Result<MachineFreshWorkloadActionResultV2, text>:
+        val selected = linux_fresh_workload_read_action_v3(name)?
+        val current = self.current_v2()?
+        val retained = self.state.completed_result_v3(name)
+        if retained.is_ok(): return retained
+        self.state.after_action_v2(self.run_named_v2(LinuxFreshWorkloadActionV2.Inspect, name, None))
+
+    # @allow(primitive_api) reason: predicate over one closed read action name; bool is the predicate result
+    pub fn read_completed_v3(name: text) -> bool:
+        linux_fresh_workload_read_action_v3(name).is_ok() and self.state.completed_result_v3(name).is_ok()
 
     fn run_named_v2(action: LinuxFreshWorkloadActionV2, name: text,
             deadline: Option<ContainerEffectDeadlineV1>) -> Result<MachineFreshWorkloadActionResultV2, text>:

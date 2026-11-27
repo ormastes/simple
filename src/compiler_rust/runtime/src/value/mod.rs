@@ -393,7 +393,7 @@ pub use sffi::{fractional_seconds_to_millis, rt_time_now_seconds, rt_time_now_se
 
 // Re-export environment & process SFFI functions
 pub use sffi::{
-    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64,
+    rt_condition_probe, rt_decision_probe, rt_env_all, rt_env_cwd, rt_env_exists, rt_env_get, rt_env_get_i64, rt_env_get_raw,
     rt_env_home, rt_env_remove, rt_env_set, rt_env_temp, rt_env_vars, rt_exit, rt_get_env, rt_lexer_source_set,
     rt_lexer_source_slice, rt_path_probe, rt_platform_name, rt_process_execute, rt_process_is_running, rt_process_kill,
     rt_process_run, rt_process_run_bounded, rt_process_run_bounded_bytes, rt_process_run_inherit, rt_process_run_timeout, rt_process_spawn,
@@ -445,6 +445,8 @@ pub use sffi::{
     rt_file_canonicalize,
     rt_file_read_text,
     rt_file_read_regular_no_follow_bounded,
+    rt_file_read_regular_no_follow_bounded_raw,
+    rt_file_read_text_raw,
     rt_file_read_regular_no_follow_last_failure,
     rt_file_read_text_rv,
     rt_file_write_text,

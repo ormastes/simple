@@ -214,3 +214,44 @@ The `files[path].as_str()` ambiguity was a seed HIR typing bug (nested tail
 `val entry: SdnValue = files[path]` workaround in `simpleos_sysroot_receipt.spl`
 is no longer required once a seed with this fix is deployed. See
 `codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`.
+
+## Final worker phase breakdown: stage_parse runs at ~500 chars/s (2026-11-27, seed simple-local-20261127r, worktree c27-variant)
+
+Run: `SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_MIR_SHARDING=0 SIMPLE_BUILD_TRACE=1 SIMPLE_BUILD_TRACE_FILE=...` (`log_phase`
+lines now also tee to the trace file, so the worker's `[BOOTSTRAP-PHASE]` stream is live on Windows). Worker timeline
+(wall ms from `worker:start`):
+
+| phase | time |
+|---|---|
+| worker start -> `compile:start` | 161 s |
+| `phase1:load_sources` bulk closure (192 sources, 2.1 MB; each `closure:already-loaded` step ~2 s) | 161 s -> 394 s (233 s) |
+| owner copy | 394 -> 411 s |
+| `phase2:parse` (stage_parse) start | 476 s |
+| stage_parse per file (serial, in the worker) | see below |
+
+Per-file serial parse in the worker (`phase2:parse:file:start/done`, chars -> wall):
+
+| file | chars | wall |
+|---|---|---|
+| test/.../smoke.spl | 134 | 0.9 s |
+| sosix/fs_v1.spl | 2354 | 2.8 s |
+| io/dir_ops.spl | 5029 | 9.5 s |
+| io/file_ops.spl | 30294 | 54.7 s |
+| io_runtime.spl | 43584 | 101.8 s |
+
+That is ~0.4-2 ms per char (roughly 500 chars/s, mildly superlinear), i.e. interpreter speed. The same files parse in
+0.2-0.4 s inside the JIT parse shards. Extrapolated to 2.1 MB, the final worker's serial re-parse of the 192-source closure is
+on the order of 1 hour, which is the "silent >600 s after load_sources:done" and the 2400 s cap hit. So the culprit is
+`stage_parse` (`parse_all_committing_impl`) re-parsing every source inside the single final worker at interpreted speed even
+though the shards already parsed and cached them; HIR was never reached. Stopped at ~11 min of parse (6 of 192 files done).
+
+Open: either (a) confirm the worker really runs the parse functions on JIT (the shards do; the worker shows interpreter-class
+speed) -- check `SIMPLE_EXECUTION_MODE` as seen by the worker and any `engine-demotion` line, or (b) have stage_parse consume the
+shards' parse/front-end cache instead of re-parsing. Also: load_sources closure scan costs 233 s and worker start 161 s.
+
+Side effect measured: any edit under `src/**` invalidates the SCV cold-init cache (the cold-init scan took 1027 s on the rerun
+instead of ~270 s), so each trace-point edit costs ~17 min before the worker starts.
+
+Trace additions (kept): `log_phase` tee to `SIMPLE_BUILD_TRACE_FILE`; `driver:hir:streaming:prelude_done`,
+`driver:hir:streaming:visit_order n=`, and per-module `driver:hir:module:start pos= path=` in the streaming HIR loop
+(untested: HIR was not reached).

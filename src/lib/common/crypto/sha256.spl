@@ -40,7 +40,7 @@ fn _sha256_k() -> [i64]:
     ]
 
 # SHA-256 of a byte list. Returns 32-byte list (raw hash bytes).
-pub fn sha256_bytes(data: [i64]) -> [i64]:
+pub fn sha256_bytes(data: [u8]) -> [u8]:
     val mask32 = 4294967295  # 0xFFFFFFFF
     val k = _sha256_k()
 
@@ -77,11 +77,11 @@ pub fn sha256_bytes(data: [i64]) -> [i64]:
     # for the full before/after measurement and the separate, larger
     # remaining cause (interpreter_gc_root_scan_blowup_large_array). Output
     # is unchanged — verified against NIST FIPS 180-4 vectors.
-    val data_len = data.len()
+    val data_len = data.len() as i64
     val min_len = data_len + 9  # data + 0x80 marker + 8-byte bit-length suffix
     val block_count = (min_len + 63) / 64
     val total_len = block_count * 64
-    var padded: [i64] = [0; total_len]
+    var padded: [u8] = [0u8; total_len]
     var pi = 0
     while pi < data_len:
         padded[pi] = data[pi]
@@ -89,18 +89,18 @@ pub fn sha256_bytes(data: [i64]) -> [i64]:
 
     # Append 0x80 byte. Zero padding is already in place from the array's
     # zero-initialized allocation above.
-    padded[data_len] = 128
+    padded[data_len] = 128u8
 
     # Append original bit-length as 8-byte big-endian, at the fixed tail.
     val bit_len = data_len * 8
-    padded[total_len - 8] = (bit_len >> 56) & 255
-    padded[total_len - 7] = (bit_len >> 48) & 255
-    padded[total_len - 6] = (bit_len >> 40) & 255
-    padded[total_len - 5] = (bit_len >> 32) & 255
-    padded[total_len - 4] = (bit_len >> 24) & 255
-    padded[total_len - 3] = (bit_len >> 16) & 255
-    padded[total_len - 2] = (bit_len >>  8) & 255
-    padded[total_len - 1] = ( bit_len        & 255)
+    padded[total_len - 8] = ((bit_len >> 56) & 255).to_u8()
+    padded[total_len - 7] = ((bit_len >> 48) & 255).to_u8()
+    padded[total_len - 6] = ((bit_len >> 40) & 255).to_u8()
+    padded[total_len - 5] = ((bit_len >> 32) & 255).to_u8()
+    padded[total_len - 4] = ((bit_len >> 24) & 255).to_u8()
+    padded[total_len - 3] = ((bit_len >> 16) & 255).to_u8()
+    padded[total_len - 2] = ((bit_len >>  8) & 255).to_u8()
+    padded[total_len - 1] = ( bit_len        & 255).to_u8()
 
     # Process each 64-byte block.
     var block_offset = 0
@@ -112,10 +112,10 @@ pub fn sha256_bytes(data: [i64]) -> [i64]:
         while wi < 16:
             val base = block_offset + wi * 4
             val word = (
-                ((padded[base    ] & 255) << 24) |
-                ((padded[base + 1] & 255) << 16) |
-                ((padded[base + 2] & 255) <<  8) |
-                 (padded[base + 3] & 255)
+                ((padded[base    ] as i64) << 24) |
+                ((padded[base + 1] as i64) << 16) |
+                ((padded[base + 2] as i64) <<  8) |
+                 (padded[base + 3] as i64)
             ) & mask32
             w[wi] = word
             wi = wi + 1
@@ -169,15 +169,15 @@ pub fn sha256_bytes(data: [i64]) -> [i64]:
         block_offset = block_offset + 64
 
     # Produce 32-byte result.
-    var result: [i64] = []
+    var result: [u8] = [0u8; 32]
     val words: [i64] = [h0, h1, h2, h3, h4, h5, h6, h7]
     var wi2 = 0
     while wi2 < 8:
         val w: i64 = words[wi2]
-        result.push((w >> 24) & 255)
-        result.push((w >> 16) & 255)
-        result.push((w >>  8) & 255)
-        result.push( w        & 255)
+        result[wi2 * 4]     = ((w >> 24) & 255).to_u8()
+        result[wi2 * 4 + 1] = ((w >> 16) & 255).to_u8()
+        result[wi2 * 4 + 2] = ((w >>  8) & 255).to_u8()
+        result[wi2 * 4 + 3] = ( w        & 255).to_u8()
         wi2 = wi2 + 1
     result
 
@@ -691,8 +691,12 @@ fn msg_schedule2(w: i64) -> i64:
 # SHA-256 scalar reference path — routes through sha256_core block processor.
 # Parity target for sha256_simd_parity_spec: sha256_bytes uses inline code,
 # sha256_bytes_scalar uses sha256_core (different constants + add_mod32 path).
-fn sha256_bytes_scalar(data: [i64]) -> [i64]:
-    val padded = sha256_pad_message(data)
+fn sha256_bytes_scalar(data: [u8]) -> [u8]:
+    # sha256_core is a word-oriented core: widen the message once at entry.
+    var words_in: [i64] = []
+    for b in data:
+        words_in.push(b as i64)
+    val padded = sha256_pad_message(words_in)
     var h = sha256_initial_hash()
     var offset = 0
     val total = padded.len()
@@ -704,14 +708,14 @@ fn sha256_bytes_scalar(data: [i64]) -> [i64]:
             bi = bi + 1
         h = sha256_process_block(h, block)
         offset = offset + 64
-    var result: [i64] = []
+    var result: [u8] = [0u8; 32]
     var wi = 0
     while wi < 8:
         val w = h[wi]
-        result.push((w >> 24) & 255)
-        result.push((w >> 16) & 255)
-        result.push((w >>  8) & 255)
-        result.push( w        & 255)
+        result[wi * 4]     = ((w >> 24) & 255).to_u8()
+        result[wi * 4 + 1] = ((w >> 16) & 255).to_u8()
+        result[wi * 4 + 2] = ((w >>  8) & 255).to_u8()
+        result[wi * 4 + 3] = ( w        & 255).to_u8()
         wi = wi + 1
     result
 

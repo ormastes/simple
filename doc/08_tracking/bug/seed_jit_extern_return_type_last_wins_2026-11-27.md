@@ -131,6 +131,7 @@ than one return shape in `src/**/*.spl`. Its baseline only shrinks:
 | #12076 | batch 4: `rt_array_data_ptr_text`, `rt_dict_contains` | 138 |
 | #12079 | batch 2: env/file (`text?` / `bool` per the runtime ABI) + string-literal false positives | 131 |
 | batch 5 | exclude the stale `src/compiler_rust/lib/std` snapshot (its f32 math externs have no f32 backing) | 79 |
+| PR 6 | gate resolves unique type aliases (`rt_value_*` via `RuntimeValuePtr`); `sffi_minimal.spl` raw tier renamed to `rt_file_read_text_raw` / `rt_file_read_regular_no_follow_bounded_raw` / `rt_env_get_raw` with C, Rust and seed-interpreter forwarders | 73 |
 
 ### Batch 1 plan (HELD): typed per-enum wrappers for `rt_enum_payload`
 
