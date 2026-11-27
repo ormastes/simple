@@ -10,8 +10,9 @@ use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_SHA256_LEGACY}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreOpenV1, StoreFlagV1, StoreCountV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_pin, immutable_store_v1_release_pin}
-use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, dir_list_optional, secure_temp_dir_raw, dir_remove_all, dir_create_all, is_dir, sosix_fs_write_file, file_delete}
+use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, dir_list_optional, secure_temp_dir_raw, dir_remove_all, dir_create_all, is_dir, file_delete}
 use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
+use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 
 # Liveness of a `scv-gc:<nonce>` run: `<store>/run-live/<nonce>` holds the
 # unix-ms of the run's last refresh (written when the owner is minted, again at
@@ -23,6 +24,8 @@ use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
 val _SCVA1_LIVE_DIR = "run-live"
 val _SCVA1_LIVE_STALE_MS: i64 = 86400000
 val _SCVA1_LIVE_REFRESH_EVERY: i64 = 64
+# Records below this (2020-09-13 in unix ms) are torn or garbage, never a time.
+val _SCVA1_LIVE_MIN_MS: i64 = 1600000000000
 val _SCVA1_MAX_CHUNK_BYTES: i64 = 268435456
 val _SCVA1_MAX_PIN_REFS: i64 = 16384
 val _SCVA1_PIN_PREFIX = "scv-gc-"
@@ -133,12 +136,21 @@ fn _scva1_done_generation(name: text) -> i64:
         return -1
     generation
 
+# Only [A-Za-z0-9_.-]: rejects `:` (Windows ADS), `*`, `?`, spaces, control bytes.
+fn _scva1_nonce_bytes_safe(nonce: text) -> bool:
+    for b in nonce.bytes():
+        val c = b.to_i64()
+        val ok = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 45 or c == 46 or c == 95
+        if not ok:
+            return false
+    true
+
 # Nonce of a `scv-gc:<nonce>` owner, or "" when it is not one or is path-unsafe.
 fn _scva1_nonce(owner: text) -> text:
     if not owner.starts_with(_SCVA1_RUN_OWNER_PREFIX):
         return ""
     val nonce = owner.substring(_SCVA1_RUN_OWNER_PREFIX.byte_len(), owner.byte_len())
-    if nonce == "" or nonce.contains("/") or nonce.contains("\\") or nonce.contains(".."):
+    if nonce == "" or nonce.contains("/") or nonce.contains("\\") or nonce.contains("..") or nonce.contains(":") or not _scva1_nonce_bytes_safe(nonce):
         return ""
     nonce
 
@@ -150,7 +162,7 @@ fn _scva1_live_refresh(root: text, owner: text):
         return
     val dir = "{root}/{_SCVA1_LIVE_DIR}"
     if dir_create_all(dir) or is_dir(dir):
-        sosix_fs_write_file("{dir}/{nonce}", "{now / 1000}")
+        atomic_write_bytes("{dir}/{nonce}", "{now / 1000}".bytes())
 
 # true = last refresh older than the bound (reclaimable); false = live or unknown.
 # Absent/unreadable/unparsable record, a failed clock, or a refresh in the
@@ -165,7 +177,7 @@ fn _scva1_live_stale(root: text, nonce: text) -> bool:
         case Ok(value): value.trim()
         case Err(_): return false
     val last = text_ms.to_i64() ?? -1
-    if last < 0 or "{last}" != text_ms:
+    if last < _SCVA1_LIVE_MIN_MS or "{last}" != text_ms:
         return false
     now / 1000 - last > _SCVA1_LIVE_STALE_MS
 
@@ -202,6 +214,7 @@ pub fn scv_adapter_v1_pin_write(repo_root: text, reachable: text, owner: text) -
     var keys: [text] = []
     var seen: Dict<text, bool> = {}
     var skipped: i64 = 0
+    var imports: i64 = 0
     for line in reachable.split("\n"):
         val id = line.trim()
         if id == "" or seen.contains_key(id):
@@ -214,8 +227,9 @@ pub fn scv_adapter_v1_pin_write(repo_root: text, reachable: text, owner: text) -
         if not file_exists(_scva1_chunk_path(repo_root, id)):
             skipped = skipped + 1
             continue
-        if keys.len() % _SCVA1_LIVE_REFRESH_EVERY == 0:
+        if imports % _SCVA1_LIVE_REFRESH_EVERY == 0:
             _scva1_live_refresh(root, owner)
+        imports = imports + 1
         val imported = scv_adapter_v1_import_chunk(repo_root, id)
         if imported.status != "ok":
             # A corrupt blob is fsck's finding, not a store failure: leave it
@@ -276,11 +290,20 @@ fn _scva1_live_prune(root: text, pins_dir: text):
         case None: return
     var held: Dict<text, bool> = {}
     for pin in pins:
-        held[_scva1_nonce(_scva1_pin_owner("{pins_dir}/{pin.trim()}", ""))] = true
+        # An ownerless (legacy) pin holds no record; an existing but unreadable
+        # owner could hold any record: skip the pass.
+        val owner_path = "{pins_dir}/{pin.trim()}/owner"
+        if not file_exists(owner_path):
+            continue
+        match file_read_regular_no_follow_bounded(owner_path, 512):
+            case Ok(value): held[_scva1_nonce(value)] = true
+            case Err(_): return
     for record in records:
         val nonce = record.trim()
         if nonce != "" and not held.contains_key(nonce) and _scva1_live_stale(root, nonce):
-            file_delete("{live_dir}/{nonce}")
+            # Re-read just before deleting: a refresh may have landed meanwhile.
+            if _scva1_live_stale(root, nonce):
+                file_delete("{live_dir}/{nonce}")
 
 # Release pins strictly below the newest COMPLETED generation (marker present).
 # A pin of a new-style run (`scv-gc:` owner) is released only when its own

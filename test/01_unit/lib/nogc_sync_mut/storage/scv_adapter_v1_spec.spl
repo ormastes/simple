@@ -17,6 +17,8 @@ use std.nogc_sync_mut.io_runtime.{file_write, file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
+use std.nogc_sync_mut.io_runtime.{file_read}
 
 fn _hex(b: [u8]) -> text:
     var s = ""
@@ -279,12 +281,16 @@ fn _unmarked_gen0_then_gen1(repo: text, tag: text) -> [text]:
     expect(scv_adapter_v1_pin_write(repo, b + "\n", owner_b).generation.value).to_equal(1)
     [owner_a, owner_b, root + "/run-live/" + owner_a.substring(7, owner_a.byte_len())]
 
+# 25 h ago in unix ms (past the 24 h bound, above the plausibility floor).
+fn _old_ms() -> text:
+    "{time_sample_unix_micros_or_failure() / 1000 - 90000000}"
+
 describe "scv_adapter_v1 unmarked pin liveness":
     it "reclaims an unmarked pin whose owner's liveness record is stale":
         val repo = _repo("live-stale")
         val s = _unmarked_gen0_then_gen1(repo, "s")
         val root = scv_adapter_v1_store_root(repo)
-        expect(file_write(s[2], "1")).to_equal(true)
+        expect(file_write(s[2], _old_ms())).to_equal(true)
         expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
         expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(false)
         expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(true)
@@ -312,7 +318,70 @@ describe "scv_adapter_v1 unmarked pin liveness":
         expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
         expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
         # Stale record but the pin's owner IS the calling run: kept.
-        expect(file_write(s[2], "1")).to_equal(true)
+        expect(file_write(s[2], _old_ms())).to_equal(true)
         expect(scv_adapter_v1_pin_release_older(repo, s[0])).to_equal("")
         expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "keeps an unmarked pin whose owner's record is dated in the future":
+        val repo = _repo("live-future")
+        val s = _unmarked_gen0_then_gen1(repo, "fu")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], "99999999999999999")).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(file_exists(s[2])).to_equal(true)
+        _cleanup(repo)
+
+    it "treats a record below the plausibility floor (torn write) as unknown":
+        val repo = _repo("live-torn")
+        val s = _unmarked_gen0_then_gen1(repo, "to")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], "17")).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        _cleanup(repo)
+
+    it "prunes a stale record no pin refers to and keeps the fresh one":
+        val repo = _repo("live-prune")
+        val s = _unmarked_gen0_then_gen1(repo, "pr")
+        val root = scv_adapter_v1_store_root(repo)
+        val fresh = root + "/run-live/" + s[1].substring(7, s[1].byte_len())
+        expect(file_write(s[2], _old_ms())).to_equal(true)
+        expect(scv_adapter_v1_pin_release_older(repo, s[1])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(false)
+        expect(file_exists(s[2])).to_equal(false)
+        expect(file_exists(fresh)).to_equal(true)
+        _cleanup(repo)
+
+    it "keeps a stale record that a kept pin still refers to":
+        val repo = _repo("live-held")
+        val s = _unmarked_gen0_then_gen1(repo, "he")
+        val root = scv_adapter_v1_store_root(repo)
+        expect(file_write(s[2], _old_ms())).to_equal(true)
+        # The calling run owns the old pin, so it is kept and its record survives.
+        expect(scv_adapter_v1_pin_release_older(repo, s[0])).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(file_exists(s[2])).to_equal(true)
+        _cleanup(repo)
+
+    it "pin_write refreshes the owner's record":
+        val repo = _repo("live-refresh")
+        val a = _put_chunk(repo, "chunk a rf".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        val owner = scv_adapter_v1_run_owner(repo)
+        val rec = root + "/run-live/" + owner.substring(7, owner.byte_len())
+        expect(file_write(rec, _old_ms())).to_equal(true)
+        expect(scv_adapter_v1_pin_write(repo, a + "\n", owner).status).to_equal("ok")
+        val ms = file_read(rec).trim().to_i64() ?? 0
+        expect(ms > time_sample_unix_micros_or_failure() / 1000 - 600000).to_equal(true)
+        _cleanup(repo)
+
+    it "rejects a path-unsafe nonce (no record is written)":
+        val repo = _repo("live-nonce")
+        val a = _put_chunk(repo, "chunk a nn".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        expect(scv_adapter_v1_pin_write(repo, a + "\n", "scv-gc:bad:ads").status).to_equal("ok")
+        expect(file_exists(root + "/run-live/bad:ads")).to_equal(false)
+        expect(file_exists(root + "/run-live/bad")).to_equal(false)
         _cleanup(repo)
