@@ -2319,7 +2319,7 @@ extern "C" fn restore_terminal_at_exit() {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
+pub extern "C" fn rt_terminal_enable_raw_mode() -> bool {
     #[cfg(unix)]
     {
         use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
@@ -2327,12 +2327,12 @@ pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
         let fd = unsafe { BorrowedFd::borrow_raw(0) };
         let orig = match tcgetattr(fd) {
             Ok(t) => t,
-            Err(_) => return RuntimeValue::from_bool(false),
+            Err(_) => return false,
         };
         let mut raw = orig.clone();
         cfmakeraw(&mut raw);
         if tcsetattr(fd, SetArg::TCSANOW, &raw).is_err() {
-            return RuntimeValue::from_bool(false);
+            return false;
         }
         let slot = SAVED_TERMIOS.get_or_init(|| std::sync::Mutex::new(None));
         if let Ok(mut guard) = slot.lock() {
@@ -2342,28 +2342,28 @@ pub extern "C" fn rt_terminal_enable_raw_mode() -> RuntimeValue {
         INSTALL_EXIT_RESTORE.call_once(|| unsafe {
             libc::atexit(restore_terminal_at_exit);
         });
-        RuntimeValue::from_bool(true)
+        true
     }
     #[cfg(not(unix))]
     {
-        RuntimeValue::from_bool(true)
+        true
     }
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_is_tty() -> RuntimeValue {
+pub extern "C" fn rt_terminal_is_tty() -> bool {
     use std::io::IsTerminal;
-    RuntimeValue::from_bool(std::io::stdin().is_terminal())
+    std::io::stdin().is_terminal()
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_stdout_is_tty() -> RuntimeValue {
+pub extern "C" fn rt_terminal_stdout_is_tty() -> bool {
     use std::io::IsTerminal;
-    RuntimeValue::from_bool(std::io::stdout().is_terminal())
+    std::io::stdout().is_terminal()
 }
 
 #[no_mangle]
-pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
+pub extern "C" fn rt_terminal_disable_raw_mode() -> bool {
     #[cfg(unix)]
     {
         use nix::sys::termios::{tcsetattr, SetArg};
@@ -2375,13 +2375,13 @@ pub extern "C" fn rt_terminal_disable_raw_mode() -> RuntimeValue {
             Err(_) => None,
         };
         match saved {
-            Some(orig) => RuntimeValue::from_bool(tcsetattr(fd, SetArg::TCSANOW, &orig).is_ok()),
-            None => RuntimeValue::from_bool(true),
+            Some(orig) => tcsetattr(fd, SetArg::TCSANOW, &orig).is_ok(),
+            None => true,
         }
     }
     #[cfg(not(unix))]
     {
-        RuntimeValue::from_bool(true)
+        true
     }
 }
 
