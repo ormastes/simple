@@ -81,9 +81,21 @@ sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
 
 - `--run-specs` provisions first when there is no saved overlay. It boots a
   throwaway `run.qcow2` over `build/linux-orch-guest/provisioned.qcow2`, runs the
-  four specs as root and writes `build/linux-orch-guest/last-run.txt`. Then it
-  shuts the VM down. It exits 1 on a spec FAIL and 2 on a missing or
-  inconclusive verdict. BLOCKED is reported as its own status and exits 0.
+  five specs as root and writes `build/linux-orch-guest/last-run.txt`. Then it
+  shuts the VM down. It exits 1 on a spec FAIL and 2 on a wrapper error, a
+  timeout, or a missing or inconclusive verdict. BLOCKED is reported as its
+  own status and exits 0.
+- The fifth spec is `test/03_system/app/container/feature/podman_shared_api_live_spec.spl`.
+  `--run-specs` follows its header order:
+  1. installs `test/fixtures/container/podman_live_spec.env` as
+     `/etc/simple/podman-live-spec.env`;
+  2. pulls `docker.io/library/busybox:1.36`, so the image has a registry
+     RepoDigest;
+  3. runs `podman_live_launch_template_gen.spl` with the binary, using the
+     profile's `runRoot`, and requires `TEMPLATE OK`;
+  4. runs the spec.
+
+  Its workspace and TTY cases are a filed gap and are expected to FAIL.
 - `--provision` provides the following:
   - podman 4.9.3 with `busybox:1.36` pre-pulled.
   - cgroup v2, and the static account `simple-host` (950:950) with subuid and
@@ -91,6 +103,7 @@ sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
   - podman, `simple-podman`, the socket units and `user@950.service`, all masked.
   - `/etc/systemd/system/simple-orchestrator-host.service` with `Delegate=yes`.
     It is not enabled. `ExecStart` runs `$SIMPLE_HOST_EXEC`.
+  - `/etc/simple/podman-live-spec.env`, installed from the shipped fixture.
   - `/etc/simple/container`, `/var/lib/simple/container`, and the protected key
     and credential stores under `/srv/simple-fixture`, with ed25519 keys
     generated in the guest.
@@ -100,8 +113,12 @@ sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
     `SIMPLE_CARET_SSH_ACCEPTANCE_*` variables.
 - Still not provided, because each item needs the self-hosted binary and its
   canonical encoders:
-  - Decoder-valid profiles: the three `/etc/simple/container/*.sdn` files are
-    key-correct skeletons, with digest fields `AUTHOR_WITH_SIMPLE`.
+  - Decoder-valid profiles. The three `/etc/simple/container/*.sdn` files use
+    the decoder key sets and the real machine-id, UIDs and podman sha256. The
+    digest fields are `AUTHOR_WITH_SIMPLE`, and the kind, mode, model and
+    cgroup values are unvalidated guesses.
+  - A validated key format: the ed25519 PEM keys were not checked against
+    what `host-linux-enrollment-issue` expects.
   - `binding.sdn` and its five pinned inputs.
   - `authority-policy.sdn` and the dispatch root.
   - The signed V6 attach/invoke/detach requests.

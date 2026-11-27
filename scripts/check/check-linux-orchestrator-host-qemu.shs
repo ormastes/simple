@@ -31,13 +31,15 @@ set -eu
 #   QEMU_EFI_CODE / QEMU_EFI_VARS  (default ~/.local/share/qemu/edk2-aarch64-code.fd + edk2-arm-vars.fd)
 #   ORCH_GUEST_DIR=$ROOT/build/linux-orch-guest
 #   ORCH_UBUNTU_RELEASE=24.04  ORCH_IMAGE_URL / ORCH_SHA256SUMS_URL override
-#   ORCH_HOST_EXEC   ExecStart target written into the Host unit drop-in (see below)
+#   ORCH_SRC_REV=HEAD          git rev whose source subset --run-specs ships to the guest
+#   ORCH_SPEC_TIMEOUT=3600     per-spec wall timeout in the guest (124 => ERROR)
 #
 # Known limit, stated rather than hidden: the provision-startup preflight
 # requires the installed Host unit's MainPID to be the spec process itself.
 # --run-specs runs `simple test` over SSH as root, so that case needs the
 # supervised AOT route (doc/07_guide/infra/testing/native_test_binary_workflow.md):
-# set ORCH_HOST_EXEC to the staged spec executable and start the unit.
+# put `Environment=SIMPLE_HOST_EXEC=<staged spec exe> --simple-native-evidence=<dir>`
+# in a drop-in for simple-orchestrator-host.service and start the unit.
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -70,7 +72,10 @@ MARKER=/var/lib/simple-orch-guest/provisioned.v1
 GUEST_ENV=/etc/simple/orchestrator-host.env
 
 say() { printf 'linux-orch-guest: %s\n' "$*"; }
-die() { printf 'linux-orch-guest: FAIL — %s\n' "$*" >&2; exit 1; }
+die() {
+    [ -z "${RUN_ACTIVE:-}" ] || printf 'ERROR wrapper %s\n' "$*" >> "$RUN_OUT"
+    printf 'linux-orch-guest: FAIL — %s\n' "$*" >&2; exit 2
+}
 need() { command -v "$1" >/dev/null 2>&1 || die "missing host tool: $1"; }
 
 ssh_vm() {
@@ -259,7 +264,7 @@ providers: [{backend: "linux-podman", identityDigest: "${PODMAN_SHA}", policyByt
 localPrincipals: ["${SVC}"]
 EOF
 cat > /etc/simple/container/fresh-epoch-profile.sdn <<EOF
-kind: "linux-fresh-epoch-profile"
+kind: "linux-fresh-provider-epoch"
 version: 1
 epochId: "fixture-epoch-1"
 machinePolicyDigest: "AUTHOR_WITH_SIMPLE"
@@ -303,8 +308,8 @@ supervisorUnit: "${UNIT}"
 providerUnit: "simple-podman.service"
 activationUnits: ["simple-podman.socket"]
 providerPolicy: "AUTHOR_WITH_SIMPLE"
-closedActivationModel: "masked"
-closedProviderModel: "masked"
+closedActivationModel: "dedicated-uid-system-units-no-login-user-manager-cron-v1"
+closedProviderModel: "single-rootless-uid-all-stores-pinned-v1"
 EOF
 chown root:root /etc/simple/container/*.sdn; chmod 0644 /etc/simple/container/*.sdn
 
@@ -378,93 +383,155 @@ echo "masked: podman.socket=$(systemctl is-enabled podman.socket 2>&1) user@950=
 echo "== stores"; stat -c '%n %U:%G %a' /srv/simple-fixture/key-store /srv/simple-fixture/key-store/issuer.ed25519.pem /srv/simple-fixture/output-store/journal
 echo "== podman"; podman --version; podman run --rm docker.io/library/busybox:1.36 true && echo "podman run --rm busybox:1.36 true: rc=0"
 echo "== env file $(stat -c '%U:%G %a' /etc/simple/orchestrator-host.env)"; cat /etc/simple/orchestrator-host.env
+echo "== podman-live env"; cat /etc/simple/podman-live-spec.env
+echo "template: $(ls -l /etc/simple/podman-live-launch-template.sdn 2>&1)"
 GUEST
+}
+
+# podman_shared_api_live_spec prerequisites, steps 1-2 of its header (step 3,
+# the launch-template generator, needs the self-hosted binary and runs in
+# --run-specs). Idempotent; the env fixture arrives on stdin.
+guest_podman_live_script() {
+    cat <<'GUEST'
+set -eu
+podman pull -q docker.io/library/busybox:1.36 >/dev/null
+DIGEST=$(podman image inspect --format '{{index .RepoDigests 0}}' docker.io/library/busybox:1.36)
+case "$DIGEST" in docker.io/library/busybox@sha256:*) ;; *) echo "busybox:1.36 has no registry RepoDigest: $DIGEST"; exit 1;; esac
+echo "podman-live: busybox:1.36 RepoDigest=${DIGEST}"
+GUEST
+}
+
+install_podman_live_env() {
+    envf="${ROOT_DIR}/test/fixtures/container/podman_live_spec.env"
+    [ -f "$envf" ] || die "missing $envf"
+    ssh_vm 'sudo sh -c "cat > /etc/simple/podman-live-spec.env && chmod 0644 /etc/simple/podman-live-spec.env"' < "$envf" \
+        || die "podman-live env install failed"
 }
 
 do_provision() {
     vm_running || { do_image; do_start "$PROVISIONED"; }
     guest_provision_script | ssh_vm 'sudo sh -s' || die "guest provisioning failed"
+    install_podman_live_env
+    guest_podman_live_script | ssh_vm 'sudo sh -s' || die "podman-live provisioning failed"
+    do_stop
     date -u +%Y-%m-%dT%H:%M:%SZ > "${VM_DIR}/provisioned.ok"
     printf 'PASS — linux-orch-guest provisioned (%s)\n' "$PROVISIONED"
 }
 
 do_prove() {
-    vm_running || do_start "$PROVISIONED"
+    started=0
+    vm_running || { do_start "$PROVISIONED"; started=1; }
     guest_prove_script | ssh_vm 'sudo sh -s'
+    [ "$started" -eq 0 ] || do_stop
 }
 
 SPECS="test/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.spl
+test/03_system/app/container/feature/podman_shared_api_live_spec.spl
 test/03_system/app/orchestrator/feature/linux_agent_attachment_v6_spec.spl
 test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl
 test/03_system/tools/linux_service_native_identity_v3_spec.spl"
 
-# Classify one spec log: PASS | FAIL | BLOCKED | ERROR (no verdict line, dropped, inconclusive).
+# Classify one spec log: PASS | FAIL | BLOCKED | ERROR. `pending("BLOCKED: ...")`
+# prints `it BLOCKED: ... ... pending`; a missing verdict line, a dropped or
+# inconclusive file, a timeout (rc=124) or zero passes is ERROR.
 classify_spec_log() {
     awk '
-        /SPEC FILE VERDICT:/ { seen = 1; line = $0
+        /SPEC FILE VERDICT:/ { seen = 1; delete v
             for (i = 1; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] } }
         /BLOCKED:/ { blocked = 1 }
+        /^rc=124$/ { timedout = 1 }
         END {
-            if (!seen) { print "ERROR"; exit }
+            if (timedout) { print "ERROR"; exit }
+            if (!seen) { print (blocked ? "BLOCKED" : "ERROR"); exit }
             if (v["failed"] + 0 > 0) print "FAIL"
-            else if (blocked) print "BLOCKED"
+            else if (blocked || v["blocked"] + 0 > 0) print "BLOCKED"
             else if (v["dropped"] + 0 > 0 || v["inconclusive"] + 0 > 0 || v["passed"] + 0 == 0) print "ERROR"
             else print "PASS"
         }'
 }
 
+RUN_OUT="${VM_DIR}/last-run.txt"
+run_error() { die "$*"; }
+
 do_run_specs() {
     bin="${1:-}"
-    [ -n "$bin" ] && [ -x "$bin" ] || die "--run-specs needs an executable self-hosted simple binary"
-    vm_running && die "a guest is already running (pid $(cat "$PIDFILE")); --stop it first"
-    # Unattended: provision first if no saved provisioned overlay exists.
+    mkdir -p "$VM_DIR"
+    printf '# linux-orch-guest --run-specs %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RUN_OUT"
+    RUN_ACTIVE=1
+    [ -n "$bin" ] && [ -x "$bin" ] || run_error "--run-specs needs an executable self-hosted simple binary"
+    rev="${ORCH_SRC_REV:-HEAD}"
+    src_sha=$(git -C "$ROOT_DIR" rev-parse --verify "${rev}^{commit}") || run_error "bad ORCH_SRC_REV $rev"
+    printf '# bin=%s sha256=%s src=%s\n' "$bin" "$(sha256sum "$bin" | awk '{print $1}')" "$src_sha" >> "$RUN_OUT"
+    trap 'do_stop >/dev/null 2>&1 || true' EXIT
+    trap 'exit 130' INT TERM HUP
+    # Unattended: stop a leftover guest, provision first if no saved overlay exists.
+    vm_running && do_stop
     if [ ! -f "$PROVISIONED" ] || [ ! -f "${VM_DIR}/provisioned.ok" ]; then
-        do_image; do_start "$PROVISIONED"
-        guest_provision_script | ssh_vm 'sudo sh -s' || { do_stop; die "guest provisioning failed"; }
-        do_stop
-        date -u +%Y-%m-%dT%H:%M:%SZ > "${VM_DIR}/provisioned.ok"
+        do_provision || run_error "provisioning failed"
     fi
     # Fresh throwaway overlay over the provisioned one: the one-use credential
     # and fresh stores never touch the reusable base.
     rm -f "$RUN_OVERLAY"
-    qemu-img create -q -f qcow2 -F qcow2 -b "$PROVISIONED" "$RUN_OVERLAY"
-    trap 'do_stop >/dev/null 2>&1 || true' EXIT
+    qemu-img create -q -f qcow2 -F qcow2 -b "$PROVISIONED" "$RUN_OVERLAY" || run_error "run overlay create failed"
     do_start "$RUN_OVERLAY"
-    ssh_vm "sudo test -f $MARKER" || die "run overlay is not provisioned"
-    ssh_vm 'sudo install -d -m 0755 /opt/simple/bin /opt/simple/src && sudo chown -R "$(id -un)" /opt/simple/src'
-    ssh_vm 'cat > /tmp/simple.bin' < "$bin" || die "binary transfer failed"
-    ssh_vm 'sudo install -o root -g root -m 0755 /tmp/simple.bin /opt/simple/bin/simple && rm -f /tmp/simple.bin'
-    git -C "$ROOT_DIR" archive --format=tar HEAD -- src/lib src/app src/compiler src/compositions test/fixtures \
-        test/03_system/app/orchestrator test/03_system/tools config VERSION \
-        | ssh_vm 'tar -xf - -C /opt/simple/src' || die "source subset transfer failed"
+    ssh_vm "sudo test -f $MARKER" || run_error "run overlay is not provisioned"
+    # Repo layout in the guest: /opt/simple/src/bin/simple next to src/ and test/.
+    ssh_vm 'sudo rm -rf /opt/simple/src && sudo install -d -o "$(id -un)" -m 0755 /opt/simple/src /opt/simple/src/bin' \
+        || run_error "guest source dir setup failed"
+    ssh_vm 'cat > /opt/simple/src/bin/simple && chmod 0755 /opt/simple/src/bin/simple' < "$bin" || run_error "binary transfer failed"
+    paths=""
+    for p in src/lib src/app src/compiler src/compositions test/fixtures test/03_system/app/orchestrator \
+             test/03_system/app/container test/03_system/tools config VERSION; do
+        git -C "$ROOT_DIR" cat-file -e "${src_sha}:$p" 2>/dev/null && paths="$paths $p"
+    done
+    # shellcheck disable=SC2086
+    git -C "$ROOT_DIR" archive --format=tar "$src_sha" -- $paths \
+        | ssh_vm 'tar -xf - -C /opt/simple/src' || run_error "source subset transfer failed"
     ssh_vm 'sudo chown -R root:root /opt/simple/src'
-    out="${VM_DIR}/last-run.txt"; logs="${VM_DIR}/last-run-logs"; rm -rf "$logs"; mkdir -p "$logs"
-    {
-        printf '# linux-orch-guest --run-specs %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf '# bin=%s sha256=%s src=%s\n' "$bin" "$(sha256sum "$bin" | awk '{print $1}')" "$(git -C "$ROOT_DIR" rev-parse HEAD)"
-    } > "$out"
+    ldd_missing=$(ssh_vm 'ldd /opt/simple/src/bin/simple 2>&1 | grep "not found" || true')
+    [ -z "$ldd_missing" ] || run_error "binary has missing shared libraries in guest: $ldd_missing"
+    ssh_vm 'cd /opt/simple/src && sudo timeout 120 bin/simple --version' >> "$RUN_OUT" 2>&1 \
+        || run_error "binary --version failed in guest"
+    # Podman-live spec, header steps 1-3 on the fresh run overlay: env file from
+    # the shipped fixture, registry pull, then the template generator with the
+    # installed fresh-epoch profile's runRoot. It must print `TEMPLATE OK <path>`.
+    install_podman_live_env
+    guest_podman_live_script | ssh_vm 'sudo sh -s' >> "$RUN_OUT" 2>&1 || run_error "podman-live pull failed"
+    gen=test/fixtures/container/podman_live_launch_template_gen.spl
+    if git -C "$ROOT_DIR" cat-file -e "${src_sha}:$gen" 2>/dev/null; then
+        tpl_out=$(ssh_vm "sudo sh -c 'RR=\$(sed -n \"s/^runRoot: *\\\"\\(.*\\)\\\"\$/\\1/p\" /etc/simple/container/fresh-epoch-profile.sdn); \
+            cd /opt/simple/src && SIMPLE_PODMAN_LIVE_RUN_ROOT=\$RR timeout 600 bin/simple run $gen 2>&1'" || true)
+        printf '%s\n' "$tpl_out" | sed 's/^/# template-gen: /' >> "$RUN_OUT"
+        printf '%s\n' "$tpl_out" | grep -q '^TEMPLATE OK ' || printf '# template-gen: no TEMPLATE OK line; podman live spec will report BLOCKED\n' >> "$RUN_OUT"
+    fi
+    printf '# template: %s\n' "$(ssh_vm 'ls -l /etc/simple/podman-live-launch-template.sdn 2>&1')" >> "$RUN_OUT"
     # Export a path variable only when its fixture content exists (file present
     # or directory non-empty), so a spec whose signed fixture is not yet
     # authored reports BLOCKED (pending) instead of a misleading FAIL.
     ssh_vm "sudo sh -c 'while IFS== read -r k v; do case \"\$v\" in /*) \
         [ -f \"\$v\" ] || { [ -d \"\$v\" ] && [ -n \"\$(ls -A \"\$v\")\" ]; } || { echo \"# unset \$k (no fixture content)\"; continue; };; esac; \
-        echo \"\$k=\$v\"; done < $GUEST_ENV > $GUEST_ENV.run'"
-    ssh_vm "sudo cat $GUEST_ENV.run" | sed 's/^/# env: /' >> "$out"
+        echo \"\$k=\$v\"; done < $GUEST_ENV > $GUEST_ENV.run'" \
+        || run_error "guest env assembly failed"
+    ssh_vm "sudo cat $GUEST_ENV.run" | sed 's/^/# env: /' >> "$RUN_OUT"
+    logs="${VM_DIR}/last-run-logs"; rm -rf "$logs"; mkdir -p "$logs"
     nfail=0; nerr=0; nblock=0; npass=0
     for spec in $SPECS; do
         name=$(basename "$spec" .spl); glog="/var/log/simple-spec-${name}.log"
+        if ! git -C "$ROOT_DIR" cat-file -e "${src_sha}:$spec" 2>/dev/null; then
+            printf 'ERROR %s NOT IN SOURCE %s\n' "$spec" "$src_sha" | tee -a "$RUN_OUT"; nerr=$((nerr+1)); continue
+        fi
         ssh_vm "sudo sh -c 'set -a; . $GUEST_ENV.run; set +a; cd /opt/simple/src && \
-            /opt/simple/bin/simple test $spec --verbose > $glog 2>&1; echo rc=\$? >> $glog'" || true
+            timeout ${ORCH_SPEC_TIMEOUT:-3600} bin/simple test $spec --verbose > $glog 2>&1; echo rc=\$? >> $glog'" || true
         ssh_vm "sudo cat $glog" > "${logs}/${name}.log" 2>/dev/null || true
         status=$(classify_spec_log < "${logs}/${name}.log")
         verdict=$(grep -h 'SPEC FILE VERDICT' "${logs}/${name}.log" | tail -1 || true)
         case "$status" in PASS) npass=$((npass+1));; FAIL) nfail=$((nfail+1));; BLOCKED) nblock=$((nblock+1));; *) nerr=$((nerr+1));; esac
-        printf '%s %s %s\n' "$status" "$spec" "${verdict:-NO SPEC FILE VERDICT LINE ($(tail -1 "${logs}/${name}.log"))}" | tee -a "$out"
+        printf '%s %s %s\n' "$status" "$spec" "${verdict:-NO SPEC FILE VERDICT LINE ($(tail -1 "${logs}/${name}.log"))}" | tee -a "$RUN_OUT"
     done
     summary="pass=$npass fail=$nfail blocked=$nblock error=$nerr"
-    printf 'SUMMARY %s\n' "$summary" | tee -a "$out"
-    do_stop; trap - EXIT
-    say "verdicts in $out; full logs in $logs"
+    printf 'SUMMARY %s\n' "$summary" | tee -a "$RUN_OUT"
+    do_stop; trap - EXIT INT TERM HUP
+    say "verdicts in $RUN_OUT; full logs in $logs"
     [ "$nfail" -eq 0 ] || { printf 'FAIL — %s\n' "$summary"; exit 1; }
     [ "$nerr" -eq 0 ] || { printf 'ERROR — %s\n' "$summary"; exit 2; }
     printf 'PASS — %s (BLOCKED specs are not failures)\n' "$summary"
