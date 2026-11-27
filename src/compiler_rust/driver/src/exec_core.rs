@@ -2747,6 +2747,11 @@ mod jit_top_level_statement_tests {
     }
 
     #[test]
+    fn interpolated_top_level_string_is_counted() {
+        assert_eq!(skipped("fn f() -> i64:\n    1\n\"doc {f()}\"\nfn main():\n    f()\n"), 1);
+    }
+
+    #[test]
     fn bindings_and_bare_main_call_stay_on_jit() {
         let src = "val greeting = \"hi\"\nfn main():\n    print greeting\nmain()\n";
         assert_eq!(skipped(src), 0);
