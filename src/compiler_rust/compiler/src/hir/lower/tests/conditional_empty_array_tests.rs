@@ -265,3 +265,26 @@ fn if_join_weak_empty_dict_match_arm_does_not_beat_concrete_sibling_dict() {
     assert_eq!(key, TypeId::STRING);
     assert!(matches!(module.types.get(value), Some(HirType::Struct { name, .. }) if name == "Tag"));
 }
+
+#[test]
+fn weak_empty_rule_ignores_ill_kinded_and_explicit_repeat_siblings() {
+    // `[]` vs a Dict sibling is ill-kinded: the join must keep the `[]` side
+    // (seed m behaviour) rather than adopt the Dict type.
+    let k = "enum K:\n    A\n    B\n";
+    let source = format!("{k}fn k3(d: Dict<text, i64>, kk: K) -> i64:\n    val r = match kk:\n        case K.A: []\n        case _: d\n    0\n");
+    let module = parse_and_lower(&source).unwrap();
+    assert!(matches!(local_ty(&module, "k3", "r"), Some(HirType::Array { .. })), "{:?}", local_ty(&module, "k3", "r"));
+
+    // `[0; 0]` is an explicit typed repeat (lowers to an empty HIR array): it
+    // keeps its own [i64] type in match arms, if/else and indented do-blocks.
+    for body in [
+        "    var r = match kk:\n        case K.A: [0; 0]\n        case _: xs\n",
+        "    var r = if c:\n        [0; 0]\n    else:\n        xs\n",
+        "    var r = if c: [0; 0] else: xs\n",
+    ] {
+        let source = format!("{k}fn rr(xs: [f64], kk: K, c: bool) -> i64:\n{body}    0\n");
+        let module = parse_and_lower(&source).unwrap();
+        let Some(HirType::Array { element, .. }) = local_ty(&module, "rr", "r") else { panic!("r must be an array for {body}") };
+        assert_eq!(element, TypeId::I64, "{body}");
+    }
+}

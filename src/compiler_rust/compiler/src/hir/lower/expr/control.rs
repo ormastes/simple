@@ -132,6 +132,39 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
     tail_if_type(stmts).map(|(ty, _)| ty)
 }
 
+/// True when the tail value of `expr` (through do-blocks, nested if/match) is
+/// an explicit `[x; n]` repeat. That form carries real element evidence even
+/// when `n` is 0 (it lowers to an empty HIR array), so it is never "weak".
+fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrayRepeat { .. } => true,
+        Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            ast_expr_tail_is_array_repeat(then_branch)
+                || else_branch.as_deref().is_some_and(ast_expr_tail_is_array_repeat)
+        }
+        Expr::Match { arms, .. } => arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        _ => false,
+    }
+}
+
+fn ast_stmts_tail_is_array_repeat(stmts: &[ast::Node]) -> bool {
+    match stmts.last() {
+        Some(ast::Node::Expression(e)) => ast_expr_tail_is_array_repeat(e),
+        Some(ast::Node::Match(m)) => m.arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        Some(ast::Node::If(i)) => {
+            ast_stmts_tail_is_array_repeat(&i.then_block.statements)
+                || i.elif_branches.iter().any(|(_, _, b)| ast_stmts_tail_is_array_repeat(&b.statements))
+                || i.else_block.as_ref().is_some_and(|b| ast_stmts_tail_is_array_repeat(&b.statements))
+        }
+        _ => false,
+    }
+}
+
 fn expr_is_empty_array_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Array(items) => items.is_empty(),
@@ -335,7 +368,7 @@ impl Lowerer {
                 && hir_value_is_concrete(other)
                 && other.ty != TypeId::ANY
                 && self.same_collection_kind(then_hir.ty, other.ty)
-                && !matches!(then_branch, Expr::ArrayRepeat { .. })
+                && !ast_expr_tail_is_array_repeat(then_branch)
             {
                 ty = other.ty;
             }
@@ -819,7 +852,9 @@ impl Lowerer {
         let then_is_weak_vs_concrete = !then_is_bottom
             && hir_value_is_weak_empty(&then_branch)
             && hir_value_is_concrete(&else_branch)
-            && else_branch.ty != TypeId::ANY;
+            && else_branch.ty != TypeId::ANY
+            && self.same_collection_kind(then_ty, else_branch.ty)
+            && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
         let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
