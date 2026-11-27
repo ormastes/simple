@@ -96,3 +96,16 @@ this Windows lane cannot produce (pinned Rust seed only, and it rejects the
 `@representation_boundary` decorator tree-wide). No code change; status
 remains open.
 
+## Wave 5 Update (2026-11-27) — `fix-implemented-verification-pending`
+
+- **Wired callable driver provider loader into `src/app/cli/bootstrap_main.spl` (`w5-2-simpleos-kernel-boot`)**:
+  - Imported `BootstrapDriverProviderRouteV1`, `BootstrapDriverProviderOutcomeV1`, `bootstrap_driver_provider_route_v1`, `bootstrap_driver_provider_compile_v1` from `app.cli.bootstrap_driver_provider_client_v1` (backed by `os.smf.provider_loader`).
+  - Both positional native-build (`run_native_build_bootstrap` -> `run_native_build_bootstrap_leased`) and SMF compile (`run_compile_bootstrap`) now check `bootstrap_driver_provider_route_v1()` before creating `compiler_driver_create(options)`. When `provider_route.requested` is true (`SIMPLE_BOOTSTRAP_DRIVER_PROVIDER`), compilation dispatches through `bootstrap_driver_provider_compile_v1(provider_route, options)` and fails closed with `provider_outcome.exit_code` (`3`) on loader refusal without falling back to the statically linked driver.
+  - Default bootstrap builds keep the existing statically linked route until self-hosted bootstrap produces and verifies the live dynamically loaded `CompilerDriverV1` provider artifact.
+- **Host specs run post-edit (interpreter, 3-slot semaphore)**:
+  - `test/01_unit/app/cli/bootstrap_main_driver_provider_wiring_spec.spl` -> `2 examples, 0 failures`.
+  - `test/01_unit/app/cli/bootstrap_driver_provider_client_v1_spec.spl` -> `9 examples, 0 failures`.
+  - `test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl` -> `11 examples, 0 failures`.
+- **Verification pending**: `waiting-for: self-host bootstrap activation verification`.
+
+

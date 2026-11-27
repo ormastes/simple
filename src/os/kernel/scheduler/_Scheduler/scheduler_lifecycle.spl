@@ -2,7 +2,10 @@
 # Scheduler task lifecycle & dispatch — task creation/exit, block/unblock,
 # yield, schedule, timer tick, topology, and green-carrier scheduling methods.
 use os.kernel.scheduler.scheduler.*
-use os.kernel.scheduler.process_execution_observation.{scheduler_execution_observe_exit_v1}
+use os.kernel.scheduler.process_execution_observation.{
+    scheduler_execution_observe_exit_v1,
+    scheduler_execution_observe_reap_v1
+}
 # Preemptive Scheduler — Computation Dimension
 #
 # Priority-based preemptive scheduler with round-robin within same priority.
@@ -91,6 +94,9 @@ use os.kernel.scheduler.scheduler_exec.{
     sched_create_user_task_pid_impl,
     sched_create_user_task_from_bytes_pid_impl,
     sched_create_bootstrap_user_task_pid_impl,
+    sched_adopt_mapped_user_task_and_run_impl,
+    sched_prepare_reap_adopted_user_task_v1,
+    sched_reap_adopted_task_slot_v1,
     sched_clone_task_impl,
     sched_exec_image_impl
 }
@@ -138,6 +144,15 @@ impl Scheduler:
     static fn new_bootstrap() -> Scheduler:
         Scheduler.new_with_topology(scheduler_flat_topology(1u32))
 
+    static fn ensure_bootstrap_v1(sched: Scheduler) -> Scheduler:
+        var unready = false
+        unsafe:
+            if sched == nil or sched.tasks == nil:
+                unready = true
+        if unready or sched.tasks.len() == 0:
+            return Scheduler.new_bootstrap()
+        sched
+
     static fn new_with_topology(detected_topology: SchedulerTopology) -> Scheduler:
         sched_new_with_topology_impl(detected_topology)
 
@@ -173,6 +188,57 @@ impl Scheduler:
         if pid != 0:
             self._enqueue_ready_at_slot(TaskId(id: pid), 0)
         pid
+
+    @allow(primitive_api) # raw ELF entry/stack addresses for pre-mapped FS-exec ring-3 adoption
+    me adopt_mapped_user_task_and_run_v1(
+        name: text,
+        entry: u64,
+        user_stack_top: u64,
+        space: AddressSpace,
+        user_ctx: TaskContext,
+        caps: CapabilitySet
+    ) -> TaskId:
+        var tasks_nil = false
+        unsafe:
+            tasks_nil = (self.tasks == nil)
+        if tasks_nil or self.tasks.len() < MAX_TASKS:
+            return TaskId(id: 0u64)
+        val (pid, new_tasks, slot) = sched_adopt_mapped_user_task_and_run_impl(
+            self.tasks, self.current, name, entry, user_stack_top, space, user_ctx, caps)
+        if pid == 0u64 or slot < 0:
+            return TaskId(id: 0u64)
+        val id = TaskId(id: pid)
+        self.tasks = new_tasks
+        self.current = id
+        self.current_slot = slot
+        var cpus_ready = false
+        unsafe:
+            if self.current_by_cpu != nil and self.current_by_cpu.len() > 0:
+                cpus_ready = true
+        if cpus_ready:
+            self.current_by_cpu[0] = id
+        id
+
+    @allow(primitive_api) # matches exit_task_by_id i32 status code contract
+    me finish_adopted_user_task_v1(id: TaskId, prev_current: TaskId, exit_code: i32):
+        self.current = prev_current
+        val prev_slot = self._find_slot(prev_current)
+        self.current_slot = if prev_slot >= 0: prev_slot else: 0
+        var cpus_ready = false
+        unsafe:
+            if self.current_by_cpu != nil and self.current_by_cpu.len() > 0:
+                cpus_ready = true
+        if cpus_ready:
+            self.current_by_cpu[0] = prev_current
+        if id.id != 0u64:
+            self.exit_task_by_id(id, exit_code)
+            # Detach caller-owned space.phys_root before reaping so wait_for_collect
+            # frees the TCB slot without double-freeing space in destroy_user_address_space.
+            self.tasks = sched_prepare_reap_adopted_user_task_v1(self.tasks, id)
+            val collected = self.wait_for_collect(prev_current, id, false)
+            if collected.error != 0:
+                self.tasks = sched_reap_adopted_task_slot_v1(self.tasks, id)
+                _ = scheduler_execution_observe_reap_v1(id.id)
 
     me _enqueue_ready_at_slot(id: TaskId, slot: i32):
         if slot < 0:
