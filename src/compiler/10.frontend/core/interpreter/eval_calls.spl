@@ -26,12 +26,13 @@ use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_lookup_in, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller}
 use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of}
 use compiler.core.interpreter.eval_tables.{func_table_lookup, struct_table_lookup, func_yield_cache_get, func_yield_cache_set}
+use compiler.core.interpreter.eval_tables.{struct_resolve_for_caller, struct_resolve_module_member_for_caller, struct_member_decl, struct_decl_name_for}
 use compiler.core.interpreter.jit.{jit_is_compiled, jit_record_call, jit_try_execute_checked}
 use compiler.core.interpreter.module_loader_core.{try_force_any_deferred_for}
 use compiler.core.interpreter.resolve.{resolve_cached_local_count, resolve_is_fast_local, resolve_is_slot_shadowed}
 use compiler.core.interpreter.value.{val_get_func_decl, val_get_int, val_get_struct_fields, val_get_struct_name, val_get_struct_values}
 use compiler.core.interpreter.value.{val_is_function, val_is_int, val_is_struct, val_make_array, val_make_int}
-use compiler.core.interpreter.value.{val_make_nil, val_make_struct}
+use compiler.core.interpreter.value.{val_make_nil, val_make_struct, val_get_struct_decl, val_set_struct_decl}
 use compiler.core.interpreter.value.{val_is_array, val_get_array, val_array_copy, val_array_push, val_struct_set_field_idx}
 use compiler.core.interpreter.value_places.{InterpreterValuePlace, eval_prepare_value_place}
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
@@ -62,9 +63,9 @@ fn eval_call(eid: i64) -> i64:
             # struct-constructor path below.
             if arg_eids.len() == 1 and unit_constraint_find(name) >= 0:
                 return eval_unit_checked_construct(name, arg_eids[0])
-            val struct_decl = struct_table_lookup(name)
+            val struct_decl = struct_resolve_for_caller(eval_caller_file(), name)
             if struct_decl >= 0:
-                return eval_struct_constructor(name, struct_decl, arg_eids, arg_names)
+                return eval_struct_constructor(struct_decl_name_for(struct_decl, name), struct_decl, arg_eids, arg_names)
 
         # Check for builtin
         val builtin_result = eval_builtin_call(name, arg_eids)
@@ -102,9 +103,9 @@ fn eval_call(eid: i64) -> i64:
             # Maybe it's a struct constructor after forcing
             val first_ch2 = name[0]
             if first_ch2 >= "A" and first_ch2 <= "Z":
-                val struct_decl2 = struct_table_lookup(name)
+                val struct_decl2 = struct_resolve_for_caller(eval_caller_file(), name)
                 if struct_decl2 >= 0:
-                    return eval_struct_constructor(name, struct_decl2, arg_eids, arg_names)
+                    return eval_struct_constructor(struct_decl_name_for(struct_decl2, name), struct_decl2, arg_eids, arg_names)
 
         # Flat Option encoding for unit payloads only: with no Option enum in
         # scope, `Some(<unit>)` IS the unit value. Any other unresolved `Some`
@@ -145,12 +146,19 @@ fn eval_call(eid: i64) -> i64:
                         break
                 if is_variant:
                     return eval_enum_variant_call(type_name, member_name, arg_eids)
-            # Check static method: Type.method() → Type__method in func table
-            val static_fn_name = type_name + "__" + member_name
-            val static_decl = func_table_lookup(static_fn_name)
+            # Check static method: Type.method() → Type__method in func table,
+            # in the owner module of a shared or aliased class.
+            val path_struct = struct_resolve_for_caller(eval_caller_file(), type_name)
+            val static_decl = if path_struct >= 0:
+                struct_member_decl(path_struct, struct_decl_name_for(path_struct, type_name), member_name)
+            else:
+                func_table_lookup(type_name + "__" + member_name)
             if static_decl >= 0:
                 return eval_function_call(static_decl, arg_eids, arg_names)
             # Check struct constructor with module prefix: Module.Struct(args)
+            val ns_struct = struct_resolve_module_member_for_caller(eval_caller_file(), type_name, member_name)
+            if ns_struct >= 0:
+                return eval_struct_constructor(struct_decl_name_for(ns_struct, member_name), ns_struct, arg_eids, arg_names)
             val struct_decl2 = struct_table_lookup(member_name)
             if struct_decl2 >= 0:
                 return eval_struct_constructor(member_name, struct_decl2, arg_eids, arg_names)
@@ -377,8 +385,10 @@ fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
 # default to "not a value type" so their existing shared-reference behavior is
 # unchanged — only confirmed user `struct` decls get copied.
 fn interp_struct_is_value_type(vid: i64) -> bool:
-    val name = val_get_struct_name(vid)
-    val decl_id = struct_table_lookup(name)
+    # The instance's own declaration first: a shared bare name may be a
+    # value struct in one owner module and a class in another.
+    val own_decl = val_get_struct_decl(vid)
+    val decl_id = if own_decl >= 0: own_decl else: struct_table_lookup(val_get_struct_name(vid))
     if decl_id < 0:
         return false
     decl_get(decl_id).is_value_type
@@ -410,6 +420,7 @@ class InterpreterValueCopyContext:
         for value in values:
             placeholders.push(-1)
         val copied = val_make_struct(val_get_struct_name(vid), fields, placeholders)
+        val_set_struct_decl(copied, val_get_struct_decl(vid))
         self.copies[vid] = copied
         var index = 0
         while index < values.len():
