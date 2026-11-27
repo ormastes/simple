@@ -5,7 +5,8 @@
 - **inferred**: reproduction needs a Linux host with a GPU, RenderDoc, and/or Electron/Chrome Vulkan backing. This triage host is Windows with no such lane, and `bin/simple` here is the Rust seed (v1.0.0-rc.1), not the self-hosted binary these evidence gates are written against.
 - **inferred**: "does not run on Windows" is not evidence of a fix, so no closure is claimed. The gate remains blocked until re-run on the Linux evidence lane.
 
-Status: open
+Status: fix-implemented-verification-pending
+waiting-for: live GPU host + self-hosted runtime verification of check-production-gui-font-offload-evidence.shs
 Date: 2026-06-23
 Area: GUI/web renderer parity, Engine2D font offload
 
@@ -55,3 +56,21 @@ runtime/backend evidence and records the gate report.
 ## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
 
 Blocked on this host: check-production-gui-font-offload-evidence.shs refuses the Rust seed by identity (rust-seed-forbidden) and no self-hosted full-CLI binary is deployed; the pass also needs real accelerator glyph readback. Defect still in source at release/1.0.0 c8c3e7bc4f1, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: vector_font_offload.spl returns vector-font-gpu-glyph-return-missing.
+
+---
+
+## 2026-11-27 Fix Applied (Wave 5 Lane W5-4, `work/w5-4-scripts-caret-font-20261127`)
+
+- Replaced synthetic evidence scaffolding with fail-closed runtime font provenance & GPU glyph readback verification:
+  - `scripts/check/check-cuda-generated-2d-readback.shs`: added `cuDriverGetVersion(&driver_version)`, opaque `(uint64_t)(uintptr_t)` `ctx`/`font_module`/`font_fn` handles, post-launch `cuEventRecord(font_event, 0)` + `cuEventSynchronize(font_event)` fence handle (`cuevent-recorded-after-font-launch`), `font_readback_checksum`, `font_parity_status`, automatic font PTX selection when compiled & verified, duplicate/provenance checks, and negative selftest coverage.
+  - `scripts/check/check-production-gui-font-runtime-evidence.shs`: propagated and fail-closed validated `production_gui_font_runtime_font_{backend,driver,device_handle,module_or_queue_handle,kernel_or_pipeline_handle,fence_handle,readback_checksum,parity_status}` from real backend readback evidence.
+  - `scripts/check/check-production-gui-font-offload-evidence.shs`: removed synthetic `.spl` fixtures (`vector_pixels`, `bitmap_bits`, `, 7, 11`), invalidated stale `$BUILD_DIR/runtime/evidence.env` before auto execution, propagated `runtime-evidence-generator-failed` (`source=auto`, `producer_exit`), required non-CPU runtime handles + matching checksum/parity (`runtime-font-provenance-missing`), and fixed `/bin/true` probe handling in `is_rust_seed_simple()`.
+  - `src/lib/gc_async_mut/gpu/engine2d/`: added shared `FontRuntimeProvenance` + `engine2d_font_runtime_provenance_valid` (`backend_lane.spl`), `vector_font_runtime_provenance_valid` + `vector_font_glyph_pixels_readback_verify` (`vector_font_offload.spl`), `bitmap_font_runtime_provenance_valid` + `bitmap_glyph_raster_mask_readback_verify` (`bitmap_font_offload.spl`), and `CudaBackend.draw_font_batch_with_readback` (`backend_cuda.spl`).
+- Host verification:
+  - `sh test/01_unit/scripts/production_gui_font_offload_runtime_provenance_contract.shs`: PASS.
+  - `sh scripts/check/check-cuda-generated-2d-readback.shs --self-test`: PASS (`self_test_status=pass`, `self_test_reason=cuda-submit-readback-identity-checksum-font-gate`, `cuda_self_test=0`).
+  - `test/01_unit/lib/gpu/engine2d/font_offload_runtime_readback_spec.spl`: PASS (`4 passed, 0 failed`).
+  - `test/01_unit/lib/gpu/engine2d/vector_font_offload_spec.spl`: PASS (`8 passed, 0 failed`).
+  - `test/01_unit/lib/gpu/engine2d/bitmap_font_offload_spec.spl`: PASS (`7 passed, 0 failed`).
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/font_offload_preference_smoke_spec.spl`: PASS (`2 passed, 0 failed`).
+- Remaining verification (`waiting-for`): live Linux GPU + self-hosted runtime execution of `scripts/check/check-production-gui-font-offload-evidence.shs`.

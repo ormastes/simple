@@ -54,7 +54,7 @@
 # Raw FFI
 # ============================================================================
 
-use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_2d_optimization_module}
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget, emit_portable_2d_optimization_module, emit_portable_font_atlas_composite_kernel}
 use std.nogc_sync_mut.io.metal_sffi.{metal_sffi_compile_shader}
 
 extern fn rt_metal_is_available() -> i64
@@ -246,6 +246,51 @@ fn alloc_u32_param(value: i64) -> i64:
     if p != 0:
         rt_ptr_write_i32(p, 0, value)
     p
+
+fn font_straight_argb_pixel(mask: i64, d: i64, color: i64) -> i64:
+    val mask_a = (mask >> 24) & 255
+    val color_a = (color >> 24) & 255
+    val sa = (mask_a * color_a + 127) / 255
+    if sa == 0:
+        return d & 0xFFFFFFFF
+    val da = (d >> 24) & 255
+    val dst_weight = (da * (255 - sa)) / 255
+    val out_a = sa + dst_weight
+    val color_r = (color >> 16) & 255
+    val color_g = (color >> 8) & 255
+    val color_b = color & 255
+    val d_r = (d >> 16) & 255
+    val d_g = (d >> 8) & 255
+    val d_b = d & 255
+    val out_r = ((color_r * sa) + (d_r * dst_weight)) / out_a
+    val out_g = ((color_g * sa) + (d_g * dst_weight)) / out_a
+    val out_b = ((color_b * sa) + (d_b * dst_weight)) / out_a
+    ((out_a << 24) | (out_r << 16) | (out_g << 8) | out_b) & 0xFFFFFFFF
+
+fn alloc_font_params_52() -> i64:
+    val p = rt_alloc(52)
+    if p != 0:
+        rt_ptr_write_i32(p, 0, 4)
+        rt_ptr_write_i32(p, 4, 1)
+        rt_ptr_write_i32(p, 8, 4)
+        rt_ptr_write_i32(p, 12, 0)
+        rt_ptr_write_i32(p, 16, 0)
+        rt_ptr_write_i32(p, 20, 4)
+        rt_ptr_write_i32(p, 24, 1)
+        rt_ptr_write_i32(p, 28, 4)
+        rt_ptr_write_i32(p, 32, 1)
+        rt_ptr_write_i32(p, 36, 4)
+        rt_ptr_write_i32(p, 40, 0)
+        rt_ptr_write_i32(p, 44, 0)
+        rt_ptr_write_i32(p, 48, 0x80402010)
+    p
+
+fn read_host_u32_at(host: i64, idx: i64) -> i64:
+    val pair = rt_ptr_read_i64(host, (idx / 2) * 8)
+    if idx % 2 == 1:
+        (pair >> 32) & 0xFFFFFFFF
+    else:
+        pair & 0xFFFFFFFF
 
 # Legacy order-independent sum over a downloaded host buffer (telemetry only)
 fn host_checksum(host: i64, count: i64) -> i64:
@@ -574,6 +619,119 @@ fn main() -> i64:
     if p_ssrc_v != 0: rt_free(p_ssrc_v)
     if p_ssrc_c != 0: rt_free(p_ssrc_c)
 
+    # ---- Font Atlas Composite (straight-ARGB 4x1): Metal FontAtlasCompositeParams at buffer(2) ----
+    var font_status = "fail"
+    var font_reason = "font-dispatch-not-run"
+    var font_submit_ok = false
+    var font_readback_ok = false
+    var font_module_handle: i64 = 0
+    var font_kernel_handle: i64 = 0
+    var font_fence_handle: i64 = 0
+    var font_expected_checksum: i64 = 0
+    var font_actual_checksum: i64 = 0
+    var font_mismatch_count: i64 = 4
+    val font_color: i64 = 0x80402010
+    val font_atlas_0: i64 = 0x00000000
+    val font_atlas_1: i64 = 0x80FFFFFF
+    val font_atlas_2: i64 = 0xFFFFFFFF
+    val font_atlas_3: i64 = 0xFFFFFFFF
+    val font_init_0: i64 = 0xFF102030
+    val font_init_1: i64 = 0xFF102030
+    val font_init_2: i64 = 0xFF102030
+    val font_init_3: i64 = 0x00000000
+    val font_exp_0 = font_straight_argb_pixel(font_atlas_0, font_init_0, font_color)
+    val font_exp_1 = font_straight_argb_pixel(font_atlas_1, font_init_1, font_color)
+    val font_exp_2 = font_straight_argb_pixel(font_atlas_2, font_init_2, font_color)
+    val font_exp_3 = font_straight_argb_pixel(font_atlas_3, font_init_3, font_color)
+    font_expected_checksum = font_exp_0 + font_exp_1 + font_exp_2 + font_exp_3
+
+    val font_shader_desc = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Metal)
+    if font_shader_desc.source.trim() == "":
+        font_reason = "font-shader-source-empty"
+    else:
+        val font_shader = metal_sffi_compile_shader(dev, font_shader_desc.source)
+        if font_shader == 0:
+            font_reason = "font-msl-compile-failed"
+        else:
+            font_module_handle = font_shader
+            val pipe_font = rt_metal_create_compute_pipeline(dev, font_shader, "simple_font_atlas_composite_v1_u32")
+            if pipe_font == 0:
+                font_reason = "font-pipeline-create-failed"
+            else:
+                font_kernel_handle = pipe_font
+                val buf_font_atlas = rt_metal_alloc_buffer(dev, 16)
+                val buf_font_dst = rt_metal_alloc_buffer(dev, 16)
+                val p_font_params = alloc_font_params_52()
+                val host_font_in = rt_alloc(24)
+                val host_font_dst_in = rt_alloc(24)
+                val host_font_out = rt_alloc(24)
+                if (buf_font_atlas == 0 or buf_font_dst == 0 or p_font_params == 0 or host_font_in == 0 or host_font_dst_in == 0 or host_font_out == 0):
+                    font_reason = "font-buffer-alloc-failed"
+                else:
+                    rt_ptr_write_i32(host_font_in, 0, font_atlas_0)
+                    rt_ptr_write_i32(host_font_in, 4, font_atlas_1)
+                    rt_ptr_write_i32(host_font_in, 8, font_atlas_2)
+                    rt_ptr_write_i32(host_font_in, 12, font_atlas_3)
+                    rt_ptr_write_i32(host_font_dst_in, 0, font_init_0)
+                    rt_ptr_write_i32(host_font_dst_in, 4, font_init_1)
+                    rt_ptr_write_i32(host_font_dst_in, 8, font_init_2)
+                    rt_ptr_write_i32(host_font_dst_in, 12, font_init_3)
+                    val up_atlas = rt_metal_buffer_upload(buf_font_atlas, host_font_in, 16) != 0
+                    val up_dst = rt_metal_buffer_upload(buf_font_dst, host_font_dst_in, 16) != 0
+                    if not (up_atlas and up_dst):
+                        font_reason = "font-upload-failed"
+                    else:
+                        val font_cmd = rt_metal_create_command_buffer(queue)
+                        if font_cmd == 0:
+                            font_reason = "font-command-buffer-failed"
+                        else:
+                            val font_enc = rt_metal_create_compute_encoder(font_cmd)
+                            if font_enc == 0:
+                                font_reason = "font-encoder-failed"
+                            else:
+                                val font_bound = rt_metal_set_buffer(font_enc, buf_font_atlas, 0, 0) != 0 and rt_metal_set_buffer(font_enc, buf_font_dst, 0, 1) != 0 and rt_metal_set_bytes(font_enc, p_font_params, 52, 2) != 0
+                                val font_dispatched = font_bound and rt_metal_dispatch_compute(font_enc, pipe_font, 4, 1, 1, 4, 1, 1) != 0
+                                val font_ended = font_dispatched and rt_metal_end_compute_encoder(font_enc) != 0
+                                val font_committed = font_ended and rt_metal_commit_command_buffer(font_cmd) != 0
+                                if font_committed:
+                                    font_submit_ok = true
+                                val font_waited = font_committed and rt_metal_wait_completed(font_cmd) != 0
+                                if not font_waited:
+                                    font_reason = "font-wait-completed-failed"
+                                else:
+                                    font_fence_handle = font_cmd
+                                    val dl_font = rt_metal_buffer_download(host_font_out, buf_font_dst, 16) != 0
+                                    if not dl_font:
+                                        font_reason = "font-download-failed"
+                                    else:
+                                        font_readback_ok = true
+                                        val act_0 = read_host_u32_at(host_font_out, 0)
+                                        val act_1 = read_host_u32_at(host_font_out, 1)
+                                        val act_2 = read_host_u32_at(host_font_out, 2)
+                                        val act_3 = read_host_u32_at(host_font_out, 3)
+                                        font_actual_checksum = act_0 + act_1 + act_2 + act_3
+                                        var mm: i64 = 0
+                                        if act_0 != font_exp_0: mm = mm + 1
+                                        if act_1 != font_exp_1: mm = mm + 1
+                                        if act_2 != font_exp_2: mm = mm + 1
+                                        if act_3 != font_exp_3: mm = mm + 1
+                                        font_mismatch_count = mm
+                                        if mm == 0 and font_actual_checksum == font_expected_checksum and dev > 0 and font_module_handle > 0 and font_kernel_handle > 0 and font_fence_handle > 0:
+                                            font_status = "pass"
+                                            font_reason = "straight-argb-pixels-matched"
+                                        else:
+                                            font_reason = "font-pixel-or-handle-mismatch"
+                if buf_font_atlas != 0: rt_metal_free_buffer(buf_font_atlas)
+                if buf_font_dst != 0: rt_metal_free_buffer(buf_font_dst)
+                if p_font_params != 0: rt_free(p_font_params)
+                if host_font_in != 0: rt_free(host_font_in)
+                if host_font_dst_in != 0: rt_free(host_font_dst_in)
+                if host_font_out != 0: rt_free(host_font_out)
+                rt_metal_destroy_pipeline(pipe_font)
+            rt_metal_destroy_shader(font_shader)
+
+    val font_parity_status = if font_status == "pass": "pass" else: "fail"
+
     # ---- Cleanup ----
     rt_metal_free_buffer(buf_fill)
     rt_metal_free_buffer(buf_src)
@@ -631,9 +789,27 @@ fn main() -> i64:
     print("copy_expected={copy_exp}")
     print("alpha_expected={alpha_exp}")
     print("scroll_expected={scroll_exp}")
+    # Font Atlas Composite provenance and straight-ARGB readback
+    print("font_status={font_status}")
+    print("font_reason={font_reason}")
+    print("font_backend=metal")
+    print("font_driver=metal-sffi")
+    print("font_device_handle={dev}")
+    print("font_module_or_queue_handle={font_module_handle}")
+    print("font_kernel_or_pipeline_handle={font_kernel_handle}")
+    print("font_fence_handle={font_fence_handle}")
+    print("font_fence_handle_kind=mtl-command-buffer-wait-completed")
+    print("font_expected_checksum={font_expected_checksum}")
+    print("font_actual_checksum={font_actual_checksum}")
+    print("font_readback_checksum={font_actual_checksum}")
+    print("font_mismatch_count={font_mismatch_count}")
+    print("font_parity_status={font_parity_status}")
+    print("font_submit_attempted={font_submit_ok}")
+    print("font_readback_available={font_readback_ok}")
 
     val hashes_match = (fill_hash == fill_exp and copy_hash == copy_exp and alpha_hash == alpha_exp and scroll_hash == scroll_exp)
-    if readback_ok and hashes_match:
+    val font_ok = (font_status == "pass" and font_submit_ok and font_readback_ok and font_mismatch_count == 0 and font_actual_checksum == font_expected_checksum)
+    if readback_ok and hashes_match and font_ok:
         print("status=pass")
         return 0
 
@@ -642,8 +818,13 @@ fn main() -> i64:
         print("error=Metal operation or readback failed: {rt_metal_get_last_error()}")
         return 1
 
+    if not hashes_match:
+        print("status=fail")
+        print("error=hash mismatch: fill={fill_hash} vs {fill_exp}, copy={copy_hash} vs {copy_exp}, alpha={alpha_hash} vs {alpha_exp}, scroll={scroll_hash} vs {scroll_exp}")
+        return 1
+
     print("status=fail")
-    print("error=hash mismatch: fill={fill_hash} vs {fill_exp}, copy={copy_hash} vs {copy_exp}, alpha={alpha_hash} vs {alpha_exp}, scroll={scroll_hash} vs {scroll_exp}")
+    print("error=font atlas composite failed: {font_reason}")
     return 1
 
 describe "Metal generated 2D host/device readback":
