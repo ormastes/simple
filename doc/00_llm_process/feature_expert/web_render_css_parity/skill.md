@@ -5766,3 +5766,25 @@ pins the border-box form, the default-UA gap is unfiled.
 - Open: at 4x Chrome's textarea is 630 device px (157.5 CSS) with a 63 px line
   pitch and its auto-height wrapper grows to 634; Simple keeps 604 and a 60
   px pitch. Bug `textarea_4x_device_height_not_in_ancestor_2026-11-27`.
+## 2026-11-26 — checkable / UA-margin follow-up: appearance keywords, tile occluder, headings
+
+- **`appearance` keywords (Chrome 159, 1x).**
+  - Only `none`, `initial` and `unset` drop a checkbox's native control. The initial value is none; the UA sheet sets auto.
+  - `-webkit-appearance:checkbox`, `revert`, `textfield`, `radio` and an invalid value keep it native.
+  - `_appearance_keyword` in `core.spl` returns 1 for none, 0 for auto and -1 for invalid. An invalid value falls through to the next origin.
+- **Tile lane.** `_tile_box_op` no longer marks a checkable with an opaque author `bg` as a T3 occluder. The fill is never painted, so a red block under a 600 px radio was culled (2500 px).
+- **Draw IR.** `_html_draw_ir_author_box_zeroed` also empties `background-layers-raw`, matching the raster's dropped `paint_bg`.
+- **UA em margins.** `_ua_em_block_margin_ratio` covers p/pre/lists/blockquote/figure at 1em, and h1..h6 at .67/.83/1/1.33/1.67/2.33em of the element's own font-size. The result is floored to 1/64 px, which reproduces the old UA-size heading values exactly.
+  - Chrome, 20 px heading: 13.4 / 16.6 / 20 / 26.6 / 33.4 / 46.6 px.
+  - `revert`, `revert-layer` and an invalid value are not an authored margin (`_margin_value_authored`). A stylesheet `margin:0` is.
+- **Trap.** `unit` is reserved and cannot be a parameter name: `fn f(unit: text)` fails to parse with "expected identifier, found Eq".
+- **Heading font-size.** `tag_defaults` h1..h6 are now 2 / 1.5 / 1.17 / 1 / .83 / .67em of the inherited font. Chrome 159: under a 20 px parent the h1 is 40 px, and the margins start at 27 / 25 / 23 / 27 / 28 / 31 px (pinned by `heading_ua_margins_chrome159_spec` AC-5).
+- **Bug filed:** shard `doc/08_tracking/bug/db/unit_identifier_expression_statement_parse_error_2026-11-26.sdn` (write with `bug-db-shard.shs write <id> <merged>`; the seal needs `SIMPLE_BIN` exported).
+- **Pins:**
+  - `form_control_paint_chrome159_spec` AC-17..19.
+  - `heading_ua_margins_chrome159_spec` AC-4.
+  - `nested_list_container_ua_margin_spec` AC-13..17.
+- **Margin validity is a CSS number plus a known unit (2026-11-27).** `_margin_value_authored` once used a short unit list that rejected `0.0`, `-0`, `+0`, `.0` and dvh/svh/vb/cap/cqw, which handed back the UA 1em where base kept the authored value. A first fix ("any letter run is a unit") went too far: it kept `5pxx` as 5 px (Chrome drops it: 44 vs 29), and a lone `.` counted as a digit, so `.`, `+.`, `1.2.3px`, `1e` and `5.px` were kept too. A token is now a real CSS `<number>` (`[+-]? (D+ (.D+)? | .D+) ([eE][+-]?D+)?`) whose suffix is `%`, a unit in `_CSS_LENGTH_UNITS`, or nothing when the number is zero. The table holds the absolute, font-relative (incl. `r*`), viewport (incl. sv/lv/dv) and container `cq*` units; Chrome 159 accepts all 49 of them (probed in one page). `5x`, a resolution unit, is dropped. Pinned by AC-15..19 of `nested_list_container_ua_margin_spec`.
+  - `std.common.css.length` was checked for reuse: its `_unit_scale` has no dvh/svh/cqw/cap either, so it would reproduce the same regression.
+  - Open: unit RESOLUTION is separate and still wrong for some units. At 400x300, `2vb` gives 26 and `1cap` gives 25 (Chrome 30 and 38), and `1e1px` resolves to 1 px (Chrome 10), `-.5em` to -5 px and `-0.5em` to 0 (Chrome -10 for both, font-size 20px). Base behaves the same.
+  - `!important` is pinned: a stylesheet `margin-top:0 !important` beats an inline 30px (AC-17), and `appearance:none !important;appearance:checkbox` keeps the pill (form_control AC-17).

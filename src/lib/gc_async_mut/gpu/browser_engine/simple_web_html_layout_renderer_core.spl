@@ -487,18 +487,30 @@ fn _decls_style_control_box(decls: text) -> bool:
                     return true
     false
 
-# True when the winning `appearance` (or `-webkit-appearance`) is not `auto`.
-# ponytail: one of the two names per origin, `appearance` first; a sheet mixing
-# both in one origin takes `appearance`. Upgrade: track source position.
+# 1 = `appearance` computes to none (none, initial, unset: the initial value is
+# none, the UA sheet sets auto), 0 = auto (auto, revert, inherit and the
+# css-ui-4 compat keywords), -1 = invalid, so the declaration is dropped.
+fn _appearance_keyword(raw: text) -> i32:
+    val v = raw.trim().lower()
+    if v == "none" or v == "initial" or v == "unset":
+        return 1
+    if v == "auto" or v == "revert" or v == "revert-layer" or v == "inherit" or v == "checkbox" or v == "radio" or v == "textfield" or v == "searchfield" or v == "textarea" or v == "menulist" or v == "menulist-button" or v == "listbox" or v == "meter" or v == "progress-bar" or v == "button" or v == "push-button":
+        return 0
+    -1
+
+# True when the winning valid `appearance` (or `-webkit-appearance`) computes
+# to none. Chrome 159: `-webkit-appearance:checkbox`, `revert` and an invalid
+# value keep a checkbox native.
+# ponytail: `appearance` before `-webkit-appearance` within one origin, not
+# source order; `inherit` is taken as auto. Upgrade: track source position.
 fn _appearance_none_authored(
     normal: text, inline_normal: text, important: text, inline_important: text
 ) -> bool:
     for decls in [inline_important, important, inline_normal, normal]:  # cpu-lane-loop-ok: the four cascade origins of ONE input node, highest first
-        var v = decl_get(decls, "appearance")
-        if v == "":
-            v = decl_get(decls, "-webkit-appearance")
-        if v != "":
-            return v.trim().lower() != "auto"
+        for name in ["appearance", "-webkit-appearance"]:  # cpu-lane-loop-ok: the two property names
+            val k = _appearance_keyword(decl_get(decls, name))
+            if k >= 0:
+                return k == 1
     false
 
 # Chrome 159 keeps a control's native (`appearance: auto`) look -- for a select
@@ -624,8 +636,87 @@ fn _generated_content_present(normal_decls: text, important_decls: text) -> bool
     val value = if important != "": important else: decl_get(normal_decls, "content").trim().lower()
     not (value == "" or value == "none" or value == "normal" or value == "initial" or value == "unset")
 
-fn _ua_em_block_margin_tag(tag: text) -> bool:
-    tag == "p" or tag == "ul" or tag == "ol" or tag == "menu" or tag == "dl" or tag == "pre" or tag == "blockquote" or tag == "figure"
+# UA `margin-block` of a tag in em x1000 (Chrome html.css), 0 = none.
+fn _ua_em_block_margin_ratio(tag: text) -> i32:
+    if tag == "p" or tag == "ul" or tag == "ol" or tag == "menu" or tag == "dl" or tag == "pre" or tag == "blockquote" or tag == "figure" or tag == "h3":
+        return 1000
+    if tag == "h1":
+        return 670
+    if tag == "h2":
+        return 830
+    if tag == "h4":
+        return 1330
+    if tag == "h5":
+        return 1670
+    if tag == "h6":
+        return 2330
+    0
+
+# The CSS length units Chrome 159 parses (Values 4 + container units),
+# lower-cased. A margin with any other letter run is dropped (`5pxx`, `5x`).
+val _CSS_LENGTH_UNITS: [text] = [
+    "px", "in", "cm", "mm", "q", "pt", "pc",
+    "em", "rem", "ex", "rex", "ch", "rch", "cap", "rcap", "ic", "ric", "lh", "rlh",
+    "vw", "vh", "vi", "vb", "vmin", "vmax",
+    "svw", "svh", "svi", "svb", "svmin", "svmax",
+    "lvw", "lvh", "lvi", "lvb", "lvmin", "lvmax",
+    "dvw", "dvh", "dvi", "dvb", "dvmin", "dvmax",
+    "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax"
+]
+
+# Index just past a run of ASCII digits in `tok` starting at `i`.
+fn _ascii_digits_end(tok: text, start: i64) -> i64:
+    var i = start
+    while i < tok.len() and "0123456789".index_of(tok[i:i + 1]) >= 0:  # cpu-lane-loop-ok: the digits of ONE margin token
+        i = i + 1
+    i
+
+# A margin value the cascade keeps. `revert` / `revert-layer` roll back to the
+# UA 1em and an invalid value is dropped, so neither counts as authored.
+# Each token is a CSS <number> (`[+-]? (D+ (. D+)? | . D+) ([eE] [+-]? D+)?`)
+# followed by `%`, a unit from `_CSS_LENGTH_UNITS`, or nothing when the number
+# is zero (any spelling: 0.0, -0, +0, .0). Chrome 159: `5pxx`, `.`, `+.`,
+# `1.2.3px`, `1e`, `5.px` and `5x` are all dropped.
+# ponytail: math functions and var() are accepted unchecked.
+fn _margin_value_authored(raw: text) -> bool:
+    val v = raw.trim().lower()
+    if v == "" or v == "revert" or v == "revert-layer":
+        return false
+    if v == "initial" or v == "unset" or v == "inherit":
+        return true
+    if v.index_of("(") >= 0:
+        return true
+    for tok in v.split(" "):  # cpu-lane-loop-ok: the 1-4 tokens of ONE margin value
+        if tok != "" and tok != "auto":
+            var i: i64 = 0
+            if tok.starts_with("-") or tok.starts_with("+"):
+                i = 1
+            val int_end = _ascii_digits_end(tok, i)
+            var mant_end = int_end
+            if mant_end < tok.len() and tok[mant_end:mant_end + 1] == ".":
+                val frac_end = _ascii_digits_end(tok, mant_end + 1)
+                if frac_end == mant_end + 1:
+                    return false
+                mant_end = frac_end
+            if mant_end == int_end and int_end == i:
+                return false
+            val nonzero = tok[i:mant_end].replace("0", "").replace(".", "") != ""
+            var num_end = mant_end
+            # An exponent (`1e1px`) belongs to the number, not the unit.
+            if num_end + 1 < tok.len() and tok[num_end:num_end + 1] == "e":
+                var exp_start = num_end + 1
+                if tok[exp_start:exp_start + 1] == "+" or tok[exp_start:exp_start + 1] == "-":
+                    exp_start = exp_start + 1
+                val exp_end = _ascii_digits_end(tok, exp_start)
+                if exp_end > exp_start:
+                    num_end = exp_end
+            val suffix = tok[num_end:]
+            if suffix == "":
+                if nonzero:
+                    return false
+            elif suffix != "%" and not _CSS_LENGTH_UNITS.contains(suffix):
+                return false
+    true
 
 # [top, bottom]: a block margin is declared in `decls` (horizontal-tb names).
 fn _decls_block_margin_authored(decls: text) -> [bool]:
@@ -633,10 +724,13 @@ fn _decls_block_margin_authored(decls: text) -> [bool]:
     var bottom = false
     if decls.index_of("margin") < 0:
         return [top, bottom]
-    for part in decls.split(";"):  # cpu-lane-loop-ok: ONE node's declaration list, scanned only for a UA 1em-margin tag (p/pre/lists/blockquote/figure)
+    for part in decls.split(";"):  # cpu-lane-loop-ok: ONE node's declaration list, scanned only for a UA em-margin tag
         val colon = part.index_of(":")
         if colon > 0:
             val name = part[0:colon].trim().lower()
+            val authored = (name.starts_with("margin")) and _margin_value_authored(part[colon + 1:])
+            if not authored:
+                continue
             if name == "margin" or name == "margin-block":
                 top = true
                 bottom = true
@@ -646,9 +740,10 @@ fn _decls_block_margin_authored(decls: text) -> [bool]:
                 bottom = true
     [top, bottom]
 
+# The UA em margin of the element's OWN font-size, floored to Chrome's 1/64 px.
 # ponytail: horizontal-tb only; in a vertical writing mode `margin-block` maps
 # to left/right and this still writes top/bottom. Upgrade: map by writing mode.
-fn _ua_em_block_margin(style: Style, normal: text, inline_normal: text, important: text, inline_important: text) -> Style:
+fn _ua_em_block_margin(style: Style, ratio: i32, normal: text, inline_normal: text, important: text, inline_important: text) -> Style:
     var st = style
     var top = false
     var bottom = false
@@ -656,12 +751,16 @@ fn _ua_em_block_margin(style: Style, normal: text, inline_normal: text, importan
         val a = _decls_block_margin_authored(decls)
         top = top or a[0]
         bottom = bottom or a[1]
+    val exact = font_milli_of(st.font_size, st.font_size_milli).to_i64() * ratio.to_i64() / 1000
+    val milli = ((exact * 64 / 1000) * 1000 / 64) as i32
+    val px = (milli + 500) / 1000
+    val stored = if milli % 1000 == 0: 0 else: milli
     if not top:
-        st.margin_t = st.font_size
-        st.margin_t_milli = st.font_size_milli
+        st.margin_t = px
+        st.margin_t_milli = stored
     if not bottom:
-        st.margin_b = st.font_size
-        st.margin_b_milli = st.font_size_milli
+        st.margin_b = px
+        st.margin_b_milli = stored
     st
 
 fn list_container_tag(tag: text) -> bool:
@@ -1257,12 +1356,14 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             st = apply_decls_without_display_on_writing_mode(
                 st, inline_important, em_base, logical_writing_mode
             )
-        # UA `margin-block: 1em` (p, pre, lists, blockquote, figure) is 1em of
-        # the element's OWN computed font-size, known only now; tag_defaults
-        # wrote a fixed 16 px. An authored block margin keeps its value.
-        if _ua_em_block_margin_tag(nd.tag) and not nested_list_ua:
+        # UA `margin-block` (1em on p, pre, lists, blockquote, figure; .67 ..
+        # 2.33em on h1..h6) is em of the element's OWN computed font-size,
+        # known only now; tag_defaults wrote the UA-size value. An authored
+        # block margin keeps its value.
+        val ua_em_ratio = _ua_em_block_margin_ratio(nd.tag)
+        if ua_em_ratio > 0 and not nested_list_ua:
             st = _ua_em_block_margin(
-                st, combined_decls, inline_normal, combined_important_decls, inline_important
+                st, ua_em_ratio, combined_decls, inline_normal, combined_important_decls, inline_important
             )
         if _wsc_tail_sub_armed():
             _wsc_add_sub2(10, _wsc_now_us() - _sb_t8)
