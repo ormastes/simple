@@ -6,17 +6,11 @@ Async compatibility modules should import or re-export this backend instead of
 declaring duplicate lock hooks.
 """
 
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock_keeping}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_with_lock_keeping, try_mutex_new}
 
 # --- SFFI declarations ---
 @unsafe(reason: "raw runtime rwlock allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
 extern fn rt_rwlock_new<T>(initial: T) -> i64?
-
-# The runtime returns nil only when the rwlock allocation itself fails.
-fn _rwlock_handle(handle: i64?) -> i64:
-    if val h = handle:
-        return h
-    panic("E-SFFI-RWLOCK-001: rt_rwlock_new returned no handle")
 @unsafe(reason: "raw runtime rwlock read ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
 extern fn rt_rwlock_read<T>(rwlock: i64) -> T?
 @unsafe(reason: "raw runtime rwlock write ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
@@ -27,6 +21,18 @@ extern fn rt_rwlock_try_read<T>(rwlock: i64) -> T?
 extern fn rt_rwlock_try_write<T>(rwlock: i64) -> T?
 @unsafe(reason: "raw runtime rwlock set ABI; contract: one means stored and zero means invalid handle", capabilities: [ffi])
 extern fn rt_rwlock_set<T>(rwlock: i64, new_value: T) -> i64
+
+# The runtime returns nil only when the rwlock allocation itself fails.
+fn _rwlock_handle(handle: i64?) -> Result<i64, text>:
+    if val h = handle:
+        return Ok(h)
+    Err("E-SFFI-RWLOCK-001: rt_rwlock_new returned no handle")
+
+# Allocation-failure boundary for the non-optional constructor (see mutex.spl).
+fn _rwlock_handle_or_abort(handle: i64?) -> i64:
+    match _rwlock_handle(handle):
+        case Ok(h): h
+        case Err(msg): panic(msg)
 
 # --- RwLock ---
 # @tag:api
@@ -146,7 +152,7 @@ class RwLock:
 fn rwlock_new<T>(initial: T) -> RwLock:
     val handle = unsafe(capabilities: [ffi]):
         rt_rwlock_new(initial)
-    RwLock(_handle: _rwlock_handle(handle), _write_gate: mutex_new(0))
+    RwLock(_handle: _rwlock_handle_or_abort(handle), _write_gate: mutex_new(0))
 
 # Free-function guard forms (native-safe explicit receiver; see mutex.spl).
 
@@ -170,3 +176,16 @@ fn rwlock_with_write<T>(rwlock: RwLock, f: fn(T) -> T) -> T:
             rt_rwlock_set(rwlock._handle, updated)
         updated
     )
+
+# Option-returning constructor: None when the runtime cannot allocate the rwlock.
+fn try_rwlock_new<T>(initial: T) -> RwLock?:
+    val handle = unsafe(capabilities: [ffi]):
+        rt_rwlock_new(initial)
+    match _rwlock_handle(handle):
+        case Ok(h):
+            if val gate = try_mutex_new(0):
+                return Some(RwLock(_handle: h, _write_gate: gate))
+            None
+        case Err(_): None
+
+export try_rwlock_new
