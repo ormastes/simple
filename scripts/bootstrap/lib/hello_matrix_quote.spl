@@ -1,0 +1,194 @@
+# Argument quoting/splitting twins used by the Hello matrix receipts.
+#
+# shlex_split / shlex_join reproduce Python shlex (POSIX mode, comments off);
+# list2cmdline reproduces subprocess.list2cmdline; windows_argv_split
+# reproduces CommandLineToArgvW for arguments after argv[0]. Receipts
+# (*.argv.txt, explicit-inputs.rsp) are written with these, so byte parity with
+# the Python owner depends on them. Parity cases:
+# test/fixtures/bootstrap/hello_sanity_matrix_parity/cases.jsonl.
+
+pub fn _shlex_ws(c: text) -> bool:
+    c == " " or c == "\t" or c == "\r" or c == "\n"
+
+# Python shlex.split(s) (posix=True, comments=False, punctuation_chars=False).
+pub fn shlex_split(s: text) -> Result<[text], text>:
+    var out: [text] = []
+    var token = ""
+    var in_token = false
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.substring(i, i + 1)
+        if _shlex_ws(c):
+            if in_token:
+                out.push(token)
+                token = ""
+                in_token = false
+            i = i + 1
+        elif c == "\\":
+            if i + 1 >= n:
+                return Err("No escaped character")
+            token = token + s.substring(i + 1, i + 2)
+            in_token = true
+            i = i + 2
+        elif c == "'":
+            in_token = true
+            i = i + 1
+            var closed = false
+            while i < n:
+                val q = s.substring(i, i + 1)
+                i = i + 1
+                if q == "'":
+                    closed = true
+                    break
+                token = token + q
+            if not closed:
+                return Err("No closing quotation")
+        elif c == "\"":
+            in_token = true
+            i = i + 1
+            var closed = false
+            while i < n:
+                val q = s.substring(i, i + 1)
+                if q == "\"":
+                    i = i + 1
+                    closed = true
+                    break
+                if q == "\\":
+                    if i + 1 >= n:
+                        return Err("No escaped character")
+                    val nx = s.substring(i + 1, i + 2)
+                    if nx == "\"" or nx == "\\":
+                        token = token + nx
+                    else:
+                        token = token + q + nx
+                    i = i + 2
+                else:
+                    token = token + q
+                    i = i + 1
+            if not closed:
+                return Err("No closing quotation")
+        else:
+            token = token + c
+            in_token = true
+            i = i + 1
+    if in_token:
+        out.push(token)
+    Ok(out)
+
+pub fn _shlex_safe(c: text) -> bool:
+    if (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9"):
+        return true
+    c == "_" or c == "@" or c == "%" or c == "+" or c == "=" or c == ":" or c == "," or c == "." or c == "/" or c == "-"
+
+# Python shlex.quote.
+pub fn shlex_quote(s: text) -> text:
+    if s == "":
+        return "''"
+    var safe = true
+    for i in 0..s.len():
+        if not _shlex_safe(s.substring(i, i + 1)):
+            safe = false
+            break
+    if safe:
+        return s
+    "'" + s.replace("'", "'\"'\"'") + "'"
+
+pub fn shlex_join(args: [text]) -> text:
+    var out = ""
+    for i in 0..args.len():
+        if i > 0:
+            out = out + " "
+        out = out + shlex_quote(args[i])
+    out
+
+pub fn _repeat(s: text, n: i64) -> text:
+    var out = ""
+    for _ in 0..n:
+        out = out + s
+    out
+
+# Python subprocess.list2cmdline.
+pub fn list2cmdline(args: [text]) -> text:
+    var result = ""
+    for index in 0..args.len():
+        val arg = args[index]
+        if index > 0:
+            result = result + " "
+        val need_quote = arg == "" or arg.contains(" ") or arg.contains("\t")
+        if need_quote:
+            result = result + "\""
+        var bs = 0
+        for i in 0..arg.len():
+            val c = arg.substring(i, i + 1)
+            if c == "\\":
+                bs = bs + 1
+            elif c == "\"":
+                result = result + _repeat("\\", bs * 2) + "\\\""
+                bs = 0
+            else:
+                result = result + _repeat("\\", bs) + c
+                bs = 0
+        result = result + _repeat("\\", bs)
+        if need_quote:
+            result = result + _repeat("\\", bs) + "\""
+    result
+
+# CommandLineToArgvW(argv0 + " " + text) minus argv[0], for a plain argv0
+# without quotes or whitespace (the Python owner uses "linker").
+pub fn windows_argv_split(s: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    val n = s.len()
+    while i < n:
+        while i < n and (s.substring(i, i + 1) == " " or s.substring(i, i + 1) == "\t"):
+            i = i + 1
+        if i >= n:
+            break
+        var token = ""
+        var quoted = false
+        while i < n:
+            val c = s.substring(i, i + 1)
+            if (c == " " or c == "\t") and not quoted:
+                break
+            if c == "\\":
+                var bs = 0
+                while i < n and s.substring(i, i + 1) == "\\":
+                    bs = bs + 1
+                    i = i + 1
+                if i < n and s.substring(i, i + 1) == "\"":
+                    token = token + _repeat("\\", bs / 2)
+                    if bs % 2 == 1:
+                        token = token + "\""
+                        i = i + 1
+                else:
+                    token = token + _repeat("\\", bs)
+            elif c == "\"":
+                if quoted and i + 1 < n and s.substring(i + 1, i + 2) == "\"":
+                    token = token + "\""
+                    i = i + 2
+                else:
+                    quoted = not quoted
+                    i = i + 1
+            else:
+                token = token + c
+                i = i + 1
+        out.push(token)
+    out
+
+# response_tokens(): POSIX shlex or Windows argv split; empty or nested
+# (@file) responses are refused exactly like the Python owner.
+pub fn response_tokens(content: text, windows: bool) -> Result<[text], text>:
+    var values: [text] = []
+    if windows:
+        values = windows_argv_split(content)
+    else:
+        match shlex_split(content):
+            case Ok(v): values = v
+            case Err(e): return Err(e)
+    if values.len() == 0:
+        return Err("empty/nested linker response is unsupported")
+    for v in values:
+        if v.starts_with("@"):
+            return Err("empty/nested linker response is unsupported")
+    Ok(values)

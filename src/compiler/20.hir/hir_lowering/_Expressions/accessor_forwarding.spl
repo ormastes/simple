@@ -45,9 +45,9 @@ impl HirLowering:
                 if val owner_module = owner_symbol.defining_module:
                     val canonical_name: text = owner_module + "." + owner_symbol.name
                     if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
-                        found_table = true
-                        if rt_dict_contains(self.struct_field_types_by_name[canonical_name], name):
-                            return false
+                        # The owner's own table is authoritative: never fall
+                        # through to a same-named struct from another module.
+                        return not rt_dict_contains(self.struct_field_types_by_name[canonical_name], name)
                 if rt_dict_contains(self.struct_field_types_by_name, owner_name):
                     found_table = true
                     if rt_dict_contains(self.struct_field_types_by_name[owner_symbol.name], name):
@@ -61,6 +61,16 @@ impl HirLowering:
             return None
         if not self.owner_field_table_lacks(owner_id, name):
             return None
+        if val forwarded = self.try_lower_accessor_getter(base, name, owner_id, span):
+            return Some(forwarded)
+        val hint = self.accessor_suggestion(owner_id, name)
+        self.error("no field `{name}` on type and no get_/is_ accessor{hint}", span)
+        None
+
+    # Resolves `recv.x` to `get_x()` / `is_x()` / `x()` WITHOUT emitting any
+    # diagnostic; callers that own their own error (compound assignment through
+    # a setter) use this so one site reports exactly one error.
+    me try_lower_accessor_getter(base: HirExpr, name: text, owner_id: i64, span: Span) -> HirExpr?:
         val candidates: [text] = ["get_" + name, "is_" + name, name]
         for candidate in candidates:
             # Typed text binding for the MethodCall `method: text` payload.
@@ -86,8 +96,6 @@ impl HirLowering:
                             has_type_: has_returned,
                             type_: returned,
                             span: span)
-        val hint = self.accessor_suggestion(owner_id, name)
-        self.error("no field `{name}` on type and no get_/is_ accessor{hint}", span)
         None
 
     @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in accessor_suggestion", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
@@ -100,11 +108,13 @@ impl HirLowering:
             if val owner_symbol = self.symbols.get_symbol_raw(owner_id):
                 val owner_name: text = owner_symbol.name
                 var table_keys: [text] = []
+                var has_canonical = false
                 if val owner_module = owner_symbol.defining_module:
                     val canonical_name: text = owner_module + "." + owner_symbol.name
                     if rt_dict_contains(self.struct_field_types_by_name, canonical_name):
+                        has_canonical = true
                         table_keys = self.struct_field_types_by_name[canonical_name].keys()
-                if table_keys.len() == 0 and rt_dict_contains(self.struct_field_types_by_name, owner_name):
+                if not has_canonical and rt_dict_contains(self.struct_field_types_by_name, owner_name):
                     table_keys = self.struct_field_types_by_name[owner_symbol.name].keys()
                 for key in table_keys:
                     val d = accessor_edit_distance(name, key)
@@ -171,11 +181,11 @@ impl HirLowering:
             case _: false
         if not base_is_variable:
             self.error("compound assignment to accessor `{name}` needs a variable receiver; bind the receiver to a local first", span)
-            return None
-        val getter = self.lower_accessor_read(base, name, owner_id, span)
+            return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: unit_type, span: span))
+        val getter = self.try_lower_accessor_getter(base, name, owner_id, span)
         if not getter.?:
             self.error("compound assignment to `{name}` needs a getter `get_{name}` or `is_{name}` next to `{setter}`", span)
-            return None
+            return HirStmtKind.Expr(HirExpr(kind: HirExprKind.Error, has_type_: false, type_: unit_type, span: span))
         val rhs_type = self.binding_payload_type(rhs)
         val rhs_sym = self.symbols.define("__accessor_rhs", SymbolKind.Variable, rhs_type, span, Visibility.Private, false, nil)
         val rhs_ref = HirExpr(kind: HirExprKind.Var(rhs_sym), has_type_: rhs.has_type_, type_: rhs.type_, span: span)

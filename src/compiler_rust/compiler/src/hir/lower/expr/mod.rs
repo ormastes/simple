@@ -2204,6 +2204,46 @@ impl Lowerer {
             }
         }
 
+        // `f64?.unwrap_or(d)` on a local with a pure f64 default is the typed
+        // coalesce `if rt_is_some(c): <exact payload> else: d`. The dynamic
+        // method returns the raw payload word as an erased value, which
+        // decodes an explicit `Some(0.1)` as 0.09999999999999998; the typed
+        // form reads the exact bits and, for an inline `f64?` local, calls no
+        // runtime function and boxes nothing. `d` is a literal or a local, so
+        // evaluating it only on the None branch is unobservable.
+        // seed_jit_f64_option_unwrap_or_expect_try_readers_lossy_2026-11-27
+        if method == "unwrap_or"
+            && !crate::mir::float_option_inline::disabled()
+            && args.len() == 1
+            && self.module.types.optional_inner(receiver.ty) == Some(TypeId::F64)
+            && matches!(receiver.kind, HirExprKind::Local(_))
+            && matches!(args[0].value, ast::Expr::Float(_) | ast::Expr::Identifier(_))
+        {
+            let default = self.lower_expr(&args[0].value, ctx)?;
+            if default.ty == TypeId::F64 && matches!(default.kind, HirExprKind::Float(_) | HirExprKind::Local(_)) {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_is_some".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::BOOL,
+                        }),
+                        then_branch: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::F64,
+                        }),
+                        else_branch: Some(Box::new(default)),
+                    },
+                    ty: TypeId::F64,
+                }));
+            }
+        }
+
         if args.is_empty() {
             match method {
                 "ok" | "err" if matches!(self.module.types.get(receiver.ty), Some(HirType::Enum { name, .. }) if name == "Result") =>

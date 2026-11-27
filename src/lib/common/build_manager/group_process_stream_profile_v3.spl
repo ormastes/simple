@@ -5,6 +5,10 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.string_core.{str_len}
 
 val GROUP_PROCESS_PROFILE_INTEGER_MAX_V3: i64 = 9223372036854775807
+# The one leader-residue policy: once the helper leader exited 0, the group runtime freezes the helper group
+# and moves every member into `<delegated root>/simple-engine-<launch identity>` before it retires the group
+# (rt_lg_move_residue_v3). "" is every other launch: the residue is killed with the group, as always.
+val GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3: text = "move-to-engine-group-v1"
 
 struct GroupProcessCpuQuotaV3:
     cpu_millis: i64
@@ -27,6 +31,7 @@ struct GroupProcessStreamProfileV3:
     helper_cpu: GroupProcessCpuQuotaV3
     broker: GroupProcessBrokerBudgetV3
     child_image_mode: text
+    leader_residue_mode: text = ""
 
 fn group_process_cpu_quota_v3(cpu_millis: i64) -> Result<GroupProcessCpuQuotaV3, text>:
     if cpu_millis <= 0: return Err("helper CPU must be positive millicores")
@@ -80,6 +85,8 @@ fn group_process_stream_profile_validate_v3(profile: GroupProcessStreamProfileV3
     if (profile.child_image_mode != "sealed-main-image-v1" and
             profile.child_image_mode != "trusted-local-admin-image-fd-v1"):
         return "unknown child image policy"
+    if profile.leader_residue_mode != "" and profile.leader_residue_mode != GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3:
+        return "unknown leader residue policy"
     ""
 
 fn group_process_profile_number_v3(field: text, limit: i64) -> Result<i64, text>:
@@ -105,7 +112,13 @@ fn group_process_stream_profile_encode_v3(profile: GroupProcessStreamProfileV3) 
             "{broker.cpu_period_us}", "{broker.reserved_cpu_millis}", "{broker.memory_limit_bytes}",
             "{broker.reserved_memory_bytes}", profile.child_image_mode]:
         fields.push(builder_wire_line_v1(field))
+    # One more field only when a policy is set, so every other profile and its digest stay byte-identical.
+    if profile.leader_residue_mode != "": fields.push(builder_wire_line_v1(profile.leader_residue_mode))
     fields.join("")
+
+# The thirteenth runtime profile word (rt_lg_profile_parse_v3): present and 1 only when the policy is set.
+fn group_process_stream_profile_residue_words_v3(profile: GroupProcessStreamProfileV3) -> [i64]:
+    if profile.leader_residue_mode == GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3: [1] else: []
 
 fn group_process_stream_profile_decode_v3(payload: text) -> Result<GroupProcessStreamProfileV3, text>:
     if str_len(payload) > 16384: return Err("stream resource profile exceeds bound")
@@ -125,11 +138,15 @@ fn group_process_stream_profile_decode_v3(payload: text) -> Result<GroupProcessS
     val memory = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
     val reserved_memory = group_process_profile_number_v3(reader.scalar(), GROUP_PROCESS_PROFILE_INTEGER_MAX_V3)?
     val mode = reader.scalar()
+    # Fifteen wire fields without a leader-residue policy, sixteen with one; the canonical re-encode below
+    # refuses an empty or unknown sixteenth field.
+    val residue = if payload.split("\n").len() == 17: reader.scalar() else: ""
     val error = reader.complete_error()
     if error != "": return Err(error)
     val profile = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(cpu, quota, period),
         broker: GroupProcessBrokerBudgetV3(path, device, inode, generation, policy, broker_quota,
-            broker_period, reserved_cpu, memory, reserved_memory), child_image_mode: mode)
+            broker_period, reserved_cpu, memory, reserved_memory), child_image_mode: mode,
+        leader_residue_mode: residue)
     if group_process_stream_profile_encode_v3(profile) != payload: return Err("noncanonical/invalid stream resource profile")
     Ok(profile)
 
@@ -154,5 +171,6 @@ export GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3, GroupProcessStreamPro
 export group_process_cpu_quota_v3, group_process_stream_profile_validate_v3
 export group_process_stream_profile_encode_v3, group_process_stream_profile_decode_v3
 export group_process_stream_resource_receipt_v3, group_process_profile_number_v3
+export GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3, group_process_stream_profile_residue_words_v3
 
 export group_process_stream_path_absolute_v3

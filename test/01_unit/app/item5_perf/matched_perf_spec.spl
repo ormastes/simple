@@ -1,0 +1,182 @@
+"""
+## Purpose and audience
+
+Purpose: pin the pure-Simple twin of
+`scripts/check/run-item5-matched-app-performance.py`, the matched-app
+benchmark that runs after the bootstrap (p3+, policy table
+`doc/08_tracking/todo/hello_sanity_phase_table_2026-11-27.md`). These
+scenarios port every case in `scripts/check/test-item5-matched-app-performance.py`.
+They add byte-parity checks for the Python `json.dumps` layouts the receipts
+use, and for the trust anchor that replaces the Python interpreter pin.
+
+Audience: engineers changing the matched-app benchmark contract in either copy.
+
+## Operator workflow
+
+1. Run `SIMPLE_LIB=$PWD/src bin/simple test test/01_unit/app/item5_perf/matched_perf_spec.spl`.
+2. Run `sh scripts/check/check-item5-matched-perf-parity.shs` for the cross-language parity check.
+
+## Compatibility and limitations
+
+Parsers, statistics, formatters, provider staging and the functional gate.
+No application is executed and no watchdog is started.
+"""
+
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.io_runtime.{file_write, file_read, dir_create_all, dir_remove_all, file_hash_sha256_or_empty, time_now_unix_micros}
+use std.common.json.value.{JsonValue}
+use app.item5_perf.matched_perf.{
+    mp_percentile, mp_sample_record, mp_stage_provider, mp_functional_gate,
+    mp_py_float_repr, mp_py_json_compact, mp_py_json_indent2, mp_runner_pin_check,
+    MpManifestBindings
+}
+
+fn mp_scratch(tag: text) -> text:
+    val dir = "build/item5_perf_spec/" + tag + "-{time_now_unix_micros()}"
+    dir_create_all(dir)
+    dir
+
+fn mp_text(extra: text, kind: text, size: text, operations: text, ns: text, provider_calls: text, warmups: text) -> text:
+    "ITEM5_PERF_V1 kind=" + kind + " size=" + size + " operations=" + operations + " ns=" + ns +
+        " checksum=123 results=4 provider_calls=" + provider_calls + " warmups=" + warmups + extra + "\n"
+
+fn mp_default(extra: text) -> text:
+    mp_text(extra, "db", "1025", "32", "100", "32", "3")
+
+fn mp_record_err(content: text, kind: text, size: i64, vector: bool) -> bool:
+    val dir = mp_scratch("rec")
+    file_write(dir + "/stdout", content)
+    val result = mp_sample_record(dir + "/stdout", kind, size, vector)
+    dir_remove_all(dir)
+    match result:
+        case Ok(_): false
+        case Err(_): true
+
+fn mp_bindings() -> MpManifestBindings:
+    MpManifestBindings(compiler_sha256: "compiler", runtime_sha256: "runtime",
+        producer_source_commit: "producer", functional_app_source_commit: "source",
+        provider_id: "1", implementation_id: "2")
+
+describe "item5 matched-app performance twin":
+    it "uses nearest-rank percentiles for 30 and 100 samples":
+        var thirty: [i64] = []
+        for i in 1..31: thirty.push(i)
+        var hundred: [i64] = []
+        for i in 1..101: hundred.push(i)
+        expect(mp_percentile(thirty, 50)).to_equal(15)
+        expect(mp_percentile(thirty, 95)).to_equal(29)
+        expect(mp_percentile(hundred, 95)).to_equal(95)
+
+    it "stages the provider in the admitted relative root and rejects a changed input":
+        val root = mp_scratch("stage")
+        file_write(root + "/original.so", "component fixture; not an executable provider")
+        dir_create_all(root + "/output")
+        val expected = file_hash_sha256_or_empty(root + "/original.so")
+        val staged = mp_stage_provider(root + "/original.so", root + "/output", expected)
+        match staged:
+            case Ok(pair):
+                expect(pair.0).to_equal("build/providers/matched-provider.so")
+                expect(pair.1).to_equal(root + "/output/build/providers/matched-provider.so")
+                expect(file_hash_sha256_or_empty(pair.1)).to_equal(expected)
+            case Err(e): fail("stage failed: " + e)
+        file_write(root + "/original.so", "changed input")
+        dir_create_all(root + "/other-output")
+        expect(stage_failed(mp_stage_provider(root + "/original.so", root + "/other-output", expected))).to_equal(true)
+        dir_remove_all(root)
+
+    it "accepts exactly one measured sample":
+        val dir = mp_scratch("one")
+        file_write(dir + "/stdout", mp_default(""))
+        match mp_sample_record(dir + "/stdout", "db", 1025, true):
+            case Ok(record): expect(record.operations).to_equal(32)
+            case Err(e): fail(e)
+        dir_remove_all(dir)
+        expect(mp_record_err(mp_default("") + mp_default(""), "db", 1025, true)).to_equal(true)
+
+    it "rejects a duplicate field":
+        expect(mp_record_err(mp_default(" ns=200"), "db", 1025, true)).to_equal(true)
+
+    it "rejects a cache bypass or scalar provider use":
+        expect(mp_record_err(mp_text("", "db", "1025", "32", "100", "31", "3"), "db", 1025, true)).to_equal(true)
+        expect(mp_record_err(mp_default(""), "db", 1025, false)).to_equal(true)
+
+    it "rejects a wrong workload or zero time":
+        expect(mp_record_err(mp_text("", "db", "65536", "32", "100", "32", "3"), "db", 1025, true)).to_equal(true)
+        expect(mp_record_err(mp_text("", "db", "1025", "31", "100", "32", "3"), "db", 1025, true)).to_equal(true)
+        expect(mp_record_err(mp_text("", "db", "1025", "32", "0", "32", "3"), "db", 1025, true)).to_equal(true)
+        expect(mp_record_err(mp_text("", "db", "1025", "32", "100", "32", "2"), "db", 1025, true)).to_equal(true)
+
+    it "requires the full HTTP wire":
+        val record = "ITEM5_PERF_V1 kind=http size=128 operations=128 ns=100 checksum=123 results=128 provider_calls=128 warmups=3\n"
+        expect(mp_record_err(record, "http", 128, true)).to_equal(true)
+        val wire = "485454502f312e3120323030204f4b0d0a436f6e74656e742d4c656e6774683a2032330d0a0d0a4954454d355f4d4154434845445f485454505f424f4459"
+        val dir = mp_scratch("wire")
+        file_write(dir + "/stdout", record + "ITEM5_PERF_WIRE_V1 hex=" + wire + "\n")
+        match mp_sample_record(dir + "/stdout", "http", 128, true):
+            case Ok(r): expect(r.wire_hex).to_equal(wire)
+            case Err(e): fail(e)
+        dir_remove_all(dir)
+
+    it "rejects a hash-only functional manifest":
+        val dir = mp_scratch("hashonly")
+        file_write(dir + "/evidence.env", "schema=hashes-only\nqualification=pass\n")
+        expect(gate_failed(mp_functional_gate(dir + "/evidence.env", mp_bindings()))).to_equal(true)
+        dir_remove_all(dir)
+
+    it "rejects a failed or non-quiescent functional app":
+        val root = mp_scratch("gate")
+        dir_create_all(root + "/staged")
+        dir_create_all(root + "/receipts")
+        file_write(root + "/staged/producer-hello.json", "{\"runtime_archive_sha256\": \"runtime\"}")
+        val hello_digest = file_hash_sha256_or_empty(root + "/staged/producer-hello.json")
+        file_write(root + "/evidence.env", "schema=item5-app-vector-runner-v1\nqualification=execution-evidence-only\n" +
+            "producer_compiler_sha256=compiler\nproducer_source_commit=producer\n" +
+            "app_source_commit=source\nprovider_identity=1\nimplementation_identity=2\n" +
+            "producer_hello_receipt_sha256=" + hello_digest + "\n")
+        for body in ["status=complete\nexit_status=1\nquiescent=1\n", "status=complete\nexit_status=0\nquiescent=0\n"]:
+            file_write(root + "/receipts/db-scalar.rss.env", body)
+            expect(gate_failed(mp_functional_gate(root + "/evidence.env", mp_bindings()))).to_equal(true)
+        dir_remove_all(root)
+
+    it "formats floats like Python repr":
+        expect(mp_py_float_repr(2.0)).to_equal("2.0")
+        expect(mp_py_float_repr(1.0 / 3.0)).to_equal("0.3333333333333333")
+        expect(mp_py_float_repr(0.00001234)).to_equal("1.234e-05")
+        expect(mp_py_float_repr(0.0001)).to_equal("0.0001")
+        expect(mp_py_float_repr(123456789012345678.0)).to_equal("1.2345678901234568e+17")
+        expect(mp_py_float_repr(1000000000000000.0)).to_equal("1000000000000000.0")
+        expect(mp_py_float_repr(10000000000000000.0)).to_equal("1e+16")
+        expect(mp_py_float_repr(-0.5)).to_equal("-0.5")
+
+    it "serializes like Python json.dumps compact and indent=2":
+        val obj = JsonValue.Object(keys: ["a", "b", "c", "d"],
+            values: [JsonValue.Int(1), JsonValue.Array(values_of_two()), JsonValue.Str("q\"\n\u{e9}"), JsonValue.Object(keys: [], values: [])])
+        expect(mp_py_json_compact(obj)).to_equal("{\"a\": 1, \"b\": [\"x\", 2.5], \"c\": \"q\\\"\\n\\u00e9\", \"d\": {}}")
+        expect(mp_py_json_indent2(obj)).to_equal("{\n  \"a\": 1,\n  \"b\": [\n    \"x\",\n    2.5\n  ],\n  \"c\": \"q\\\"\\n\\u00e9\",\n  \"d\": {}\n}")
+
+    it "fails closed when the running stage binary is unpinned or mismatched":
+        val dir = mp_scratch("pin")
+        file_write(dir + "/runner", "stage binary bytes")
+        val good = file_hash_sha256_or_empty(dir + "/runner")
+        expect(pin_failed(mp_runner_pin_check(dir + "/runner", ""))).to_equal(true)
+        expect(pin_failed(mp_runner_pin_check(dir + "/runner", "0000000000000000000000000000000000000000000000000000000000000000"))).to_equal(true)
+        expect(pin_failed(mp_runner_pin_check(dir + "/runner", good))).to_equal(false)
+        dir_remove_all(dir)
+
+fn values_of_two() -> [JsonValue]:
+    [JsonValue.Str("x"), JsonValue.Float(2.5)]
+
+fn stage_failed(r: Result<(text, text), text>) -> bool:
+    match r:
+        case Ok(_): false
+        case Err(_): true
+
+fn gate_failed(r: Result<[(text, text)], text>) -> bool:
+    match r:
+        case Ok(_): false
+        case Err(_): true
+
+fn pin_failed(r: Result<text, text>) -> bool:
+    match r:
+        case Ok(_): false
+        case Err(_): true

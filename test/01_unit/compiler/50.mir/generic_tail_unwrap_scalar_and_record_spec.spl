@@ -254,7 +254,34 @@ val PROBE_SOURCE: text =
     "fn call_opt_lambda_if_rec() -> i64:\n" +
     "    if val r = call_opt(\\: Some(ProbeRec(x: 11, y: 22))):\n" +
     "        return r.y\n" +
+    "    -1\n\n" +
+    "fn call_id_opt_if_u64(v: u64) -> u64:\n" +
+    "    if val x = id_opt(Some(v)):\n" +
+    "        return x\n" +
+    "    0u64\n\n" +
+    "fn call_id_opt_if_flt() -> f64:\n" +
+    "    if val f = id_opt(Some(3.5)):\n" +
+    "        return f\n" +
+    "    0.0\n\n" +
+    "fn call_id_opt_if_bool() -> bool:\n" +
+    "    if val b = id_opt(Some(true)):\n" +
+    "        return b\n" +
+    "    false\n\n" +
+    "fn call_opt_lambda_if_wrap() -> i64:\n" +
+    "    if val w = call_opt(\\: Some(Wrap.Val(77))):\n" +
+    "        val tw: Wrap<i64> = w\n" +
+    "        return match tw:\n" +
+    "            case Wrap.Val(x): x\n" +
     "    -1\n"
+
+fn _extract_llvm_fn_ir(ir: text, fn_name: text) -> text:
+    val marker = "." + fn_name + "("
+    val idx = ir.index_of(marker) ?? -1
+    if idx < 0:
+        return ""
+    val tail = ir.substring(idx, ir.len())
+    val end_idx = tail.index_of("\n}") ?? tail.len()
+    tail.substring(0, end_idx)
 
 fn _extract_mir_calls(function: MirFunction) -> text:
     var calls: [text] = []
@@ -487,3 +514,26 @@ describe "erased generic -> T tail unwrap/if-val/match for scalars and records":
         expect(rec_cb).to_contain("rt_is_some")
         expect(rec_cb.contains("rt_value_int_wide")).to_equal(false)
         expect(rec_cb.contains("rt_value_as_int_wide")).to_equal(false)
+        val u64_if = fns["call_id_opt_if_u64"] ?? "missing"
+        expect(u64_if).to_contain("id_opt")
+        expect(u64_if).to_contain("rt_value_as_u64")
+        expect(u64_if.contains("rt_value_int_wide")).to_equal(false)
+        val flt_if = fns["call_id_opt_if_flt"] ?? "missing"
+        expect(flt_if).to_contain("id_opt")
+        expect(flt_if).to_contain("rt_value_as_float")
+        expect(flt_if.contains("rt_value_int_wide")).to_equal(false)
+        val bool_if = fns["call_id_opt_if_bool"] ?? "missing"
+        expect(bool_if).to_contain("id_opt")
+        expect(bool_if.contains("rt_value_int_wide")).to_equal(false)
+        val wrap_if = fns["call_opt_lambda_if_wrap"] ?? "missing"
+        expect(wrap_if).to_contain("call_opt")
+        expect(wrap_if).to_contain("rt_is_some")
+        expect(wrap_if).to_contain("rt_enum_payload")
+        expect(wrap_if.contains("rt_value_int_wide")).to_equal(false)
+        val full_ir = lower_probe().ir
+        val rec_cb_ir = _extract_llvm_fn_ir(full_ir, "call_opt_lambda_if_rec")
+        expect(rec_cb_ir).to_contain("getelementptr inbounds i64")
+        expect(rec_cb_ir).to_contain(", i32 1")
+        val ch_if_ir = _extract_llvm_fn_ir(full_ir, "call_id_opt_if_char")
+        expect(ch_if_ir).to_contain("shl i64")
+        expect(ch_if_ir).to_contain("ashr i64")

@@ -1,0 +1,267 @@
+# The engine group of a started workload: what a reaped `start` helper left behind (the engine's monitor,
+# and its pause process when that helper made it) is frozen and moved by the group runtime into
+# `<delegatedCgroup>/simple-engine-<start helper identity>`, and the owner kills that group only after its
+# own Stop, Remove and Absence completed.
+#
+# Pure DATA fixtures over the production order reducer and the holder's pure parts, then source pins for
+# the chain: who asks, who moves, who records, who kills and in which order. The native holder itself
+# (open by name, cgroup.kill, rmdir) is not executed here, and nothing here proves a live guest; the
+# runtime move is proven by src/runtime/test/runtime_linux_group_residue_move_selfcheck.c in a delegated
+# scope and the host measurement is in
+# doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md.
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.nogc_sync_mut.container.machine_fresh_workload_engine_group_v3.*
+use std.nogc_sync_mut.io.linux_fresh_engine_group_v3.{LinuxFreshEngineGroupStateV3,
+    linux_fresh_engine_group_populated_v3, linux_fresh_engine_group_identity_check_v3,
+    linux_fresh_engine_group_retire_step_v3, LinuxFreshEngineGroupStepV3, linux_fresh_engine_group_name_check_v3}
+# Loaded so that a parse error anywhere in the chain fails this file. The seed cannot run the stateful
+# owners (their first step is a native process-origin check), so nothing below calls into them.
+use std.nogc_sync_mut.container.machine_fresh_workload_lifecycle_v2.MachineFreshWorkloadActionResultV2
+use std.nogc_sync_mut.container.machine_fresh_workload_effects_v3.*
+use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.*
+use std.nogc_sync_mut.io.linux_fresh_workload_native_v2.*
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.*
+use std.nogc_async_mut.container.providers.linux.fresh_epoch_workload_v2.*
+use std.nogc_sync_mut.io.linux_process_owner.*
+
+fn engine_group_progress_v3(identities: [text], helper: bool, stop: bool, remove: bool,
+        absence: bool) -> MachineFreshEngineGroupProgressV3:
+    MachineFreshEngineGroupProgressV3(identities: identities, helper_retired: helper, stop_completed: stop,
+        remove_completed: remove, absence_completed: absence)
+
+fn engine_group_body_v3(source: text, anchor: text, stop_at: text) -> text:
+    val at = source.index_of(anchor)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(stop_at)
+    if stop >= 0: tail.substring(0, stop) else: tail
+
+describe "Machine fresh workload engine group V3":
+    it "names the group after the start helper's launch identity and nothing else":
+        val identity = "a1".repeat(32)
+        val name = machine_fresh_engine_group_name_v3(identity)
+        expect(name.is_ok()).to_equal(true)
+        expect(name.unwrap()).to_equal("simple-engine-" + identity)
+        expect(name.unwrap().byte_len()).to_equal(78)
+        for bad in ["", "a1", "A1".repeat(32), "g".repeat(64), "a".repeat(63) + "/", "a".repeat(65), "../" + "a".repeat(61)]:
+            val refused = machine_fresh_engine_group_name_v3(bad)
+            expect(refused.is_err()).to_equal(true)
+            expect(refused.unwrap_err()).to_equal("machine-fresh-workload-engine-group-identity")
+
+    it "has nothing to retire for an owner whose start never asked for the move":
+        for flags in [[false, false, false, false], [true, true, true, true], [false, true, false, true]]:
+            val decided = machine_fresh_engine_group_decide_v3(engine_group_progress_v3([], flags[0], flags[1], flags[2], flags[3]))
+            expect(decided.is_ok()).to_equal(true)
+            expect(decided.unwrap().len()).to_equal(0)
+
+    it "retires the group only after the owner's own Stop, Remove and Absence":
+        val identity = "b2".repeat(32)
+        val decided = machine_fresh_engine_group_decide_v3(engine_group_progress_v3([identity], true, true, true, true))
+        expect(decided.is_ok()).to_equal(true)
+        expect(decided.unwrap()).to_equal(["simple-engine-" + identity])
+
+    it "refuses the kill while the store still records the container, one named reason":
+        val identity = "c3".repeat(32)
+        step("The kill would poison the store: the monitor of a container the store calls running would die")
+        for flags in [[false, false, false], [true, false, false], [true, true, false], [false, true, true], [true, false, true]]:
+            val refused = machine_fresh_engine_group_decide_v3(engine_group_progress_v3([identity], true, flags[0], flags[1], flags[2]))
+            expect(refused.is_err()).to_equal(true)
+            expect(refused.unwrap_err()).to_equal("machine-fresh-workload-engine-group-store-live")
+
+    it "refuses while a helper is not retired, before the order is even looked at":
+        val identity = "d4".repeat(32)
+        val refused = machine_fresh_engine_group_decide_v3(engine_group_progress_v3([identity], false, true, true, true))
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal("machine-fresh-workload-engine-group-helper-active")
+
+    it "refuses an identity it cannot name and more groups than one owner can hold":
+        val malformed = machine_fresh_engine_group_decide_v3(engine_group_progress_v3(["not-a-digest"], true, true, true, true))
+        expect(malformed.is_err()).to_equal(true)
+        expect(malformed.unwrap_err()).to_equal("machine-fresh-workload-engine-group-identity")
+        var many: [text] = []
+        for at in 0..5: many.push(str(at).repeat(64))
+        val bound = machine_fresh_engine_group_decide_v3(engine_group_progress_v3(many, true, true, true, true))
+        expect(bound.is_err()).to_equal(true)
+        expect(bound.unwrap_err()).to_equal("machine-fresh-workload-engine-group-bound")
+        step("Recording a second start keeps the first; a repeat is not a second group")
+        val first = machine_fresh_engine_group_record_v3([], "e5".repeat(32))
+        expect(first.unwrap()).to_equal(["e5".repeat(32)])
+        expect(machine_fresh_engine_group_record_v3(first.unwrap(), "e5".repeat(32)).unwrap()).to_equal(["e5".repeat(32)])
+        expect(machine_fresh_engine_group_record_v3(first.unwrap(), "f6".repeat(32)).unwrap()).to_equal(["e5".repeat(32), "f6".repeat(32)])
+        expect(machine_fresh_engine_group_record_v3(many[0:4], "f6".repeat(32)).unwrap_err()).to_equal("machine-fresh-workload-engine-group-bound")
+        expect(machine_fresh_engine_group_record_v3([], "nope").unwrap_err()).to_equal("machine-fresh-workload-engine-group-identity")
+
+    it "keeps the charge while a group is still recorded: no settle and no close":
+        expect(machine_fresh_engine_group_settle_gate_v3([]).is_ok()).to_equal(true)
+        val held = machine_fresh_engine_group_settle_gate_v3(["a".repeat(64)])
+        expect(held.is_err()).to_equal(true)
+        expect(held.unwrap_err()).to_equal("machine-fresh-workload-engine-group-retained")
+
+    it "reads the kernel's populated flag and refuses anything else":
+        expect(linux_fresh_engine_group_populated_v3("populated 0\nfrozen 0\n").unwrap()).to_equal(false)
+        expect(linux_fresh_engine_group_populated_v3("populated 1\nfrozen 0\n").unwrap()).to_equal(true)
+        expect(linux_fresh_engine_group_populated_v3("frozen 1\npopulated 1\n").unwrap()).to_equal(true)
+        for bad in ["", "populated 2\n", "populated\n", "frozen 0\n", "populated 0\npopulated 1\n", "xpopulated 0\n"]:
+            val refused = linux_fresh_engine_group_populated_v3(bad)
+            expect(refused.is_err()).to_equal(true)
+            expect(refused.unwrap_err()).to_equal("fresh-workload-engine-group-events")
+
+    it "opens, kills and removes nothing but an engine-group name":
+        expect(linux_fresh_engine_group_name_check_v3("simple-engine-" + "a1".repeat(32)).is_ok()).to_equal(true)
+        for bad in ["", "simple-engine-", "simple-native-" + "a1".repeat(32), "libpod-" + "a".repeat(64), "simple-engine-" + "A".repeat(64),
+                "simple-engine-" + "a".repeat(62) + "/.", "simple-engine-" + "a".repeat(65), "../simple-engine-" + "a".repeat(61)]:
+            val refused = linux_fresh_engine_group_name_check_v3(bad)
+            expect(refused.is_err()).to_equal(true)
+            expect(refused.unwrap_err()).to_equal("fresh-workload-engine-group-name")
+
+    it "detects a group that was replaced under the same name":
+        expect(linux_fresh_engine_group_identity_check_v3("", "0:30:812:41:20001:16877").is_ok()).to_equal(true)
+        expect(linux_fresh_engine_group_identity_check_v3("0:30:812:41:20001:16877", "0:30:812:41:20001:16877").is_ok()).to_equal(true)
+        val replaced = linux_fresh_engine_group_identity_check_v3("0:30:812:41:20001:16877", "0:30:900:41:20001:16877")
+        expect(replaced.is_err()).to_equal(true)
+        expect(replaced.unwrap_err()).to_equal("fresh-workload-engine-group-replaced")
+
+    it "steps the retirement: absent is done, a populated group is killed and waited on, an empty one removed":
+        step("A crash before the move, or a start that left nothing behind: no group, nothing to do")
+        expect(linux_fresh_engine_group_retire_step_v3(false, false, 0).unwrap()).to_equal(LinuxFreshEngineGroupStepV3.Done)
+        step("Present: always killed first, populated or not, so nothing can fork past the read")
+        expect(linux_fresh_engine_group_retire_step_v3(true, true, 0).unwrap()).to_equal(LinuxFreshEngineGroupStepV3.Kill)
+        expect(linux_fresh_engine_group_retire_step_v3(true, false, 0).unwrap()).to_equal(LinuxFreshEngineGroupStepV3.Kill)
+        expect(linux_fresh_engine_group_retire_step_v3(true, true, 1).unwrap()).to_equal(LinuxFreshEngineGroupStepV3.Wait)
+        expect(linux_fresh_engine_group_retire_step_v3(true, true, 200).unwrap()).to_equal(LinuxFreshEngineGroupStepV3.Wait)
+        expect(linux_fresh_engine_group_retire_step_v3(true, false, 1).unwrap()).to_equal(LinuxFreshEngineGroupStepV3.Remove)
+        step("Still populated at the bound: a named, retryable refusal; the group stays recorded")
+        val bound = linux_fresh_engine_group_retire_step_v3(true, true, 201)
+        expect(bound.is_err()).to_equal(true)
+        expect(bound.unwrap_err()).to_equal("fresh-workload-engine-group-still-populated")
+
+    it "loads the whole chain it pins":
+        val result = MachineFreshWorkloadActionResultV2(true, "", 0, "")
+        expect(result.complete).to_equal(true)
+        expect(result.exit_code).to_equal(0)
+
+    it "asks for the move on the Start launch only, as part of the launch identity":
+        val launch = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_workload_launch_v2.spl")
+        val project = engine_group_body_v3(launch, "pub fn linux_fresh_workload_project_launch_v2(", "\n\n")
+        expect(project.contains("    resource.leader_residue_mode = if command.action == LinuxFreshWorkloadActionV2.Start: GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3 else: \"\"\n    result.profile_v3 = Some(resource)\n")).to_equal(true)
+        expect(launch.split("leader_residue_mode").len()).to_equal(2)
+        step("A workspace start forks the same monitor: its projection asks in the same words")
+        val workspace = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_workspace_launch_v3.spl")
+        val workspace_project = engine_group_body_v3(workspace, "pub fn linux_fresh_workspace_project_launch_v3(", "\n\n")
+        expect(workspace_project.contains("    resource.leader_residue_mode = if command.action == LinuxFreshWorkloadActionV2.Start: GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3 else: \"\"\n    result.profile_v3 = Some(resource)\n")).to_equal(true)
+        expect(workspace.split("leader_residue_mode").len()).to_equal(2)
+        step("No other projection of the route sets it")
+        for path in ["src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl", "src/lib/nogc_sync_mut/io/linux_fresh_workspace_binding_v3.spl",
+                "src/lib/common/contracts/container/linux_fresh_workload_probe_v3.spl"]:
+            expect(file_read_text(path).contains("leader_residue_mode")).to_equal(false)
+
+    it "moves in the runtime only for a leader that exited 0, once, and before the pinned kill":
+        val runtime = file_read_text("src/runtime/runtime_linux_group_owner_impl.h")
+        val poll = engine_group_body_v3(runtime, "static int rt_lg_poll(RtLinuxGroup *owner) {", "\n}\n")
+        val move_at = poll.index_of("if (owner->leader_reaped && populated && owner->residue_move && !owner->residue_done) {")
+        val kill_at = poll.index_of("if (owner->leader_reaped && populated) {\n        if (!rt_lg_kill(owner)) return errno ? errno : EIO;")
+        expect(move_at > 0).to_equal(true)
+        expect(kill_at > move_at).to_equal(true)
+        val block = poll.substring(move_at, kill_at)
+        expect(block.contains("owner->residue_done = 1;")).to_equal(true)
+        expect(block.contains("if (owner->exit_code == 0 && !owner->timed_out && !owner->cancelled && !owner->kill_pending)")).to_equal(true)
+        expect(block.contains("if (!rt_lg_populated(owner->group_fd, &populated)) return EIO;")).to_equal(true)
+        step("Membership is the only selector: the frozen group's cgroup.procs, nothing by name or pid file")
+        val move = engine_group_body_v3(runtime, "static int rt_lg_move_residue_v3(RtLinuxGroup *owner) {", "\n}\n")
+        expect(move.contains("rt_lg_write_at(owner->group_fd, \"cgroup.freeze\", \"1\")")).to_equal(true)
+        expect(move.contains("mkdirat(rt_lg_delegation.root_fd, name, 0700)")).to_equal(true)
+        expect(move.contains("rt_lg_read_at(owner->group_fd, \"cgroup.procs\"")).to_equal(true)
+        expect(move.contains("comm")).to_equal(false)
+        expect(move.contains("pause")).to_equal(false)
+        expect(move.contains("conmon")).to_equal(false)
+        step("A move that did not finish leaves no half-filled group alive")
+        expect(move.contains("rt_lg_write_at(engine, \"cgroup.kill\", \"1\")")).to_equal(true)
+        step("The request is the thirteenth profile word; twelve words stay exactly what they were")
+        val parse = engine_group_body_v3(runtime, "static int rt_lg_profile_parse_v3(", "\n}\n")
+        expect(parse.contains("(count!=12&&count!=13)")).to_equal(true)
+        expect(parse.contains("if(count==13&&out->v[12]!=1)return 0;")).to_equal(true)
+
+    it "records the group from the launch the owner actually captured":
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        val capture = engine_group_body_v3(lifecycle, "    pub fn capture_v2(", "\n\n")
+        expect(capture.contains("machine_fresh_engine_group_requested_v3(process.launch)")).to_equal(true)
+        expect(capture.contains("machine_fresh_engine_group_record_v3(fresh_workload_states_v2[self.slot].engine_groups, process.identity_digest)")).to_equal(true)
+        step("The single helper slot and helper_retired are what they were")
+        expect(capture.contains("fresh_workload_states_v2[self.slot].process = Some(process)")).to_equal(true)
+        val exited = engine_group_body_v3(lifecycle, "    pub(package) fn prepare_exited_settlement_v3(", "\n\n")
+        expect(exited.contains("helper_retired: state.process.is_none() and state.reference.is_none(),")).to_equal(true)
+
+    it "kills at all five retirement sites, each before the settle or the census, and never settles past a group":
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        step("Site 2, exited-start settle: before custody's cohort census")
+        val exited = engine_group_body_v3(effects, "pub(package) fn machine_fresh_workload_settle_exited_start_v3(", "\n\n")
+        val exited_retire = exited.index_of("machine_fresh_workload_engine_group_retire_v3(custody, state)?")
+        expect(exited_retire > 0).to_equal(true)
+        expect(exited.index_of("custody.observe_probe_absence_v3(") > exited_retire).to_equal(true)
+        step("Site 1, subject settle: the destroy action retires before either settle; the pinned settle body is untouched")
+        val provider = file_read_text("src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl")
+        val destroy = engine_group_body_v3(provider, "        if action == \"destroy\":", "        Err(\"linux-fresh-workload-action-unsupported\")")
+        val destroy_retire = destroy.index_of("self.transfer.retire_engine_groups_v3()?")
+        expect(destroy_retire > destroy.index_of("LinuxFreshWorkloadActionV2.Absence)?")).to_equal(true)
+        expect(destroy.index_of("self.transfer.settle_exited_start_v3()?") > destroy_retire).to_equal(true)
+        expect(destroy.index_of("self.transfer.settle_v2()?") > destroy_retire).to_equal(true)
+        step("Site 3, transfer close: before the lifecycle closes its native side")
+        val authority = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val close = engine_group_body_v3(authority, "    pub fn close_v2() -> MachineFreshWorkloadCloseTurnV2:", "\n\n")
+        val close_retire = close.index_of("retained.retire_engine_groups_pending_v3()")
+        expect(close_retire > 0).to_equal(true)
+        expect(close.index_of("retained.state.close_native_v2()") > close_retire).to_equal(true)
+        step("Site 4, the finite probe lane's settle: before its cohort census")
+        val probe = engine_group_body_v3(file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_probe_owner_v3.spl"),
+            "fn machine_fresh_probe_settle_v3(", "\n\n")
+        val probe_retire = probe.index_of("machine_fresh_workload_engine_group_retire_v3(custody, state)?")
+        expect(probe_retire > 0).to_equal(true)
+        expect(probe.index_of("custody.observe_probe_absence_v3(command)?") > probe_retire).to_equal(true)
+        step("Site 5, the workspace settle: before both of its branches, which share the prepare_settlement_v2 gate")
+        val workspace = engine_group_body_v3(file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workspace_source_transition_v3.spl"),
+            "pub(package) fn machine_workspace_settle_v3(", "\n\n")
+        val workspace_retire = workspace.index_of("    machine_fresh_workload_engine_group_retire_v3(native, state)?")
+        expect(workspace_retire > workspace.index_of("    if state.settled_v2()?: return Ok(())")).to_equal(true)
+        expect(workspace.index_of("        return machine_workspace_settle_retained_v3(storage, native, state)") > workspace_retire).to_equal(true)
+        expect(workspace.index_of("    machine_fresh_workload_settle_workspace_v3(storage, native, state)") > workspace_retire).to_equal(true)
+        step("No other caller takes the census: every cohort sample is preceded by the retirement")
+        var census_callers = 0
+        for path in ["src/lib/nogc_sync_mut/container/machine_fresh_probe_owner_v3.spl", "src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl",
+                "src/lib/nogc_sync_mut/container/machine_authority_v1.spl", "src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl",
+                "src/lib/nogc_sync_mut/container/machine_fresh_probe_effects_v3.spl", "src/lib/nogc_sync_mut/container/machine_fresh_workspace_workflow_v3.spl",
+                "src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl"]:
+            census_callers = census_callers + file_read_text(path).split("custody.observe_probe_absence_v3(").len() - 1
+        expect(census_callers).to_equal(2)
+        step("The gate: all three settle preparations and both closes refuse while a group is recorded")
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        for anchor in ["    pub fn prepare_settlement_v2(", "    pub(package) fn prepare_exited_settlement_v3(",
+                "    pub(package) fn reserve_probe_settlement_v3(", "    pub fn close_native_v2(", "    pub fn closed_v2("]:
+            val body = engine_group_body_v3(lifecycle, anchor, "\n\n")
+            expect(body.contains("machine_fresh_engine_group_settle_gate_v3(state.engine_groups)?")).to_equal(true)
+        step("The order comes from the owner's own retained operations, never from a caller")
+        val decide = engine_group_body_v3(lifecycle, "    pub(package) fn engine_group_decision_v3(", "\n\n")
+        expect(decide.contains("for name in [\"stop\", \"remove\", \"absence\", \"probe-wait\"]:")).to_equal(true)
+        expect(decide.contains("helper_retired: state.process.is_none() and state.reference.is_none()")).to_equal(true)
+        step("The probe lane never stops its payload; only there does the owner's own completed Wait stand in for Stop")
+        expect(decide.contains("val ended = completed[0] or (state.probe_custody.is_some() and completed[3])")).to_equal(true)
+        expect(decide.contains("stop_completed: ended,")).to_equal(true)
+
+    it "holds the group under the delegated handle by name and by its recorded device and inode":
+        val native = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_workload_native_v2.spl")
+        val holder = engine_group_body_v3(native, "fn workload_engine_group_v3(", "\n\n")
+        expect(holder.contains("val context = workload_context_v2(slot, generation)?")).to_equal(true)
+        expect(holder.contains("state.handles[1].fd")).to_equal(true)
+        val group = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_engine_group_v3.spl")
+        val open = engine_group_body_v3(group, "fn engine_group_open_v3(", "\n\n")
+        expect(open.contains("openat(delegated_fd as i32, pointer, linux_workload_flags_v2(true), 0u32)")).to_equal(true)
+        expect(open.contains("linux_fresh_engine_group_identity_check_v3(expected, meta.unwrap().identity)")).to_equal(true)
+        expect(open.contains("linux_workload_filesystem_v2(arena, fd, 1667723888)")).to_equal(true)
+        val retire = engine_group_body_v3(group, "pub fn linux_fresh_engine_group_retire_v3(", "\n@else:")
+        expect(retire.contains("linux_workload_named_absent_v2(arena, delegated_fd, name).is_ok()")).to_equal(true)
+        expect(retire.contains("engine_group_open_v3(arena, delegated_fd, name, expected)?")).to_equal(true)
+        expect(retire.contains("unlinkat(delegated_fd as i32, ")).to_equal(true)
+        step("Only a kernel-reported empty group is removed, and its absence is read back")
+        expect(retire.index_of("LinuxFreshEngineGroupStepV3.Remove") > retire.index_of("LinuxFreshEngineGroupStepV3.Kill")).to_equal(true)
+        expect(retire.contains("linux_workload_named_absent_v2(arena, delegated_fd, name)?")).to_equal(true)

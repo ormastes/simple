@@ -1,6 +1,7 @@
 # `check-tree-size-push.shs` scan phase stalls for 15-20+ min — root cause: btrfs metadata-chunk exhaustion, not the script
 
-Status: OPEN (diagnosis only — script NOT modified per instruction)
+Status: fix-implemented-verification-pending
+waiting-for: Linux btrfs live push-host verification
 Date: 2026-08-11
 
 ## Symptom (reported)
@@ -166,3 +167,18 @@ Separate observation (not this root cause): on Windows (Git Bash, NTFS) the
 guard's mandatory selftest alone did not finish inside `timeout 900`
 (`ERROR — the script stopped without reaching a verdict`), far above the
 push-tier < 20 s target — fork cost of the per-fixture git repos on Windows.
+
+---
+
+## 2026-11-27 Fix Applied (Wave 5 Lane W5-4, `work/w5-4-scripts-caret-font-20261127`)
+
+- Updated `scripts/check/check-tree-size-push.shs`:
+  - Added `choose_tmproot()` selecting `/dev/shm` tmpfs (`>=64 MiB` free) when available and exporting `TMPDIR="$TMPROOT"` so scratch I/O avoids the contended btrfs root/repo filesystem.
+  - Replaced multi-MB intermediate scratch files (`lsfull.out`, `ls.out`, `lst.out`, `sorted.out`, `dup.out`, `src.out`, `fc.out`, `pc.out`, `se.out`, `duphead.out`) and 7x `awk`/`sort`/`uniq` invocations per commit inside `inspect_commit()` with single-pass in-memory `awk` over `git ls-tree -r -t -z`, while preserving fail-closed git exit checks via `$TMPROOT/*.rc`.
+  - Added per-commit `file_count` caching (`FC_CACHE_FILE`), diff-scoped `diff_scoped_file_count()` via `git diff-tree -r --no-renames --raw -z`, in-range `IC_CACHE_PATHS` reuse, chronological `scan_revs` ordering, shared selftest blob optimization (`ST_SHARED_BLOB`), and two regression fixtures (`diff-scoped-parent-parity`, `zero-spill-tmproot-hygiene`; `SELFTEST_EXPECTED=29`).
+- Host verification (Windows NTFS):
+  - `sh scripts/check/check-tree-size-push.shs --selftest`: PASS (`29/29` fixtures correct).
+  - `sh scripts/check/watch-origin-tree-health.shs --selftest`: PASS (`14/14` cases ok).
+  - `sh scripts/check/check-guard-selftest-repo-isolation.shs`: PASS (`3` guards, `0` repo mutations).
+  - `sh scripts/check/check-tree-size-push.shs --push-tip HEAD~1..HEAD`: PASS (`17336 ms`).
+- Remaining verification (`waiting-for`): live run on a Linux btrfs push host confirming `/dev/shm` tmpfs scratch placement and zero `handle_reserve_ticket` stall.

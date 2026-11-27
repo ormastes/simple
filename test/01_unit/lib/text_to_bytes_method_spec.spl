@@ -1,10 +1,25 @@
 # text_to_bytes_method_missing_on_text_receiver_2026-09-06
 #
 # `text.to_bytes()` must resolve on a text receiver and return the UTF-8
-# bytes of the string. Interpreter lane: supported natively. JIT lane fixed
-# in src/compiler_rust/compiler/src/codegen/instr/calls.rs ("bytes" |
-# "to_bytes" => rt_string_bytes), matching the interpreter and LLVM lanes;
-# pending seed rebuild to activate on `run`.
+# bytes of the string.
+#
+# Interpreter lane (spec/module-level evaluation): supported natively —
+# pinned below; 5/5 PASS on the fresh seed
+# (SIMPLE_LIB=src build/p3cache/fresh-seed/simple.exe test
+# test/01_unit/lib/text_to_bytes_method_spec.spl --mode=interpreter
+# --no-cache --no-session-daemon).
+#
+# Compiled lane (`fn main` programs, JIT or `--mode=interpreter`): STILL
+# FAILS on the current seed — `Runtime error: Function 'str.to_bytes' not
+# found`, exit 70. Seed commit 03bcc1e03dc added
+# "bytes" | "to_bytes" => rt_string_bytes to
+# src/compiler_rust/compiler/src/codegen/instr/calls.rs, but that table is
+# not on the dispatch path for this shape: MIR lowering special-cases only
+# `bytes` (mir/lower/lowering_expr_method.rs) and the static method table
+# (codegen/instr/methods.rs) has no ("String", "to_bytes") arm, so the call
+# degrades to a dynamic `str.to_bytes` lookup no runtime registry
+# satisfies. The residual fix belongs in src/compiler_rust (method alias in
+# MIR lowering, mirroring the interpreter's "bytes" | "to_bytes" arm).
 
 describe "text.to_bytes receiver method":
     it "returns ASCII bytes":
@@ -27,3 +42,7 @@ describe "text.to_bytes receiver method":
         use std.common.text_bytes.{bytes_to_text}
         val original = "Simple héllo 日本"
         expect(bytes_to_text(original.to_bytes())).to_equal(original)
+
+    it "matches the text_to_bytes free function exactly":
+        use std.common.text_bytes.{text_to_bytes}
+        expect("héllo 日本".to_bytes()).to_equal(text_to_bytes("héllo 日本"))

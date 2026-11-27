@@ -817,6 +817,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_enum_payload", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_self", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_option_float_bits", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_option_float_tag", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_option_float_pack", &[I64, I64, F64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_trap", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_expect_or_trap", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_value", &[I64, I64], &[I64]),

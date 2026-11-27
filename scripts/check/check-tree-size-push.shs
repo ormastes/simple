@@ -221,8 +221,68 @@ die() {
 # means no core.quotePath quoting, so a prefix match on a name is exactly the
 # pathspec match `ls-tree -r -- <path>` performed.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# tmpfs-backed scratch root + zero-spill streaming inspection
+# ---------------------------------------------------------------------------
+# Under metadata-exhausted btrfs (bug: tree_size_guard_hangs_on_btrfs_metadata_
+# exhaustion_2026-08-11), writing multi-MB scratch files (lsz.out, lsfull.out,
+# ls.out, lst.out, sorted.out, dup.out, fc.out) to `/tmp` on the contended
+# root btrfs volume stalled `git ls-tree` writes in `handle_reserve_ticket`.
+# Fix:
+#   1. Prefer tmpfs (`/dev/shm` when writable with >=64 MiB free) for TMPROOT
+#      and export TMPDIR="$TMPROOT" so subprocess scratch stays off btrfs.
+#   2. Stream `git ls-tree -r -t -z` through one single-pass `awk` pipeline in
+#      memory (counting blobs, detecting duplicate entries, measuring `src/`
+#      and every CFG_PATHS floor simultaneously) — zero multi-MB scratch
+#      files on disk and zero `sort`/`uniq` or repeated `awk` passes.
+#   3. Cache per-commit blob counts in TMPROOT and traverse commit ranges
+#      oldest-first so parent counts hit cache or diff-scoped delta instead of
+#      re-walking the full tree.
+choose_tmproot() {
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+        ct_avail_kb=$(LC_ALL=C df -Pk /dev/shm 2>/dev/null | awk 'NR == 2 { print $4 + 0 }') || ct_avail_kb=0
+        case "$ct_avail_kb" in
+            ''|*[!0-9]*) ct_avail_kb=0 ;;
+        esac
+        if [ "$ct_avail_kb" -ge 65536 ]; then
+            ct_dir=$(mktemp -d /dev/shm/check-tree-size.XXXXXX 2>/dev/null) || ct_dir=""
+            if [ -n "$ct_dir" ]; then
+                printf '%s' "$ct_dir"
+                return 0
+            fi
+        fi
+    fi
+    mktemp -d
+}
+
 IC_CACHE_REPO=""
 IC_CACHE_COMMIT=""
+IC_CACHE_PATHS=""
+IC_SRC_SELF=""
+IC_SRC_CHILDREN=0
+IC_PATH_COUNTS=""
+FC_CACHE_FILE=""
+
+fc_cache_key() {
+    # Key on canonical resolved SHA + repo hash/path without spaces.
+    printf '%s|%s' "$1" "$2"
+}
+
+fc_cache_get() {
+    [ -n "$FC_CACHE_FILE" ] && [ -s "$FC_CACHE_FILE" ] || return 1
+    fc_key=$(fc_cache_key "$1" "$2")
+    awk -F'\t' -v k="$fc_key" '
+        $1 == k { val = $2; found = 1 }
+        END { if (found) { printf "%s", val; exit 0 } exit 1 }
+    ' "$FC_CACHE_FILE"
+}
+
+fc_cache_put() {
+    [ -n "$FC_CACHE_FILE" ] || return 0
+    fc_key=$(fc_cache_key "$1" "$2")
+    printf '%s\t%s\n' "$fc_key" "$3" >>"$FC_CACHE_FILE"
+}
+
 inspect_commit() {
     ic_repo=$1
     ic_commit=$2
@@ -232,62 +292,117 @@ inspect_commit() {
     IC_DUPLIST=""
     IC_CACHE_REPO=""
     IC_CACHE_COMMIT=""
+    IC_SRC_SELF=""
+    IC_SRC_CHILDREN=0
+    IC_PATH_COUNTS=""
 
-    ic_list="$TMPROOT/ls.out"
-    git -C "$ic_repo" ls-tree -r -t -z "$ic_commit" >"$TMPROOT/lsz.out" 2>"$TMPROOT/ls.err"
-    ic_st=$?
-    if [ "$ic_st" -ne 0 ]; then
-        IC_ERR="git ls-tree -r -t failed (status $ic_st) on $ic_commit"
-        return 1
-    fi
-    tr '\0' '\n' <"$TMPROOT/lsz.out" >"$TMPROOT/lsfull.out" || { IC_ERR="tr failed on $ic_commit"; return 1; }
-    # "<mode> SP <type> SP <sha> TAB <path>" -> three derived lists. The path is
-    # everything after the FIRST tab, so a tab inside a name cannot truncate it.
-    awk -v blobs="$ic_list" -v alln="$TMPROOT/lst.out" -v srcl="$TMPROOT/src.out" '
+    ic_rcfile="$TMPROOT/ic.rc"
+    ic_summary="$TMPROOT/ic.summary"
+    rm -f "$ic_rcfile" "$ic_summary" "$TMPROOT/ls.err"
+
+    # "<mode> SP <type> SP <sha> TAB <path>" -> single in-memory streaming pass.
+    # Capture git's exit status cleanly across the POSIX pipeline via ic_rcfile.
+    {
+        git -C "$ic_repo" -c core.quotePath=false ls-tree -r -t -z "$ic_commit" 2>"$TMPROOT/ls.err"
+        printf '%d\n' "$?" >"$ic_rcfile"
+    } | LC_ALL=C tr '\0' '\n' | LC_ALL=C awk -v paths_cfg="$CFG_PATHS" -v outf="$ic_summary" '
+        BEGIN {
+            n_specs = split(paths_cfg, raw_specs, " ")
+            p_count = 0
+            for (i = 1; i <= n_specs; i++) {
+                if (raw_specs[i] == "") continue
+                c = index(raw_specs[i], ":")
+                if (c > 1) {
+                    p_count++
+                    p_name[p_count] = substr(raw_specs[i], 1, c - 1)
+                    p_slash[p_count] = p_name[p_count] "/"
+                    p_slen[p_count] = length(p_slash[p_count])
+                    p_hits[p_count] = 0
+                }
+            }
+            files = 0
+            dups = 0
+            dup_sample_n = 0
+            src_self = ""
+            src_children = 0
+            bad = 0
+        }
         {
             t = index($0, "\t")
             if (t == 0) { bad = 1; next }
             split(substr($0, 1, t - 1), meta, " ")
             name = substr($0, t + 1)
-            print name > alln
-            if (meta[2] != "tree") print name > blobs
-            if (name == "src") print "SELF " meta[2] > srcl
-            else if (name ~ /^src\/[^\/]+$/) print "CHILD" > srcl
+            seen[name]++
+            if (seen[name] == 2) {
+                dups++
+                if (dup_sample_n < 5) {
+                    dup_sample_n++
+                    dup_samples[dup_sample_n] = name
+                }
+            }
+            if (meta[2] != "tree") {
+                files++
+                for (i = 1; i <= p_count; i++) {
+                    if (name == p_name[i] || substr(name, 1, p_slen[i]) == p_slash[i]) {
+                        p_hits[i]++
+                    }
+                }
+            }
+            if (name == "src") {
+                src_self = meta[2]
+            } else if (substr(name, 1, 4) == "src/" && index(substr(name, 5), "/") == 0) {
+                src_children++
+            }
         }
-        END { printf "" > blobs; printf "" > alln; printf "" > srcl; exit bad }' "$TMPROOT/lsfull.out"
-    ic_st=$?
-    if [ "$ic_st" -ne 0 ]; then
-        IC_ERR="could not parse the ls-tree listing of $ic_commit (awk status $ic_st)"
+        END {
+            printf "FILES=%d\n", files > outf
+            printf "DUPS=%d\n", dups > outf
+            printf "SRC_SELF=%s\n", src_self > outf
+            printf "SRC_CHILDREN=%d\n", src_children > outf
+            for (i = 1; i <= p_count; i++) {
+                printf "PATH:%s=%d\n", p_name[i], p_hits[i] > outf
+            }
+            for (i = 1; i <= dup_sample_n; i++) {
+                printf "DUP:%s\n", dup_samples[i] > outf
+            }
+            close(outf)
+            exit bad
+        }
+    '
+    ic_awk_st=$?
+    ic_git_st=$(cat "$ic_rcfile" 2>/dev/null) || ic_git_st=""
+    case "$ic_git_st" in
+        ''|*[!0-9]*)
+            IC_ERR="git ls-tree -r -t exited without status on $ic_commit"
+            return 1
+            ;;
+    esac
+    if [ "$ic_git_st" -ne 0 ]; then
+        IC_ERR="git ls-tree -r -t failed (status $ic_git_st) on $ic_commit"
         return 1
     fi
+    if [ "$ic_awk_st" -ne 0 ] || [ ! -s "$ic_summary" ]; then
+        IC_ERR="could not parse the ls-tree listing of $ic_commit (awk status $ic_awk_st)"
+        return 1
+    fi
+
+    while IFS= read -r ic_line; do
+        case "$ic_line" in
+            FILES=*) IC_FILES=${ic_line#FILES=} ;;
+            DUPS=*) IC_DUPS=${ic_line#DUPS=} ;;
+            SRC_SELF=*) IC_SRC_SELF=${ic_line#SRC_SELF=} ;;
+            SRC_CHILDREN=*) IC_SRC_CHILDREN=${ic_line#SRC_CHILDREN=} ;;
+            PATH:*) IC_PATH_COUNTS="${IC_PATH_COUNTS}${ic_line#PATH:}
+" ;;
+            DUP:*) IC_DUPLIST="${IC_DUPLIST}${IC_DUPLIST:+
+}${ic_line#DUP:}" ;;
+        esac
+    done <"$ic_summary"
+
     IC_CACHE_REPO=$ic_repo
     IC_CACHE_COMMIT=$ic_commit
-
-    IC_FILES=$(wc -l <"$ic_list")
-    IC_FILES=$(printf '%s' "$IC_FILES" | tr -d ' ')
-
-    # Duplicate entries. The corruption axis is "the same NAME appears twice at
-    # the same tree level", and the SHAs of the two entries need not match.
-    #
-    # `ls-tree -r` (blobs only) only exposes that when the two entries expand to
-    # the same path list — i.e. when they are byte-identical trees. Two `src/lib`
-    # entries holding DIFFERENT subtrees expand to disjoint paths and produce
-    # ZERO duplicate lines. PROVED 2026-08-02 with a `git mktree` fixture:
-    # same-sha duplicate -> 2 dup lines, different-sha duplicate -> 0, both at a
-    # subtree and at the root. That is the same defect class as the fixed-width
-    # `^<<<<<<< ` conflict-marker regex: an exact-string assumption that a real
-    # variant walks straight past.
-    #
-    # `-t` additionally emits the TREE entries themselves, so a name repeated at
-    # a level is listed twice regardless of what is under it. Duplicate BLOBs are
-    # already caught by either listing. IC_FILES stays on the blob-only listing so
-    # the size band keeps counting files, not files+directories. lst.out is
-    # that -t name list, written by the single listing above.
-    sort "$TMPROOT/lst.out" >"$TMPROOT/sorted.out" || { IC_ERR="sort failed on $ic_commit"; return 1; }
-    uniq -d "$TMPROOT/sorted.out" >"$TMPROOT/dup.out" || { IC_ERR="uniq failed on $ic_commit"; return 1; }
-    IC_DUPS=$(wc -l <"$TMPROOT/dup.out")
-    IC_DUPS=$(printf '%s' "$IC_DUPS" | tr -d ' ')
-    IC_DUPLIST=$(head -n 5 "$TMPROOT/dup.out")
+    IC_CACHE_PATHS=$CFG_PATHS
+    fc_cache_put "$ic_repo" "$ic_commit" "$IC_FILES"
     return 0
 }
 
@@ -296,33 +411,96 @@ inspect_commit() {
 # ---------------------------------------------------------------------------
 path_count() {
     if [ -n "$IC_CACHE_COMMIT" ] && [ "$1" = "$IC_CACHE_REPO" ] && [ "$2" = "$IC_CACHE_COMMIT" ]; then
-        # Same predicate as the pathspec: the path itself, or anything under it.
-        awk -v p="$3" 'BEGIN { pp = p "/"; lp = length(pp) }
-            $0 == p || substr($0, 1, lp) == pp { n++ }
-            END { printf "%d", n }' "$TMPROOT/ls.out"
-        return $?
+        pc_cached=$(printf '%s' "$IC_PATH_COUNTS" | awk -F= -v p="$3" '$1 == p { print $2; found = 1; exit } END { if (!found) exit 1 }')
+        if [ $? -eq 0 ] && [ -n "$pc_cached" ]; then
+            printf '%s' "$pc_cached"
+            return 0
+        fi
+        # Cache holds only CFG_PATHS floors; any ad-hoc path falls through.
     fi
-    pc_out="$TMPROOT/pc.out"
-    git -C "$1" ls-tree -r --name-only "$2" -- "$3" >"$pc_out" 2>/dev/null
-    pc_st=$?
-    [ "$pc_st" -ne 0 ] && return "$pc_st"
-    pc_n=$(wc -l <"$pc_out")
-    printf '%s' "$pc_n" | tr -d ' '
+    pc_rcfile="$TMPROOT/pc.rc"
+    rm -f "$pc_rcfile"
+    pc_n=$({
+        git -C "$1" -c core.quotePath=false ls-tree -r -z --name-only "$2" -- "$3" 2>/dev/null
+        printf '%d\n' "$?" >"$pc_rcfile"
+    } | LC_ALL=C tr -cd '\0' | wc -c)
+    pc_st=$(cat "$pc_rcfile" 2>/dev/null) || pc_st=""
+    case "$pc_st" in
+        0) printf '%s' "$(printf '%s' "$pc_n" | tr -d ' ')"; return 0 ;;
+        ''|*[!0-9]*) return 1 ;;
+        *) return "$pc_st" ;;
+    esac
+}
+
+# Diff-scoped blob count against an already-measured commit on healthy trees:
+# git diff-tree skips unchanged subtrees in O(changed entries) rather than
+# walking all ~110k tree entries again. Falls back to streamed ls-tree if
+# diff-tree fails or is inapplicable.
+diff_scoped_file_count() {
+    ds_repo=$1
+    ds_target=$2
+    ds_ref=$3
+    ds_ref_files=$4
+    ds_rcfile="$TMPROOT/ds.rc"
+    rm -f "$ds_rcfile"
+    ds_delta=$({
+        git -C "$ds_repo" diff-tree -r --no-renames --raw -z "$ds_ref" "$ds_target" 2>/dev/null
+        printf '%d\n' "$?" >"$ds_rcfile"
+    } | LC_ALL=C tr '\0' '\n' | LC_ALL=C awk '
+        BEGIN { d = 0 }
+        /^:/ {
+            # Format: ":oldmode newmode oldsha newsha status"
+            n = split($0, f, " ")
+            st = (n >= 5) ? substr(f[5], 1, 1) : ""
+            if (st == "A") d++
+            else if (st == "D") d--
+            next
+        }
+        END { printf "%d", d }
+    ')
+    ds_st=$(cat "$ds_rcfile" 2>/dev/null) || ds_st=""
+    [ "$ds_st" = "0" ] || return 1
+    case "$ds_delta" in
+        ''|'-') return 1 ;;
+        -*|*[0-9]) : ;;
+        *) return 1 ;;
+    esac
+    printf '%d' $(( ds_ref_files + ds_delta ))
     return 0
 }
 
-# Count only blobs for a relative-band reference. Parent/base references do not
-# need duplicate, src-shape, or path-floor analysis: those invariants are
-# applied to the candidate tree. Avoiding inspect_commit here removes one full
-# recursive listing plus sort from every candidate evaluation.
+# Count only blobs for a relative-band reference. Consults per-run cache first,
+# then diff-scoped delta against IC_CACHE_COMMIT when that commit is duplicate-free,
+# and otherwise streams `ls-tree -z` without writing any temp files.
 file_count() {
-    fc_out="$TMPROOT/fc.out"
-    git -C "$1" ls-tree -r --name-only "$2" >"$fc_out" 2>/dev/null
-    fc_st=$?
-    [ "$fc_st" -ne 0 ] && return "$fc_st"
-    fc_n=$(wc -l <"$fc_out")
-    printf '%s' "$fc_n" | tr -d ' '
-    return 0
+    if fc_cached=$(fc_cache_get "$1" "$2"); then
+        printf '%s' "$fc_cached"
+        return 0
+    fi
+    if [ -n "$IC_CACHE_COMMIT" ] && [ "$1" = "$IC_CACHE_REPO" ] && [ "${IC_DUPS:-1}" -eq 0 ]; then
+        if fc_diff_n=$(diff_scoped_file_count "$1" "$2" "$IC_CACHE_COMMIT" "$IC_FILES"); then
+            fc_cache_put "$1" "$2" "$fc_diff_n"
+            printf '%s' "$fc_diff_n"
+            return 0
+        fi
+    fi
+    fc_rcfile="$TMPROOT/fc.rc"
+    rm -f "$fc_rcfile"
+    fc_n=$({
+        git -C "$1" -c core.quotePath=false ls-tree -r -z --name-only "$2" 2>/dev/null
+        printf '%d\n' "$?" >"$fc_rcfile"
+    } | LC_ALL=C tr -cd '\0' | wc -c)
+    fc_st=$(cat "$fc_rcfile" 2>/dev/null) || fc_st=""
+    case "$fc_st" in
+        0)
+            fc_clean=$(printf '%s' "$fc_n" | tr -d ' ')
+            fc_cache_put "$1" "$2" "$fc_clean"
+            printf '%s' "$fc_clean"
+            return 0
+            ;;
+        ''|*[!0-9]*) return 1 ;;
+        *) return "$fc_st" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -333,32 +511,46 @@ file_count() {
 # ---------------------------------------------------------------------------
 src_entry_count() {
     if [ -n "$IC_CACHE_COMMIT" ] && [ "$1" = "$IC_CACHE_REPO" ] && [ "$2" = "$IC_CACHE_COMMIT" ]; then
-        if [ ! -s "$TMPROOT/src.out" ]; then
+        if [ -z "$IC_SRC_SELF" ]; then
             printf '%s' "-1"
             return 0
         fi
-        # A src/ that is a TREE: count its direct entries. Anything else (a
-        # blob or gitlink named src) takes the uncached path below, which
-        # reports git's own failure exactly as before.
-        if "$GREP" -qx 'SELF tree' "$TMPROOT/src.out"; then
-            awk '$0 == "CHILD" { n++ } END { printf "%d", n }' "$TMPROOT/src.out"
-            return $?
+        # A src/ that is a TREE: return its counted direct entries directly.
+        # Anything else (a blob or gitlink named src) takes the uncached path
+        # below, which reports git's own failure exactly as before.
+        if [ "$IC_SRC_SELF" = "tree" ]; then
+            printf '%s' "$IC_SRC_CHILDREN"
+            return 0
         fi
     fi
-    se_out="$TMPROOT/se.out"
-    git -C "$1" ls-tree --name-only "$2" -- src >"$se_out" 2>/dev/null
-    se_st=$?
-    [ "$se_st" -ne 0 ] && return "$se_st"
-    if [ ! -s "$se_out" ]; then
+    se_rcfile="$TMPROOT/se.rc"
+    rm -f "$se_rcfile"
+    se_self=$({
+        git -C "$1" ls-tree -z --name-only "$2" -- src 2>/dev/null
+        printf '%d\n' "$?" >"$se_rcfile"
+    } | LC_ALL=C tr -cd '\0' | wc -c)
+    se_st=$(cat "$se_rcfile" 2>/dev/null) || se_st=""
+    case "$se_st" in
+        0) : ;;
+        ''|*[!0-9]*) return 1 ;;
+        *) return "$se_st" ;;
+    esac
+    se_self=$(printf '%s' "$se_self" | tr -d ' ')
+    if [ "$se_self" -eq 0 ]; then
         printf '%s' "-1"
         return 0
     fi
-    git -C "$1" ls-tree --name-only "$2:src" >"$se_out" 2>/dev/null
-    se_st=$?
-    [ "$se_st" -ne 0 ] && return "$se_st"
-    se_n=$(wc -l <"$se_out")
-    printf '%s' "$se_n" | tr -d ' '
-    return 0
+    rm -f "$se_rcfile"
+    se_n=$({
+        git -C "$1" ls-tree -z --name-only "$2:src" 2>/dev/null
+        printf '%d\n' "$?" >"$se_rcfile"
+    } | LC_ALL=C tr -cd '\0' | wc -c)
+    se_st=$(cat "$se_rcfile" 2>/dev/null) || se_st=""
+    case "$se_st" in
+        0) printf '%s' "$(printf '%s' "$se_n" | tr -d ' ')"; return 0 ;;
+        ''|*[!0-9]*) return 1 ;;
+        *) return "$se_st" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -372,7 +564,9 @@ evaluate_commit() {
     ev_base=$3
     ev_bad=0
 
-    inspect_commit "$ev_repo" "$ev_commit" || return 2
+    if [ "$IC_CACHE_COMMIT" != "$ev_commit" ] || [ "$IC_CACHE_REPO" != "$ev_repo" ] || [ "$IC_CACHE_PATHS" != "$CFG_PATHS" ]; then
+        inspect_commit "$ev_repo" "$ev_commit" || return 2
+    fi
     EV_FILES=$IC_FILES
 
     # --- check 1a: absolute band (catches a tip that INHERITED a wiped base) --
@@ -401,10 +595,9 @@ evaluate_commit() {
     # --- check 2: duplicate tree entries -------------------------------------
     if [ "$IC_DUPS" -ne 0 ]; then
         echo "  - DUPLICATE TREE ENTRIES: $IC_DUPS duplicated path(s), e.g.:" >&2
-        printf '%s\n' "$IC_DUPLIST" >"$TMPROOT/duphead.out"
-        while IFS= read -r ev_d; do
-            [ -n "$ev_d" ] && echo "      $ev_d" >&2
-        done <"$TMPROOT/duphead.out"
+        if [ -n "$IC_DUPLIST" ]; then
+            printf '%s\n' "$IC_DUPLIST" | sed 's/^/      /' >&2
+        fi
         ev_bad=1
     fi
 
@@ -547,6 +740,9 @@ reference_for_rev() {
 #   convention: 0 clean, 1 violated, 2 could-not-determine.
 # ---------------------------------------------------------------------------
 evaluate_rev_banded() {
+    if [ "$IC_CACHE_COMMIT" != "$2" ] || [ "$IC_CACHE_REPO" != "$1" ] || [ "$IC_CACHE_PATHS" != "$CFG_PATHS" ]; then
+        inspect_commit "$1" "$2" || return 2
+    fi
     reference_for_rev "$1" "$2" "$3" "$4" || return 2
     if [ "$REF_FILES" -lt 0 ]; then
         # Not fail-open-in-silence: the narrowing is stated on stderr every time.
@@ -556,9 +752,9 @@ evaluate_rev_banded() {
 }
 
 # ===========================================================================
-# SELFTEST — runs before every scan, FATAL. 27 fixtures.
+# SELFTEST — runs before every scan, FATAL. 29 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=27
+SELFTEST_EXPECTED=29
 
 # --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
 # Every git call that BUILDS a fixture must go through st_git/st_git_init.
@@ -631,22 +827,22 @@ st_mktree() {
     shift 2
     st_idx="$TMPROOT/st.index"
     rm -f "$st_idx"
-    st_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_repo" hash-object -w --stdin) || return 1
-    # One `git update-index --index-info` fork for the WHOLE fixture instead of
-    # one `--cacheinfo` fork PER FILE. The fixtures add ~1,100 paths in total,
-    # so the old shape forked ~1,100 git processes before the scan even began;
-    # on a loaded machine (load average 48 was observed on 2026-08-10) that
-    # alone ran past a caller's 600s cap and the guard was SIGTERMed with no
-    # verdict. Identical index content — same modes, blobs and paths, still
-    # fail-closed on a non-zero git status — just not once per process.
-    : >"$TMPROOT/mktree.in"
-    for st_d in "$@"; do
-        st_i=0
-        while [ "$st_i" -lt "$st_n" ]; do
-            printf '100644 %s\t%s/f%s.txt\n' "$st_blob" "$st_d" "$st_i" >>"$TMPROOT/mktree.in"
-            st_i=$(( st_i + 1 ))
+    if [ -n "${ST_SHARED_BLOB:-}" ] && [ "$st_repo" = "${ST_SHARED_REPO:-}" ]; then
+        st_blob=$ST_SHARED_BLOB
+    else
+        st_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_repo" hash-object -w --stdin) || return 1
+    fi
+    # One `git update-index --index-info` fork for the WHOLE fixture and one
+    # redirected write (avoid per-file open/close storms on btrfs/NTFS).
+    {
+        for st_d in "$@"; do
+            st_i=0
+            while [ "$st_i" -lt "$st_n" ]; do
+                printf '100644 %s\t%s/f%s.txt\n' "$st_blob" "$st_d" "$st_i"
+                st_i=$(( st_i + 1 ))
+            done
         done
-    done
+    } >"$TMPROOT/mktree.in"
     ST_INDEX="$st_idx" st_git "$st_repo" update-index --add --index-info \
         <"$TMPROOT/mktree.in" >/dev/null || return 1
     st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
@@ -662,17 +858,22 @@ st_mktree_spec() {
     shift 2
     sp_idx="$TMPROOT/st.spec.index"
     rm -f "$sp_idx"
-    sp_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$sp_repo" hash-object -w --stdin) || return 1
-    : >"$TMPROOT/mktree.spec.in"
-    for sp_s in "$@"; do
-        sp_d=${sp_s%%:*}
-        sp_n=${sp_s##*:}
-        sp_i=0
-        while [ "$sp_i" -lt "$sp_n" ]; do
-            printf '100644 %s\t%s/f%s.txt\n' "$sp_blob" "$sp_d" "$sp_i" >>"$TMPROOT/mktree.spec.in"
-            sp_i=$(( sp_i + 1 ))
+    if [ -n "${ST_SHARED_BLOB:-}" ] && [ "$sp_repo" = "${ST_SHARED_REPO:-}" ]; then
+        sp_blob=$ST_SHARED_BLOB
+    else
+        sp_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$sp_repo" hash-object -w --stdin) || return 1
+    fi
+    {
+        for sp_s in "$@"; do
+            sp_d=${sp_s%%:*}
+            sp_n=${sp_s##*:}
+            sp_i=0
+            while [ "$sp_i" -lt "$sp_n" ]; do
+                printf '100644 %s\t%s/f%s.txt\n' "$sp_blob" "$sp_d" "$sp_i"
+                sp_i=$(( sp_i + 1 ))
+            done
         done
-    done
+    } >"$TMPROOT/mktree.spec.in"
     ST_INDEX="$sp_idx" st_git "$sp_repo" update-index --add --index-info \
         <"$TMPROOT/mktree.spec.in" >/dev/null || return 1
     sp_tree=$(ST_INDEX="$sp_idx" st_git "$sp_repo" write-tree) || return 1
@@ -690,13 +891,18 @@ st_mkdirtree() {
     # prove the duplicate-entry check does not depend on the two entries being
     # byte-identical.
     st_md_repo=$1; st_md_n=$2; st_md_p=$3
-    st_md_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_md_repo" hash-object -w --stdin) || return 1
-    st_md_i=0
-    : >"$TMPROOT/md.in"
-    while [ "$st_md_i" -lt "$st_md_n" ]; do
-        printf '100644 blob %s\t%s%s.txt\n' "$st_md_blob" "$st_md_p" "$st_md_i" >>"$TMPROOT/md.in"
-        st_md_i=$(( st_md_i + 1 ))
-    done
+    if [ -n "${ST_SHARED_BLOB:-}" ] && [ "$st_md_repo" = "${ST_SHARED_REPO:-}" ]; then
+        st_md_blob=$ST_SHARED_BLOB
+    else
+        st_md_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_md_repo" hash-object -w --stdin) || return 1
+    fi
+    {
+        st_md_i=0
+        while [ "$st_md_i" -lt "$st_md_n" ]; do
+            printf '100644 blob %s\t%s%s.txt\n' "$st_md_blob" "$st_md_p" "$st_md_i"
+            st_md_i=$(( st_md_i + 1 ))
+        done
+    } >"$TMPROOT/md.in"
     st_git "$st_md_repo" mktree <"$TMPROOT/md.in"
 }
 
@@ -751,6 +957,8 @@ selftest() {
         echo "SELFTEST FAIL: fixture repo '$st_dir' has no .git — git init was redirected" >&2
         return 1
     }
+    ST_SHARED_REPO=$st_dir
+    ST_SHARED_BLOB=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_dir" hash-object -w --stdin) || return 1
 
     # Fixture thresholds: small, so fixtures stay cheap and each one isolates the
     # check it is meant to prove. PRODUCTION thresholds are exercised by the real
@@ -915,6 +1123,42 @@ selftest() {
     st_assert healthy-exact-base  "$st_healthy" 200 0
     st_assert healthy-small-churn "$st_healthy" 198 0   # delta 2 == tolerance 2
 
+    # --- 2 batched/zero-spill optimization invariants ------------------------
+    # Fixture 28: diff-scoped parent count matches exact ls-tree count on both
+    # incremental growth and wipe transitions, and populate fc_cache.
+    st_ran=$(( st_ran + 1 ))
+    FC_CACHE_FILE="$TMPROOT/st.fc_cache"
+    rm -f "$FC_CACHE_FILE"
+    inspect_commit "$st_dir" "$st_c5" 2>"$TMPROOT/st.err" || st_fail=1
+    st_diff_p=$(diff_scoped_file_count "$st_dir" "$st_c4" "$st_c5" "$IC_FILES" 2>"$TMPROOT/st.err") || st_diff_p=-1
+    inspect_commit "$st_dir" "$st_wipe_child" 2>"$TMPROOT/st.err" || st_fail=1
+    st_diff_w=$(diff_scoped_file_count "$st_dir" "$st_c2" "$st_wipe_child" "$IC_FILES" 2>"$TMPROOT/st.err") || st_diff_w=-1
+    if [ "$st_diff_p" = "208" ] && [ "$st_diff_w" = "204" ]; then
+        echo "SELFTEST: fixture 'diff-scoped-parent-parity' -> ok"
+    else
+        echo "SELFTEST FAIL: fixture 'diff-scoped-parent-parity' expected 208/204, got $st_diff_p/$st_diff_w" >&2
+        st_fail=1
+    fi
+
+    # Fixture 29: zero-spill streaming leaves none of the multi-MB scratch files
+    # (`lsz.out`, `lsfull.out`, `ls.out`, `lst.out`, `sorted.out`, `dup.out`,
+    # `fc.out`, `src.out`) in TMPROOT after inspect_commit/file_count.
+    st_ran=$(( st_ran + 1 ))
+    st_spill_bad=0
+    for st_legacy in lsz.out lsfull.out ls.out lst.out sorted.out dup.out fc.out src.out; do
+        [ ! -e "$TMPROOT/$st_legacy" ] || st_spill_bad=1
+    done
+    if [ "$st_spill_bad" -eq 0 ] && [ "$TMPDIR" = "$TMPROOT" ]; then
+        echo "SELFTEST: fixture 'zero-spill-tmproot-hygiene' -> ok"
+    else
+        echo "SELFTEST FAIL: fixture 'zero-spill-tmproot-hygiene' spill=$st_spill_bad TMPDIR='$TMPDIR' TMPROOT='$TMPROOT'" >&2
+        st_fail=1
+    fi
+    rm -f "$FC_CACHE_FILE"
+    FC_CACHE_FILE=""
+    ST_SHARED_BLOB=""
+    ST_SHARED_REPO=""
+
     # --- 1 fixture that proves the HARNESS ITSELF cannot escape ------------
     # Not a verdict fixture: it asserts the selftest cannot mutate a repo it
     # does not own, under the exact hostile environment that produced the
@@ -977,16 +1221,18 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (17 must-fail, 8 must-pass, 1 env-isolation, 1 core.worktree)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (17 must-fail, 10 must-pass, 1 env-isolation, 1 core.worktree)"
     return 0
 }
 
 # ===========================================================================
 # MAIN
 # ===========================================================================
-TMPROOT=$(mktemp -d) || { VERDICT_EMITTED=1
+TMPROOT=$(choose_tmproot) || { VERDICT_EMITTED=1
                           echo "$SELF: ERROR — cannot mktemp" >&2
                           echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
+export TMPDIR="$TMPROOT"
+FC_CACHE_FILE="$TMPROOT/fc.cache"
 
 # Snapshot the settings of the REAL repo that a leaking selftest was PROVED to
 # corrupt (2026-08-01), so a regression is reported here and not discovered days
@@ -1238,9 +1484,12 @@ found=0
 checked=0
 # The tip is the FIRST rev git rev-list prints (reverse-chronological order).
 # It is the only commit `--expect-files` applies to — see reference_for_rev.
+# Traverse commits parent-before-child so fc_cache warms sequentially across
+# ranges and parent counts hit cache instead of re-walking earlier trees.
 tip_rev=""
 for rev in $revs; do tip_rev=$rev; break; done
-for rev in $revs; do
+scan_revs=$(printf '%s\n' "$revs" | awk '{ a[NR] = $0 } END { for (i = NR; i >= 1; i--) print a[i] }')
+for rev in $scan_revs; do
     evaluate_rev_banded "$toplevel" "$rev" "$tip_rev" "$expect_files"
     st=$?
     if [ "$st" -eq 2 ]; then

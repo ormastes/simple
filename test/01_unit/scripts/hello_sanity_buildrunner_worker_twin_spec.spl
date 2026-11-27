@@ -1,0 +1,141 @@
+# @cover scripts/bootstrap/lib/hello_sanity_buildrunner_worker.spl 70%
+"""
+## Purpose and audience
+Purpose: pin the pure-Simple twin of `scripts/bootstrap/hello-sanity-buildrunner-worker.py`
+(phase 3+; phase 2 keeps the Python worker): argparse-equivalent parsing,
+the staged-compiler and running-stage-binary identity checks, and the
+publish step behind the `ManagedLaneRunner` port the hello-sanity-matrix twin
+implements. Audience: maintainers of
+`scripts/bootstrap/lib/hello_sanity_buildrunner_worker.spl`.
+Exit codes equal the Python worker's: 0 published, 1 lane failed or identity
+mismatch, 2 usage error.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_hash_sha256_or_empty, mkdir_p, getpid, dir_remove_all}
+use std.common.text_bytes.{text_to_bytes}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{expected_lane_identity}
+use scripts.bootstrap.lib.hello_sanity_buildrunner_lane.{unpack_verified_lane}
+use scripts.bootstrap.lib.hello_sanity_buildrunner_worker.{WorkerOptions, ManagedLaneRunner, parse_worker_args, prepare_worker, finish_worker, managed_lane_record, worker_cache_env}
+
+var scratch_counter = 0
+
+fn scratch() -> text:
+    scratch_counter = scratch_counter + 1
+    val dir = "build/tmp/hsbr-worker-twin-{getpid()}-{scratch_counter}"
+    dir_remove_all(dir)
+    mkdir_p(dir)
+    dir
+
+fn put(path: text, content: text):
+    file_write_bytes_tagged_native(path, text_to_bytes(content))
+
+fn base_args(compiler_sha: text, producer_sha: text) -> [text]:
+    ["--backend", "llvm", "--lane", "one-source", "--phase", "2", "--compile-route", "positional",
+     "--compiler-sha256", compiler_sha, "--producer-sha256", producer_sha, "--target", "x86_64-linux",
+     "--timeout-seconds", "10", "--max-rss-kib", "1024", "--min-free-disk-bytes", "0",
+     "--max-log-bytes", "1024", "--linker", "/usr/bin/ld", "--output", "hello-result.zip"]
+
+fn parse_error(args: [text]) -> text:
+    parse_worker_args(args).error
+
+var lane_status_value = "PASS"
+
+fn fake_lane() -> Result<text, text>:
+    Ok(lane_status_value)
+
+fn fake_identity() -> Result<bool, text>:
+    Ok(true)
+
+fn fake_unchanged() -> bool:
+    true
+
+fn fake_changed() -> bool:
+    false
+
+fn fake_sha() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn runner(unchanged: fn() -> bool) -> ManagedLaneRunner:
+    ManagedLaneRunner(lane: fake_lane, validate_identity: fake_identity, runtime_unchanged: unchanged, sha: fake_sha)
+
+struct Prepared:
+    root: text
+    options: WorkerOptions
+
+fn prepared_worker() -> Prepared:
+    val root = scratch()
+    put(root + "/compiler", "compiler")
+    put(root + "/stage", "stage binary")
+    val o = parse_worker_args(base_args(file_hash_sha256_or_empty(root + "/compiler"), file_hash_sha256_or_empty(root + "/stage"))).options.unwrap()
+    Prepared(root: root, options: prepare_worker(o, root, "linux", root + "/stage").unwrap())
+
+describe "hello BuildRunner worker twin: arguments":
+    it "accepts the adapter's argv":
+        val parsed = parse_worker_args(base_args("a", "b") + ["--trace-stages"])
+        expect(parsed.error).to_equal("")
+        val o = parsed.options.unwrap()
+        expect(o.trace_stages).to_equal(true)
+        expect(o.windows_abi).to_equal("msvc")
+        expect(o.phase).to_equal(2)
+
+    it "rejects what argparse rejects":
+        expect(parse_error(["--backend", "gcc"] + base_args("a", "b")[2..30])).to_contain("--backend")
+        expect(parse_error(base_args("a", "b") + ["--bogus"])).to_contain("unrecognized")
+        expect(parse_error(base_args("a", "b")[2..30])).to_contain("required")
+        var bad_phase = base_args("a", "b")
+        bad_phase[5] = "4"
+        expect(parse_error(bad_phase)).to_contain("--phase")
+        var bad_lane = base_args("a", "b")
+        bad_lane[3] = "three-objects"
+        expect(parse_error(bad_lane)).to_contain("--lane")
+
+describe "hello BuildRunner worker twin: identity":
+    it "refuses a staged compiler that differs from the pinned digest":
+        val root = scratch()
+        put(root + "/compiler", "compiler")
+        put(root + "/stage", "stage")
+        val o = parse_worker_args(base_args("0000000000000000000000000000000000000000000000000000000000000000", file_hash_sha256_or_empty(root + "/stage"))).options.unwrap()
+        expect(prepare_worker(o, root, "linux", root + "/stage").unwrap_err()).to_equal("staged compiler identity mismatch")
+
+    it "refuses a running stage binary that differs from its pin":
+        val root = scratch()
+        put(root + "/compiler", "compiler")
+        put(root + "/stage", "stage")
+        val o = parse_worker_args(base_args(file_hash_sha256_or_empty(root + "/compiler"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).options.unwrap()
+        expect(prepare_worker(o, root, "linux", root + "/stage").unwrap_err()).to_equal("running stage binary does not match its pin")
+        expect(prepare_worker(o, root, "linux", "").unwrap_err()).to_equal("running stage binary does not match its pin")
+
+    it "points the matrix caches into the attempt":
+        val p = prepared_worker()
+        val env = worker_cache_env(p.options)
+        expect(env[0][0]).to_equal("SIMPLE_RT_OBJ_CACHE_DIR")
+        expect(env[0][1]).to_equal(p.root + "/.builder-cache/runtime")
+        expect(file_exists(p.root + "/results")).to_equal(true)
+
+describe "hello BuildRunner worker twin: publish":
+    it "returns 1 without a bundle when the lane did not pass":
+        val p = prepared_worker()
+        lane_status_value = "FAIL"
+        expect(finish_worker(p.options, runner(fake_unchanged), p.root + "/out.zip").unwrap()).to_equal(1)
+        expect(file_exists(p.root + "/out.zip")).to_equal(false)
+        lane_status_value = "PASS"
+
+    it "fails closed when the runtime changed during the lane":
+        val p = prepared_worker()
+        mkdir_p(p.options.results + "/one-source")
+        expect(finish_worker(p.options, runner(fake_changed), p.root + "/out.zip").unwrap_err()).to_equal("runtime changed during managed lane")
+
+    it "publishes a bundle the adapter twin admits":
+        val p = prepared_worker()
+        val lane = p.options.results + "/one-source"
+        mkdir_p(lane + "/nested")
+        put(lane + "/hello", "artifact")
+        val exe_sha = file_hash_sha256_or_empty(lane + "/hello")
+        put(lane + "/result.sdn", "phase: 2\ncompiler_sha256: \"" + fake_sha() + "\"\ncompile_route: \"positional\"\nstatus: \"PASS\"\nexecutable_sha256: \"" + exe_sha + "\"\n")
+        expect(finish_worker(p.options, runner(fake_unchanged), p.root + "/out.zip").unwrap()).to_equal(0)
+        val artifact = unpack_verified_lane(p.root + "/out.zip", p.root + "/verified", expected_lane_identity("one-source", "llvm", 2, "positional", fake_sha()), "linux").unwrap()
+        expect(file_hash_sha256_or_empty(artifact)).to_equal(exe_sha)
+        expect(file_exists(p.root + "/verified/nested")).to_equal(false)
+        expect(finish_worker(p.options, runner(fake_unchanged), p.root + "/out.zip").is_err()).to_equal(true)

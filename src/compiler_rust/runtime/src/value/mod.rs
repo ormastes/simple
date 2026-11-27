@@ -260,6 +260,8 @@ pub use objects::{
     rt_option_map,
     rt_object_class_id, rt_object_field_count, rt_object_field_get, rt_object_field_set, rt_object_new, rt_is_some,
     rt_option_float_bits,
+    rt_option_float_pack,
+    rt_option_float_tag,
     rt_unwrap_or_self, rt_unwrap_or_trap, rt_unwrap_or_value, rt_expect_or_trap, rt_heap_ref_wellformed,
 };
 

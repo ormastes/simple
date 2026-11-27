@@ -12,6 +12,7 @@ use compiler.core.interpreter.eval_builtins.{eval_builtin_call}
 use compiler.core.interpreter.eval_units.{eval_unit_method, val_is_unit}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_lookup, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller, func_table_lookup, struct_table_lookup}
+use compiler.core.interpreter.eval_tables.{func_table_lookup_owned, struct_decl_is_shared_name, struct_decl_owner, struct_resolve_for_caller, struct_resolve_module_member_for_caller, struct_member_decl, struct_decl_name_for}
 use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of, func_yield_cache_get, func_yield_cache_set}
 use compiler.core.types.{TYPE_I16, TYPE_I32, TYPE_I8, TYPE_U16, TYPE_U32}
 use compiler.core.types.{TYPE_U64, TYPE_U8}
@@ -147,13 +148,16 @@ pub fn eval_call(eid: i64) -> i64:
         # Check for struct constructor (only uppercase names)
         val first_ch = name[0]
         if first_ch >= "A" and first_ch <= "Z":
-            val struct_decl = struct_table_lookup(name)
+            val struct_decl = struct_resolve_for_caller(eval_caller_file(), name)
             if struct_decl >= 0:
+                # An import alias (`use m.{Thing as Legacy}`) constructs the
+                # owner's class under its declared (bare) name.
+                val struct_name = struct_decl_name_for(struct_decl, name)
                 # A direct zero-argument class call uses its declared static
                 # constructor. Calls made by that constructor with field
                 # arguments still fall through to ordinary field assembly.
                 if arg_eids.len() == 0:
-                    val new_decl = func_table_lookup(name + "__new")
+                    val new_decl = struct_member_decl(struct_decl, struct_name, "new")
                     if new_decl >= 0:
                         val new_node = decl_get(new_decl)
                         var new_is_active = false
@@ -166,7 +170,7 @@ pub fn eval_call(eid: i64) -> i64:
                             val result = eval_function_call(new_decl, arg_eids, arg_names)
                             eval_implicit_new_stack.pop()
                             return result
-                return eval_struct_constructor(name, struct_decl, arg_eids, arg_names)
+                return eval_struct_constructor(struct_name, struct_decl, arg_eids, arg_names)
 
         # Check for builtin
         val builtin_result = eval_builtin_call(name, arg_eids)
@@ -214,12 +218,19 @@ pub fn eval_call(eid: i64) -> i64:
             val enum_variants = enum_table_lookup(type_name)
             if enum_variants != "":
                 return eval_enum_variant_call(type_name, member_name, arg_eids)
-            # Check static method: Type.method() → Type__method in func table
-            val static_fn_name = type_name + "__" + member_name
-            val static_decl = func_table_lookup(static_fn_name)
+            # Check static method: Type.method() → Type__method in func table,
+            # in the owner module of a shared or aliased class.
+            val path_struct = struct_resolve_for_caller(eval_caller_file(), type_name)
+            val static_decl = if path_struct >= 0:
+                struct_member_decl(path_struct, struct_decl_name_for(path_struct, type_name), member_name)
+            else:
+                func_table_lookup(type_name + "__" + member_name)
             if static_decl >= 0:
                 return eval_function_call(static_decl, arg_eids, arg_names)
             # Check struct constructor with module prefix: Module.Struct(args)
+            val ns_struct = struct_resolve_module_member_for_caller(eval_caller_file(), type_name, member_name)
+            if ns_struct >= 0:
+                return eval_struct_constructor(struct_decl_name_for(ns_struct, member_name), ns_struct, arg_eids, arg_names)
             val struct_decl2 = struct_table_lookup(member_name)
             if struct_decl2 >= 0:
                 return eval_struct_constructor(member_name, struct_decl2, arg_eids, arg_names)
@@ -516,7 +527,9 @@ pub fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_na
             field_values[i] = val_copy_if_value_struct(fv)
         i = i + 1
 
-    val_make_struct(name, field_names, field_values)
+    val made = val_make_struct(name, field_names, field_values)
+    val_set_struct_decl(made, decl_id)
+    made
 
 # ===== BDD negation link =====
 
@@ -640,7 +653,7 @@ pub fn eval_method_call(eid: i64) -> i64:
     val receiver_node = expr_get(receiver_eid)
     if receiver_node.tag == EXPR_IDENT and expr_owner_int(receiver_eid) < 0:
         val type_name = receiver_node.s_val
-        val receiver_struct_decl = struct_table_lookup(type_name)
+        val receiver_struct_decl = struct_resolve_for_caller(eval_caller_file(), type_name)
         # `use mod as ns` namespace: `ns.member(args)` is a call on the
         # provider's member, not a method call on a value named `ns`.
         if env_lookup(type_name) < 0 and
@@ -650,9 +663,12 @@ pub fn eval_method_call(eid: i64) -> i64:
                 eval_caller_file(), type_name, method_name)
             if member_decl >= 0:
                 return eval_function_call(member_decl, arg_eids, arg_names)
-            val member_struct = struct_table_lookup(method_name)
+            var member_struct = struct_resolve_module_member_for_caller(
+                eval_caller_file(), type_name, method_name)
+            if member_struct < 0:
+                member_struct = struct_table_lookup(method_name)
             if member_struct >= 0:
-                return eval_struct_constructor(method_name, member_struct, arg_eids, arg_names)
+                return eval_struct_constructor(struct_decl_name_for(member_struct, method_name), member_struct, arg_eids, arg_names)
             eval_set_error("undefined namespace member: " + type_name + "." + method_name)
             return -1
         val enum_variants = enum_table_lookup(type_name)
@@ -666,9 +682,26 @@ pub fn eval_method_call(eid: i64) -> i64:
             if is_variant:
                 return eval_enum_variant_call(type_name, method_name, arg_eids)
         if receiver_struct_decl >= 0:
-            val static_decl = func_table_lookup(type_name + "__" + method_name)
+            val static_decl = struct_member_decl(receiver_struct_decl, struct_decl_name_for(receiver_struct_decl, type_name), method_name)
             if static_decl >= 0:
                 return eval_function_call(static_decl, arg_eids, arg_names)
+
+    # Namespace-qualified static call: `ns.Type.method(args)`, where `ns` is a
+    # module namespace bound in the caller, names the class that module owns.
+    # Only an upper camel case member can be a class, so `self.items.len()`
+    # pays a single character compare here.
+    if receiver_node.tag == EXPR_FIELD_ACCESS and receiver_node.s_val != "":
+        val ns_member = receiver_node.s_val
+        val ns_first = ns_member[0]
+        if ns_first >= "A" and ns_first <= "Z":
+            val ns_node = expr_get(receiver_node.left)
+            if ns_node.tag == EXPR_IDENT and env_lookup(ns_node.s_val) < 0:
+                val ns_struct = struct_resolve_module_member_for_caller(
+                    eval_caller_file(), ns_node.s_val, ns_member)
+                if ns_struct >= 0:
+                    val ns_static = struct_member_decl(ns_struct, struct_decl_name_for(ns_struct, ns_member), method_name)
+                    if ns_static >= 0:
+                        return eval_function_call(ns_static, arg_eids, arg_names)
 
     val receiver_place = eval_prepare_value_place(receiver_eid)
     if eval_had_error: return -1
@@ -693,7 +726,7 @@ pub fn eval_method_call(eid: i64) -> i64:
             val variant_separator = receiver_type.index_of("::")
             if variant_separator >= 0:
                 receiver_type = receiver_type.substring(0, variant_separator)
-        receiver_method_decl = func_table_lookup(receiver_type + "__" + method_name)
+        receiver_method_decl = struct_member_decl(val_get_struct_decl(receiver), receiver_type, method_name)
 
     # Option/Result accessor methods.
     #

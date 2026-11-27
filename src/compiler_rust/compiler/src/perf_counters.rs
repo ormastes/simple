@@ -223,11 +223,15 @@ counters!(
     // PERF-7 measured the cost of a method call growing by ~650 ns for 20
     // extra locals in the CALLER and could not isolate the mechanism
     // (doc/08_tracking/bug/interpreter_per_call_cost_grows_with_caller_frame_width_2026-09-13.md).
-    // SCANNED is the overlay entries this scan visits per call — if it tracks
-    // the caller's width, the scan is the mechanism. NONLOCAL is the entries
-    // that survive the `is_local`/`is_refreshed_global` filter and therefore
-    // cost a `global_binding` resolution; PUBLISHED is the entries actually
-    // written to the global store, i.e. the work the scan exists to do.
+    // SCANNED is the publish candidates this scan visits per call — names the
+    // frame wrote or synced (CowEnv::publish_candidate_entries). If it tracks
+    // the caller's width, the scan is the mechanism. NONLOCAL is the
+    // `nonlocal_overlay` superset width, the pre-2026-11-27 scan basis, kept
+    // as the comparison signal: a module-level caller frame's superset holds
+    // every declared global, so NONLOCAL >> SCANNED there is the O(module
+    // globals)-per-call defect made countable. PUBLISHED is the entries
+    // actually written to the global store, i.e. the work the scan exists to
+    // do.
     PUBLISH_GLOBALS_CALLS,
     PUBLISH_GLOBALS_SCANNED,
     PUBLISH_GLOBALS_NONLOCAL,

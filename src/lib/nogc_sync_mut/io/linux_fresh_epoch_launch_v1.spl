@@ -48,6 +48,19 @@ pub fn linux_fresh_epoch_broker_environment_v1(profile: LinuxFreshEpochProfileV1
         if not allowed: return Err("fresh-epoch-inherited-broker-environment-unsupported:" + key)
     Ok(())
 
+# The engine helper's own environment (not the broker's inherited one, checked above). An empty
+# environment makes the engine take its home from the account record, which custody requires to be the
+# absent `/nonexistent`; the engine then exits 1 on every command. The run root exists, is held by custody
+# and is already the helper's directory, runroot and tmpdir parent; the engine writes nothing under HOME.
+# XDG_RUNTIME_DIR is the run root too: the rootless engine keeps `libpod/tmp/pause.pid` under it, and without
+# it the file lands in `/run/user/<uid>` (measured), outside custody and shared by every store of the uid.
+# PATH is the broker's own: with no pause process to join, the engine looks `newuidmap` up through PATH and
+# exits 125 without one (measured, podman 4.9.3).
+# @allow(primitive_api) reason: run_root is the installed profile's canonical path text; the result is the helper's assignment list
+pub fn linux_fresh_epoch_helper_environment_v1(run_root: text) -> Result<[text], text>:
+    if not linux_fresh_epoch_path_v1(run_root): return Err("fresh-epoch-helper-home-unsupported")
+    Ok(["HOME=" + run_root, "XDG_RUNTIME_DIR=" + run_root, "PATH=/usr/bin:/bin"])
+
 pub fn linux_fresh_epoch_project_launch_v1(profile: LinuxFreshEpochProfileV1,
         broker: LinuxFreshEpochBrokerDataV1, template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
     linux_fresh_epoch_profile_validate_v1(profile)?
@@ -106,7 +119,7 @@ pub fn linux_fresh_epoch_project_launch_v1(profile: LinuxFreshEpochProfileV1,
     if args.len() > 64: return Err("fresh-epoch-launch-projected-argv-bound")
     val provider = profile.text_v1("providerExecutable")?
     val request = GroupProcessStreamRequestV2(program: provider,
-        producer_digest: profile.text_v1("providerExecutableSha256")?, args: args, environment: [], directory: run, inputs: [],
+        producer_digest: profile.text_v1("providerExecutableSha256")?, args: args, environment: linux_fresh_epoch_helper_environment_v1(run)?, directory: run, inputs: [],
         timeout_ms: template.request.timeout_ms, broker_program: profile.text_v1("brokerExecutable")?,
         broker_digest: profile.text_v1("brokerExecutableSha256")?, child_argv_digest: group_process_child_argv_digest_v2(provider, args),
         launch_deadline_unix_ms: template.request.launch_deadline_unix_ms)

@@ -28,7 +28,6 @@ use std.nogc_sync_mut.io.dir_ops.{dir_walk, dir_is_real_no_follow}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.common.json.value.{JsonValue, json_parse_value}
 use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_check, verified_stage_pin_recheck}
-use scripts.bootstrap.lib.running_stage_image.{running_stage_image}
 
 @unsafe(reason: "no-follow regular-file predicate; the closure must reject links", capabilities: [ffi])
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
@@ -285,17 +284,22 @@ fn main():
             usage("the following arguments are required: " + flag)
     # Trust anchor before any tree is read.
     val stage_binary = arg_value(args, "--stage-binary")
-    val os = host_os()
-    val linux = os == "linux"
-    val binary = running_stage_image(if stage_binary != "": stage_binary else: env_get("SIMPLE_VERIFIED_STAGE_BINARY"), os)
-    val pin = match verified_stage_pin_check(arg_value(args, "--stage-pin"), binary, linux):
+    val binary = if stage_binary != "": stage_binary else: env_get("SIMPLE_VERIFIED_STAGE_BINARY")
+    val linux = host_os() == "linux"
+    val windows = host_os() == "windows"
+    # The pin location guard needs the source root: --entry is
+    # <repo>/scripts/bootstrap/<wrapper>, so strip those two components.
+    val entry_norm = arg_value(args, "--entry").replace("\\", "/")
+    val bs_idx = entry_norm.last_index_of("/scripts/bootstrap/")
+    val source_root = if bs_idx > 0: entry_norm.substring(0, bs_idx) else: ""
+    val pin = match verified_stage_pin_check(arg_value(args, "--stage-pin"), source_root, binary, linux, windows):
         case Ok(p): p
         case Err(e):
             eprint("FAIL: " + e)
             exit(2)
             return
     validate(arg_value(args, "--root"), arg_value(args, "--manifest"), arg_value(args, "--sha256"), arg_value(args, "--entry"), pin.sha256)
-    match verified_stage_pin_recheck(pin, binary, linux):
+    match verified_stage_pin_recheck(pin, linux, windows):
         case Ok(_): pass
         case Err(e):
             eprint("FAIL: " + e)

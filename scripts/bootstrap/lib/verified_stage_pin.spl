@@ -10,6 +10,7 @@
 # unhashable running image — fails closed. Shared by the Hello matrix twin and
 # the perf-runner twin; keep one implementation.
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get}
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
 
 val VERIFIED_STAGE_PIN_ENV = "SIMPLE_VERIFIED_STAGE_PIN"
 
@@ -54,30 +55,56 @@ pub fn verified_stage_pin_decide(pin_content: text, running_sha256: text) -> Res
         return Err("verified stage pin: running stage binary " + running_sha256 + " differs from pinned " + pinned)
     Ok(pinned)
 
-# Digest of the running image. Linux hashes /proc/self/exe (the image the
-# kernel actually mapped, independent of any caller-supplied path); other hosts
-# hash the stage binary path the wrapper resolved and launched.
-pub fn verified_stage_running_sha256(stage_binary: text, linux: bool) -> text:
-    if linux and file_exists("/proc/self/exe"):
-        return file_hash_sha256_or_empty("/proc/self/exe")
-    if stage_binary == "" or not file_exists(stage_binary):
-        return ""
-    file_hash_sha256_or_empty(stage_binary)
+# Digest of the running image, never a caller-supplied path: Linux hashes
+# /proc/self/exe; Windows hashes GetModuleFileNameW(NULL) through the typed
+# windows_image_owner wrapper. Hosts without an image query fail closed ("").
+pub fn verified_stage_image_path(linux: bool, windows: bool) -> text:
+    if linux:
+        return if file_exists("/proc/self/exe"): "/proc/self/exe" else: ""
+    if windows:
+        match windows_image_path():
+            case Ok(image): return image
+            case Err(_): return ""
+    ""
+
+pub fn verified_stage_running_sha256(linux: bool, windows: bool) -> text:
+    val image = verified_stage_image_path(linux, windows)
+    if image == "": "" else: file_hash_sha256_or_empty(image)
+
+fn _norm(path: text) -> text:
+    path.replace("\\", "/")
+
+# The pin may only be a bootstrap-owned stage3 record inside the source root:
+# <source_root>/.../stage3/<platform>/provenance.env, no ".." components. A
+# caller can still point at a different record under the tree, but not at an
+# arbitrary file outside the repository's bootstrap output.
+pub fn verified_stage_pin_location_ok(pin_path: text, source_root: text) -> bool:
+    val pin = _norm(pin_path)
+    var root = _norm(source_root)
+    if root == "" or pin == "": return false
+    if not root.ends_with("/"): root = root + "/"
+    if not pin.lower().starts_with(root.lower()): return false
+    val parts = pin.substring(root.len(), pin.len()).split("/")
+    for part in parts:
+        if part == ".." or part == ".": return false
+    val n = parts.len()
+    n >= 3 and parts[n - 1] == "provenance.env" and parts[n - 3] == "stage3" and parts[n - 2] != ""
 
 # Resolve the pin (explicit path, else SIMPLE_VERIFIED_STAGE_PIN) and check it.
-pub fn verified_stage_pin_check(pin_path: text, stage_binary: text, linux: bool) -> Result<VerifiedStagePin, text>:
+pub fn verified_stage_pin_check(pin_path: text, source_root: text, stage_binary: text, linux: bool, windows: bool) -> Result<VerifiedStagePin, text>:
     val path = if pin_path != "": pin_path else: env_get(VERIFIED_STAGE_PIN_ENV)
     if path == "":
         return Err("verified stage pin: no pin (pass --stage-pin or set " + VERIFIED_STAGE_PIN_ENV + ")")
+    if not verified_stage_pin_location_ok(path, source_root):
+        return Err("verified stage pin: pin record must be <source-root>/.../stage3/<platform>/provenance.env")
     if not file_exists(path):
         return Err("verified stage pin: pin record " + path + " does not exist")
-    match verified_stage_pin_decide(file_read(path), verified_stage_running_sha256(stage_binary, linux)):
+    match verified_stage_pin_decide(file_read(path), verified_stage_running_sha256(linux, windows)):
         case Ok(sha): Ok(VerifiedStagePin(path: path, sha256: sha))
         case Err(e): Err(e)
 
 # Re-check after the work (the Python owners re-hash their producer at the end).
-pub fn verified_stage_pin_recheck(pin: VerifiedStagePin, stage_binary: text, linux: bool) -> Result<bool, text>:
-    val now = verified_stage_running_sha256(stage_binary, linux)
-    if now != pin.sha256:
+pub fn verified_stage_pin_recheck(pin: VerifiedStagePin, linux: bool, windows: bool) -> Result<bool, text>:
+    if verified_stage_running_sha256(linux, windows) != pin.sha256:
         return Err("verified stage pin: running stage binary identity changed during execution")
     Ok(true)

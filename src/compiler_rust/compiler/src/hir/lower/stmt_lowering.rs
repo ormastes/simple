@@ -1093,13 +1093,18 @@ impl Lowerer {
                     let expr = self.lower_bool_return_expr(v, ctx);
                     self.expected_target_type = prev_expected;
                     let expr = expr?;
-                    // The verdict names the function but not where it is:
-                    // imported modules lower under the entry file's path.
+                    // The verdict names the function; name the DEFINING module
+                    // too (`body_diagnostic_file`): imported modules lower
+                    // under the entry file's path, so a bare line number
+                    // pointed at the wrong file.
+                    // seed_lowering_error_names_entry_file_not_defining_module_2026-11-26
                     self.validate_declared_return_type(ctx.return_type, expr.ty)
                         .map_err(|error| match error {
-                            LowerError::Unsupported(message) => {
-                                LowerError::Unsupported(format!("{message} (return at line {})", ret.span.line))
-                            }
+                            LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                                "{message} ({}, return at line {})",
+                                self.body_diagnostic_file(),
+                                ret.span.line
+                            )),
                             other => other,
                         })?;
 
