@@ -6,6 +6,9 @@
 # Layout and Element Enums
 # =========================================================================
 
+use app.office.slides.layout_registry.{slide_layout_registry_find}
+use std.editor.extensions.host.{extension_host_ensure_command_activated}
+
 enum SlideLayout:
     TitleSlide
     TitleContent
@@ -172,6 +175,40 @@ fn content_slide(id: text, title: text, body: text) -> Slide:
     )
     elements.push(body_el)
     slide_with_elements(id, SlideLayout.TitleContent, elements)
+
+fn _slide_layout_for_id(layout_id: text) -> SlideLayout:
+    if layout_id == "title_slide":
+        return SlideLayout.TitleSlide
+    if layout_id == "title_content":
+        return SlideLayout.TitleContent
+    if layout_id == "two_column":
+        return SlideLayout.TwoColumn
+    if layout_id == "section_header":
+        return SlideLayout.SectionHeader
+    SlideLayout.Blank
+
+fn create_slide_from_layout_id(layout_id: text, id: text) -> Result<Slide, text>:
+    """Create a slide from a registered layout id, one text box per placeholder.
+
+    Element ids are "<slide id>_<placeholder kind>". Ids outside the closed
+    SlideLayout enum (extension layouts) get the Blank enum tag.
+    """
+    # Activate-before-read: a non-builtin layout id (e.g. the "title_diagram"
+    # demo) exists in the registry only once its publishing extension has
+    # activated. Idempotent after the first call.
+    extension_host_ensure_command_activated("slides.layout.titleDiagram")
+    val descriptor = slide_layout_registry_find(layout_id)
+    if descriptor == nil:
+        return Err("unknown slide layout id: {layout_id}")
+    var elements: [SlideElement] = []
+    for p in descriptor.placeholders:
+        elements.push(SlideElement(
+            id: "{id}_{p.kind}",
+            kind: SlideElementKind.TextBox(content: p.default_text),
+            x: p.x, y: p.y,
+            width: p.width, height: p.height
+        ))
+    Ok(slide_with_elements(id, _slide_layout_for_id(layout_id), elements))
 
 # =========================================================================
 # Element Manipulation

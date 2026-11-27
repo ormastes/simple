@@ -24,18 +24,18 @@ use common.gpu.engine2d.kernel_registry.{
     CpuKernelTable, SpanOpBatch,
     kernel_table_new, kernel_table_register, kernel_table_seal,
     span_batch_new, span_batch_push,
-    KERNEL_OP_FILL_CONST, KERNEL_OP_SRC_OVER_CONST, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_OP_MASK_SRC_OVER,
+    KERNEL_OP_FILL_CONST, KERNEL_OP_COPY_SPAN, KERNEL_OP_SRC_OVER_CONST, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_OP_MASK_SRC_OVER,
     KERNEL_FORMAT_ARGB8888_STRAIGHT,
     KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS,
     KERNEL_BUCKET_TINY, KERNEL_BUCKET_SMALL, KERNEL_BUCKET_MEDIUM, KERNEL_BUCKET_LARGE,
     KERNEL_PROVIDER_SIMD_ISA,
 }
 use std.nogc_sync_mut.gpu.engine2d.simd_isa_provider.{
-    simd_span_batch_execute, simd_isa_fill_const,
+    simd_span_batch_execute, simd_isa_fill_const, simd_isa_copy_span,
     simd_isa_src_over_const, simd_isa_src_over_image, simd_isa_mask_src_over,
 }
 use common.gpu.engine2d.scalar_oracle.{
-    oracle_fill_const, oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
+    oracle_fill_const, oracle_copy_span, oracle_src_over_const, oracle_src_over_image, oracle_mask_src_over,
 }
 use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
 use std.gpu.engine2d.backend_emu.{
@@ -214,6 +214,49 @@ fn _kernel_probe_src_over_image_bucket(n: i64, iters: i64) -> i64:
     var i1: i64 = 1
     while i1 < i0:
         simd_isa_src_over_image(simd_buf, 0, src, 0, n)
+        i1 = i1 + 1
+        clock1 = time_now_unix_micros()
+    val simd_us = (tp2 - tp1) + (clock1 - t1)
+    var verdict: i64 = 0
+    if exact:
+        verdict = verdict + KERNEL_PROBE_EXACT
+    if simd_us < scalar_us:
+        verdict = verdict + KERNEL_PROBE_FASTER
+    verdict
+
+fn _kernel_probe_copy_bucket(n: i64, iters: i64) -> i64:
+    """Measure oracle_copy_span vs simd_isa_copy_span at `n` pixels x `iters`
+    reps (same honest gate shape as the image probe, including the bit-exact
+    pre-pass counted as the first rep of each side). Returns the
+    KERNEL_PROBE_* verdict bitmask."""
+    var src: [u32] = [0; n.to_i32()]
+    oracle_fill_const(src, 0, n, 0x9033AA55)
+    var oracle_buf: [u32] = [0; n.to_i32()]
+    var simd_buf: [u32] = [0; n.to_i32()]
+    val tp0 = time_now_unix_micros()
+    oracle_copy_span(oracle_buf, 0, src, 0, n)
+    val tp1 = time_now_unix_micros()
+    simd_isa_copy_span(simd_buf, 0, src, 0, n)
+    val tp2 = time_now_unix_micros()
+    var exact = true
+    var k: i64 = 0
+    while k < n:
+        if oracle_buf[k.to_i32()] != simd_buf[k.to_i32()]:
+            exact = false
+        k = k + 1
+    val t0 = time_now_unix_micros()
+    var clock0 = t0
+    var i0: i64 = 1
+    while i0 < iters and (tp1 - tp0) + (clock0 - t0) < KERNEL_PROBE_WINDOW_US:
+        oracle_copy_span(oracle_buf, 0, src, 0, n)
+        i0 = i0 + 1
+        clock0 = time_now_unix_micros()
+    val scalar_us = (tp1 - tp0) + (clock0 - t0)
+    val t1 = time_now_unix_micros()
+    var clock1 = t1
+    var i1: i64 = 1
+    while i1 < i0:
+        simd_isa_copy_span(simd_buf, 0, src, 0, n)
         i1 = i1 + 1
         clock1 = time_now_unix_micros()
     val simd_us = (tp2 - tp1) + (clock1 - t1)
@@ -1616,6 +1659,22 @@ impl SoftwareBackend:
                               KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
         v = _kernel_probe_src_over_image_bucket(1024, 2)
         kernel_table_register(table, KERNEL_OP_SRC_OVER_IMAGE, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_copy_bucket(8, 75)
+        kernel_table_register(table, KERNEL_OP_COPY_SPAN, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_TINY,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_copy_bucket(32, 40)
+        kernel_table_register(table, KERNEL_OP_COPY_SPAN, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_SMALL,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_copy_bucket(128, 10)
+        kernel_table_register(table, KERNEL_OP_COPY_SPAN, KERNEL_FORMAT_ARGB8888_STRAIGHT,
+                              KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_MEDIUM,
+                              KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
+        v = _kernel_probe_copy_bucket(1024, 2)
+        kernel_table_register(table, KERNEL_OP_COPY_SPAN, KERNEL_FORMAT_ARGB8888_STRAIGHT,
                               KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS, KERNEL_BUCKET_LARGE,
                               KERNEL_PROVIDER_SIMD_ISA, (v & KERNEL_PROBE_EXACT) != 0, (v & KERNEL_PROBE_FASTER) != 0)
         v = _kernel_probe_mask_src_over_bucket(8, 75)

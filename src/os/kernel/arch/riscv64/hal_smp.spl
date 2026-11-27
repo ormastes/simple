@@ -25,6 +25,7 @@
 use os.kernel.arch.riscv64.sbi.{sbi_hart_start, SBI_SUCCESS}
 use os.kernel.boot.dtb_parser.{DtbDeviceInfo}
 use std.nogc_async_mut_noalloc.baremetal.riscv.sbi.{sbi_probe_then_send_ipi}
+use os.kernel.boot.riscv_noalloc_dtb_capability.{riscv_noalloc_dtb_logical_valid, riscv_noalloc_dtb_hart_id}
 
 # ============================================================================
 # Constants
@@ -112,6 +113,25 @@ fn hal_smp_get_pending_ipi(target: u32) -> u32:
     """Return the pending IPI vector for target hart."""
     HAL_SMP_PENDING_IPI[target]
 
+fn hal_smp_ipi_window(hart_id: u64) -> (u64, u64):
+    """SBI IPI addressing for a physical hart: (hart_mask, hart_mask_base).
+
+    One SBI mask word covers 64 harts, so sparse hart IDs above 63 land in the
+    window whose base is the hart ID rounded down to a multiple of 64.
+    """
+    val base = (hart_id / 64u64) * 64u64
+    (1u64 << (hart_id - base), base)
+
+fn hal_smp_hsm_target(logical: u32) -> (bool, u64):
+    """Physical hart ID the SBI HSM start call must target for a logical hart.
+
+    Returns (false, 0) when the DTB capability has no such logical hart, so the
+    caller can keep the logical-equals-physical fallback.
+    """
+    if not riscv_noalloc_dtb_logical_valid(logical):
+        return (false, 0u64)
+    (true, riscv_noalloc_dtb_hart_id(logical))
+
 # ============================================================================
 # Mock SBI carrier for test seams
 # ============================================================================
@@ -168,15 +188,19 @@ fn hal_smp_cpu_start(ap_id: u32, entry: u64, stack: u64, arg: u64) -> bool:
     """Start AP hart via SBI HSM. Populates boot args slot before calling SBI."""
     if ap_id < MAX_HARTS:
         HAL_SMP_BOOT_ARGS[ap_id] = ApBootArgs(stack: stack, arg: arg)
-    val ret = sbi_hart_start(ap_id as u64, entry, ap_id as u64)
+    val target = hal_smp_hsm_target(ap_id)
+    val hart = if target.0: target.1 else: ap_id as u64
+    val ret = sbi_hart_start(hart, entry, ap_id as u64)
     ret.error == SBI_SUCCESS
 
 fn hal_smp_ipi_send(target: u32, vector: u32):
     """Send IPI to target hart: write vector to PENDING_IPI slot then call sbi_probe_then_send_ipi."""
     if target < MAX_HARTS:
         HAL_SMP_PENDING_IPI[target] = vector
-    val hart_mask = 1u64 << target as u64
-    sbi_probe_then_send_ipi(hart_mask, 0u64)
+    val phys = hal_smp_hsm_target(target)
+    val hart = if phys.0: phys.1 else: target as u64
+    val window = hal_smp_ipi_window(hart)
+    sbi_probe_then_send_ipi(window.0, window.1)
 
 fn hal_smp_ipi_broadcast(vector: u32):
     """Broadcast IPI to all non-self harts (self = hart 0) via sbi_probe_then_send_ipi."""
