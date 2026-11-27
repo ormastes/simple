@@ -550,6 +550,9 @@ describe "storage_view_v1 file/dir path conflicts":
         val under_file = storage_view_v1_write(loaded.view, "f/g", "x".bytes())
         expect(under_file.status).to_equal("rejected")
         expect(under_file.reason).to_equal("path-conflict")
+        # Case variants fold like every other path rule (Windows hosts fold).
+        expect(storage_view_v1_write(loaded.view, "A", "x".bytes()).reason).to_equal("path-conflict")
+        expect(storage_view_v1_write(loaded.view, "F/g", "x".bytes()).reason).to_equal("path-conflict")
         expect(file_exists(base + "/views/v2/upper/a")).to_equal(false)
         expect(file_exists(base + "/views/v2/upper/f")).to_equal(false)
         _cleanup(base)
@@ -580,6 +583,19 @@ describe "storage_view_v1 file/dir path conflicts":
         val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
         # Bypass the write API to reach the otherwise-unreachable merged state.
         expect(file_write_bytes(base + "/views/v2/upper/a", "x".bytes())).to_equal(true)
+        val saved = storage_view_v1_save(loaded.view, "main", StoreGenerationV1(1))
+        expect(saved.status).to_equal("rejected")
+        expect(saved.reason).to_equal("manifest-path-conflict")
+        _cleanup(base)
+
+    it "save fails closed on a case-variant file over a base directory":
+        val base = _temp("savetampercase")
+        val store = _store(base)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "a/b", "ab".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(file_write_bytes(base + "/views/v2/upper/A", "x".bytes())).to_equal(true)
         val saved = storage_view_v1_save(loaded.view, "main", StoreGenerationV1(1))
         expect(saved.status).to_equal("rejected")
         expect(saved.reason).to_equal("manifest-path-conflict")
