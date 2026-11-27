@@ -40,6 +40,59 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
     expr.ty == TypeId::NIL || hir_expr_definitely_returns(expr)
 }
 
+/// An arm whose value is only an EMPTY `[]` / `{}` literal (possibly through
+/// blocks, a nested match/if chain whose every value arm is such a literal).
+/// Its default element/key type is not evidence about the join type, so a
+/// concrete sibling must win (same rule `lower_if` applies to `[]`).
+/// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
+fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(true)
+}
+
+// Some(true) = weak literal, Some(false) = concrete value, None = bottom.
+fn weak_expr(expr: &HirExpr) -> Option<bool> {
+    if hir_arm_is_bottom(expr) {
+        return None;
+    }
+    match &expr.kind {
+        HirExprKind::Array(items) => Some(items.is_empty()),
+        HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
+        HirExprKind::Block(stmts) => weak_stmts(stmts),
+        HirExprKind::LetIn { body, .. } => weak_expr(body),
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => join_weak(weak_expr(then_branch), weak_expr(else_branch)),
+        _ => Some(false),
+    }
+}
+
+fn weak_stmts(stmts: &[HirStmt]) -> Option<bool> {
+    match stmts.last() {
+        Some(HirStmt::Expr(expr)) => weak_expr(expr),
+        Some(HirStmt::If {
+            then_block,
+            else_block: Some(else_block),
+            ..
+        }) => join_weak(weak_stmts(then_block), weak_stmts(else_block)),
+        Some(HirStmt::Return(_)) => None,
+        _ => Some(false),
+    }
+}
+
+fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(x), Some(y)) => Some(x && y),
+    }
+}
+
+/// True when the arm value is concrete (not bottom, not a weak empty literal).
+fn hir_value_is_concrete(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(false)
+}
+
 /// Value type of a lowered tail `if`/`else` statement: the first arm whose
 /// tail value is neither bottom (NIL) nor an empty `[]` literal (its default
 /// element type is not evidence, see `lower_if`); an empty literal is used
@@ -50,7 +103,8 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
     fn arm_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
         match stmts.last() {
             Some(HirStmt::Expr(expr)) if !hir_arm_is_bottom(expr) => {
-                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty());
+                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty())
+                    || matches!(&expr.kind, HirExprKind::Dict(pairs) if pairs.is_empty());
                 Some((expr.ty, empty))
             }
             Some(HirStmt::If { .. }) => tail_if_type(stmts),
@@ -76,6 +130,39 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
         }
     }
     tail_if_type(stmts).map(|(ty, _)| ty)
+}
+
+/// True when the tail value of `expr` (through do-blocks, nested if/match) is
+/// an explicit `[x; n]` repeat. That form carries real element evidence even
+/// when `n` is 0 (it lowers to an empty HIR array), so it is never "weak".
+fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrayRepeat { .. } => true,
+        Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            ast_expr_tail_is_array_repeat(then_branch)
+                || else_branch.as_deref().is_some_and(ast_expr_tail_is_array_repeat)
+        }
+        Expr::Match { arms, .. } => arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        _ => false,
+    }
+}
+
+fn ast_stmts_tail_is_array_repeat(stmts: &[ast::Node]) -> bool {
+    match stmts.last() {
+        Some(ast::Node::Expression(e)) => ast_expr_tail_is_array_repeat(e),
+        Some(ast::Node::Match(m)) => m.arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        Some(ast::Node::If(i)) => {
+            ast_stmts_tail_is_array_repeat(&i.then_block.statements)
+                || i.elif_branches.iter().any(|(_, _, b)| ast_stmts_tail_is_array_repeat(&b.statements))
+                || i.else_block.as_ref().is_some_and(|b| ast_stmts_tail_is_array_repeat(&b.statements))
+        }
+        _ => false,
+    }
 }
 
 fn expr_is_empty_array_literal(expr: &Expr) -> bool {
@@ -217,6 +304,16 @@ impl Lowerer {
         }
     }
 
+    /// Both types are arrays, or both are dicts: only then may a weak empty
+    /// literal defer to its sibling (an unrelated aggregate keeps the default).
+    fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        matches!(
+            (self.module.types.get(a), self.module.types.get(b)),
+            (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
+                | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
+        )
+    }
+
     /// Lower an if expression to HIR
     ///
     /// Result type follows the then branch, except an empty array literal
@@ -262,6 +359,17 @@ impl Lowerer {
         // no extra handling: `ty` already defaults to `then_hir.ty` above.
         if let Some(other) = else_hir.as_ref() {
             if hir_arm_is_bottom(&then_hir) && !hir_arm_is_bottom(other) {
+                ty = other.ty;
+            }
+            // A then-arm that is only an empty `[]`/`{}` (directly or through a
+            // nested match/if chain, see `hir_value_is_weak_empty`) is not
+            // evidence about the join type: a concrete else-arm wins.
+            if hir_value_is_weak_empty(&then_hir)
+                && hir_value_is_concrete(other)
+                && other.ty != TypeId::ANY
+                && self.same_collection_kind(then_hir.ty, other.ty)
+                && !ast_expr_tail_is_array_repeat(then_branch)
+            {
                 ty = other.ty;
             }
         }
@@ -739,7 +847,15 @@ impl Lowerer {
         // `case Err(e): panic(e); case Ok(v): v` report `Nil` instead of
         // `v`'s real type.
         let then_is_bottom = hir_arm_is_bottom(&then_branch);
-        let result_ty = if then_is_bottom { else_branch.ty } else { then_ty };
+        // A weak empty `[]`/`{}` arm must not win the join over a concrete
+        // sibling (its default element type is not evidence).
+        let then_is_weak_vs_concrete = !then_is_bottom
+            && hir_value_is_weak_empty(&then_branch)
+            && hir_value_is_concrete(&else_branch)
+            && else_branch.ty != TypeId::ANY
+            && self.same_collection_kind(then_ty, else_branch.ty)
+            && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
+        let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -2687,7 +2803,12 @@ impl Lowerer {
                 // join took `[]`'s default `[i32]`, and every element read was
                 // narrowed to i32 under the JIT (italic font face lost).
                 // doc/08_tracking/bug/jit_if_arm_tail_if_stmt_typed_nil_italic_lost_2026-11-23.md
-                simple_parser::ast::Node::If(_) if index == last_index => {
+                // A tail `match` STATEMENT is the block's value exactly like a tail
+                // `if`: a nested `match` as the only body of an outer match arm
+                // otherwise typed the whole block NIL/ANY, so `files[k].as_str()`
+                // on the bound payload reached codegen with an erased receiver
+                // (CODEGEN-AMBIGUOUS-METHOD).
+                simple_parser::ast::Node::If(_) | simple_parser::ast::Node::Match(_) if index == last_index => {
                     let lowered = self.lower_node(stmt, ctx)?;
                     if let Some(ty) = hir_tail_if_value_type(&lowered) {
                         result_ty = ty;

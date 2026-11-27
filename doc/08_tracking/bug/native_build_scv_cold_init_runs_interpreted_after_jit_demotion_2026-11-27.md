@@ -206,3 +206,11 @@ positioned write, not O_APPEND, so shards sharing one path could overwrite each 
 `SIMPLE_BUILD_TRACE_FILE` value folds into the `native_noop_request_v1` identity: reuse the same path across reruns or expect a
 no-op cache miss. The same `Ok(None)`/`Ok(Some(ev))` pattern in `compiler_inventory_event_push_cost_v1` got the same rewrite.
 Miscompile record: `native_build_jit_nested_option_result_match_exhausted_2026-11-27.md`.
+## Item 2 resolved in the seed (2026-11-27)
+
+The `files[path].as_str()` ambiguity was a seed HIR typing bug (nested tail
+`match` statement typed NIL/ANY), not Dict indexing; fixed in
+`hir/lower/expr/control.rs::lower_do_block`. The explicit
+`val entry: SdnValue = files[path]` workaround in `simpleos_sysroot_receipt.spl`
+is no longer required once a seed with this fix is deployed. See
+`codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`.
