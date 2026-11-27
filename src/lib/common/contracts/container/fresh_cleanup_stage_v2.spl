@@ -1,0 +1,30 @@
+# Error reporting of simple_container_fresh_cleanup_v2, one decision per cleanup stage. Pure.
+#
+# A stage answers (closed, owner retained, error). Two kinds of text must not be mixed:
+#   - a REFUSAL: the stage kept its owner, so the same stage runs again on the next call. Its text
+#     describes that attempt only. It is reported by that attempt and never kept, so a cleanup that
+#     is refused and later succeeds is clean, and a second refusal is not hidden by the first.
+#   - a FAILURE: the stage gave up its owner and still answered with an error, or it neither closed
+#     nor kept an owner. Nothing will run that stage again, so the text is kept (first one wins) on
+#     the retained open value and a cleanup that later closes still returns it.
+# The error an open already carried is a failure of that open and is kept the same way.
+# Decision: doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md.
+
+pub struct ContainerFreshCleanupStageV2:
+    # The stage closed and gave up its owner; the next stage may run.
+    # @allow(primitive_api) reason: one yes/no answer of the reducer beside its two texts; the caller branches on it once per stage
+    released: bool
+    # Failure text to carry on the retained open value; what a closed cleanup returns.
+    kept: text
+    # What this attempt returns when it stops at this stage.
+    reported: text
+
+# @allow(primitive_api) reason: kept is the retained open value's error text; closed, owner_retained and error are the three fields of one stage's own close answer
+pub fn container_fresh_cleanup_stage_v2(kept: text, closed: bool, owner_retained: bool,
+        error: text) -> ContainerFreshCleanupStageV2:
+    if owner_retained:
+        val reason = if error != "": error elif kept != "": kept else: "container-fresh-cleanup-stage-retained"
+        return ContainerFreshCleanupStageV2(released: false, kept: kept, reported: reason)
+    val failure = if not closed and error == "": "container-fresh-cleanup-stage-unclosed" else: error
+    val next = if kept != "": kept else: failure
+    ContainerFreshCleanupStageV2(released: closed, kept: next, reported: next)
