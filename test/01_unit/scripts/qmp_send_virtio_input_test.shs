@@ -1,0 +1,107 @@
+#!/bin/sh
+# Regression test for scripts/check/qmp-send-virtio-input.shs against a fake QMP server
+# (nc -l -U + a shell reply loop). Needs `nc -U`; prints UNTESTED and exits 0 without it.
+# QMP_SEND=<cmd> overrides the implementation under test.
+set -u
+here=$(cd "$(dirname "$0")" && pwd) || exit 2
+QMP_SEND=${QMP_SEND:-sh $here/../../../scripts/check/qmp-send-virtio-input.shs}
+if ! command -v nc >/dev/null 2>&1 || nc -U /nonexistent.sock < /dev/null 2>&1 | grep -qi 'invalid option\|unrecognized\|illegal option\|usage'; then
+  echo "UNTESTED — nc -U unavailable; qmp-send-virtio-input not exercised"
+  exit 0
+fi
+work=$(mktemp -d "${TMPDIR:-/tmp}/qmp-test.XXXXXX") || exit 2
+trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$work"' EXIT
+cases=0 fails=0
+ok() { cases=$((cases + 1)); }
+bad() { cases=$((cases + 1)); fails=$((fails + 1)); printf 'FAIL: %s\n' "$1" >&2; }
+
+# srv_loop LOG MODE: greeting, then one reply per request line.
+srv_loop() {
+  printf '{"QMP": {"version": {"qemu": {"major": 9}}, "capabilities": []}}\n'
+  [ "$2" = close ] && return 0
+  while IFS= read -r line; do
+    printf '%s\n' "$line" >> "$1"
+    case $line in
+      *'"input-send-event"'*)
+        [ "$2" = err ] && { printf '{"error": {"class": "GenericError", "desc": "boom"}}\n'; continue; } ;;
+      *'"screendump"'*)
+        f=$(printf '%s' "$line" | sed -e 's/.*"filename": "\([^"]*\)".*/\1/')
+        case $PPM_KIND in
+          good) { printf 'P6\n4 2\n255\n'; printf '\001\002\003\004\005\006'; printf '\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007'; } > "$f" ;;
+          wsfirst) { printf 'P6\n4 2\n255\n'; printf '\040\011\012\004\005\006'; printf '\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007'; } > "$f" ;;
+          uniform) { printf 'P6\n4 2\n255\n'; printf '\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010\010'; } > "$f" ;;
+          short) { printf 'P6\n4 2\n255\n'; printf '\001\002\003'; } > "$f" ;;
+          geom) { printf 'P6\n2 2\n255\n'; printf '\001\002\003\004\005\006\007\010\011\012\013\014'; } > "$f" ;;
+          magic) { printf 'P5\n4 2\n255\n'; printf '\001\002\003\004\005\006\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007\007'; } > "$f" ;;
+        esac ;;
+    esac
+    [ "$2" = event ] && printf '{"timestamp": {"seconds": 1, "microseconds": 2}, "event": "STOP"}\n'
+    printf '{"return": {}}\n'
+  done
+}
+
+# run_case NAME EXPECT_RC MODE PPM_KIND ARGS...  (ARGS use @SOCK@ and @CAP@)
+run_case() {
+  name=$1 want=$2 mode=$3 PPM_KIND=$4
+  shift 4
+  sock=$work/q.sock log=$work/server.log cap=$work/cap.ppm
+  rm -f "$sock" "$log" "$cap" "$work/fifo"
+  : > "$log"
+  mkfifo "$work/fifo"
+  export PPM_KIND
+  { nc -l -U "$sock" < "$work/fifo" | srv_loop "$log" "$mode" > "$work/fifo"; } 2>/dev/null &
+  srv=$!
+  i=0
+  while [ ! -S "$sock" ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  args=
+  for a in "$@"; do
+    case $a in @SOCK@) a=$sock ;; @CAP@) a=$cap ;; esac
+    args="$args $a"
+  done
+  # shellcheck disable=SC2086
+  $QMP_SEND $args > "$work/out" 2> "$work/err"
+  rc=$?
+  kill "$srv" 2>/dev/null
+  wait "$srv" 2>/dev/null
+  if [ "$rc" -eq "$want" ]; then ok; else bad "$name: rc=$rc want $want ($(cat "$work/err"))"; fi
+}
+has_err() { if grep -q -- "$2" "$work/err"; then ok; else bad "$1: stderr lacks '$2': $(cat "$work/err")"; fi; }
+
+run_case "input sequence" 0 plain good @SOCK@
+if [ "$(wc -l < "$work/server.log" | tr -d ' ')" = 2 ]; then ok; else bad "input: expected 2 single-line requests, got $(wc -l < "$work/server.log")"; fi
+if [ "$(sed -n 1p "$work/server.log")" = '{"execute": "qmp_capabilities"}' ]; then ok; else bad "input: first request"; fi
+second=$(sed -n 2p "$work/server.log")
+for want in '"execute": "input-send-event"' '"data": "ctrl"' '"data": "ctrl_r"' '"data": "alt"' '"data": "alt_r"' \
+    '"button": "left"' '"button": "wheel-up"' '"axis": "x", "value": 11' '"axis": "y", "value": 3' '"down": true' '"down": false'; do
+  case $second in *"$want"*) ok ;; *) bad "input: request lacks $want" ;; esac
+done
+run_case "interleaved event before reply" 0 event good @SOCK@
+run_case "QMP error reply" 1 err good @SOCK@
+has_err "QMP error reply" "QMP error"
+run_case "connection closed after greeting" 1 close good @SOCK@
+has_err "connection closed" "closed"
+
+run_case "capture ok" 0 plain good @SOCK@ --capture-only @CAP@ 4 2
+if [ "$(sed -n 2p "$work/server.log")" = '{"execute": "stop"}' ] && sed -n 3p "$work/server.log" | grep -q '"execute": "screendump"'; then ok; else bad "capture: stop must precede screendump"; fi
+run_case "capture first pixel byte is whitespace" 0 plain wsfirst @SOCK@ --capture-only @CAP@ 4 2
+run_case "capture uniform surface" 1 plain uniform @SOCK@ --capture-only @CAP@ 4 2
+has_err "uniform" "uniform surface"
+run_case "capture short payload" 1 plain short @SOCK@ --capture-only @CAP@ 4 2
+has_err "short" "incomplete"
+run_case "capture geometry mismatch" 1 plain geom @SOCK@ --capture-only @CAP@ 4 2
+has_err "geometry" "geometry"
+run_case "capture wrong geometry expected" 1 plain good @SOCK@ --capture-only @CAP@ 5 2
+run_case "capture not P6" 1 plain magic @SOCK@ --capture-only @CAP@ 4 2
+has_err "magic" "binary PPM"
+
+# usage errors need no server
+$QMP_SEND > /dev/null 2>&1; [ $? -eq 1 ] && ok || bad "no args must exit 1"
+$QMP_SEND a b c > /dev/null 2>&1; [ $? -eq 1 ] && ok || bad "3 args must exit 1"
+$QMP_SEND "$work/none.sock" --bogus x 4 2 > /dev/null 2>&1; [ $? -eq 1 ] && ok || bad "unknown mode must exit 1"
+$QMP_SEND "$work/none.sock" > /dev/null 2>&1; [ $? -eq 1 ] && ok || bad "missing socket must exit 1"
+
+if [ "$fails" -ne 0 ]; then
+  printf 'FAIL: %s of %s cases failed\n' "$fails" "$cases"
+  exit 1
+fi
+printf 'PASS: qmp-send-virtio-input %s cases\n' "$cases"
