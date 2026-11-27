@@ -398,6 +398,28 @@ describe "immutable_store_v1 garbage collection":
         expect(_count_objects(root)).to_equal(0)
         _store_cleanup(root)
 
+    it "open reports missing for a never-stored key without touching quarantine":
+        val root = _store_root("gc-open-no-quarantine")
+        val stored = immutable_store_v1_ingest(root, "never collected".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(dir_remove_all(root + "/objects")).to_equal(true)
+        expect(dir_list(root + "/quarantine").len()).to_equal(0)
+        expect(immutable_store_v1_open(root, stored.object_key).status).to_equal("missing")
+        _store_cleanup(root)
+
+    it "treats a key a reader already restored as settled, not restore-failed":
+        val root = _store_root("gc-restore-race")
+        val late = immutable_store_v1_ingest(root, "restored by reader".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).moved.value).to_equal(1)
+        val dates = dir_list(root + "/quarantine")
+        val destination = root + "/quarantine/" + dates[0].trim() + "/" + late.object_key + ".obj"
+        expect(immutable_store_v1_pin(root, "late", "owner-a", [late.object_key])).to_equal("")
+        expect(immutable_store_v1_open(root, late.object_key).status).to_equal("ok")
+        expect(file_exists(destination)).to_equal(false)
+        var reachable: Dict<text, bool> = {}
+        reachable[late.object_key] = true
+        expect(_isv1_restore_moved(root, [late.object_key], [destination], reachable).len()).to_equal(1)
+        _store_cleanup(root)
+
     it "never restores a corrupt quarantined copy":
         val root = _store_root("gc-open-corrupt")
         val kept = immutable_store_v1_ingest(root, "will be corrupted".bytes(), HASH_POLICY_V1_XXH3_128)
