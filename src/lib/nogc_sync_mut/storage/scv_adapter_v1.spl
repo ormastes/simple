@@ -10,11 +10,13 @@ use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_SHA256_LEGACY}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreOpenV1, StoreFlagV1, StoreCountV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_pin, immutable_store_v1_release_pin}
-use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_read_regular_no_follow_bounded_bytes, dir_list_optional}
+use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, dir_list_optional, secure_temp_dir_raw, dir_remove_all, is_dir}
 
 val _SCVA1_MAX_CHUNK_BYTES: i64 = 268435456
 val _SCVA1_MAX_PIN_REFS: i64 = 16384
 val _SCVA1_PIN_PREFIX = "scv-gc-"
+val _SCVA1_DONE_PREFIX = "scv-gc-done-"
+val _SCVA1_RUN_OWNER_PREFIX = "scv-gc:"
 val _SCVA1_ID_PREFIX = "sha256_"
 
 pub struct ScvImportV1:
@@ -23,11 +25,14 @@ pub struct ScvImportV1:
     object_key: text
     reused: StoreFlagV1
 
+pub unit ScvGenerationV1: i64
+
 pub struct ScvPinV1:
     status: text        # "ok" | "rejected"
     reason: text
     pinned: StoreCountV1    # chunk refs now held by scv-gc-<g>-<n> pins
     skipped: StoreCountV1   # chunk ids ignored (not a chunk, missing, unreadable, or rejected)
+    generation: ScvGenerationV1  # generation this run wrote (-1 when rejected)
 
 fn _scva1_import_rejected(reason: text) -> ScvImportV1:
     ScvImportV1(status: "rejected", reason: reason, object_key: "", reused: StoreFlagV1(false))
@@ -91,7 +96,7 @@ pub fn scv_adapter_v1_open_projection(repo_root: text, legacy_id: text) -> Store
     immutable_store_v1_open(scv_adapter_v1_store_root(repo_root), legacy_id)
 
 fn _scva1_pin_rejected(reason: text, pinned: i64, skipped: i64) -> ScvPinV1:
-    ScvPinV1(status: "rejected", reason: reason, pinned: StoreCountV1(pinned), skipped: StoreCountV1(skipped))
+    ScvPinV1(status: "rejected", reason: reason, pinned: StoreCountV1(pinned), skipped: StoreCountV1(skipped), generation: ScvGenerationV1(-1))
 
 # Generation of an existing `scv-gc-<g>-<n>` pin id, or -1 when `name` is not
 # one of ours (wrong prefix, non-canonical integers).
@@ -107,12 +112,35 @@ fn _scva1_pin_generation(name: text) -> i64:
         return -1
     generation
 
+# Generation of a completion marker `scv-gc-done-<g>`, or -1.
+fn _scva1_done_generation(name: text) -> i64:
+    if not name.starts_with(_SCVA1_DONE_PREFIX):
+        return -1
+    val digits = name.substring(_SCVA1_DONE_PREFIX.byte_len(), name.byte_len())
+    val generation = digits.to_i64() ?? -1
+    if generation < 0 or "{generation}" != digits:
+        return -1
+    generation
+
+# Unique owner for ONE gc run (`scv-gc:<nonce>`; nonce = a fresh staging temp
+# name), so a concurrent run's pins are told apart from this run's.
+pub fn scv_adapter_v1_run_owner(repo_root: text) -> text:
+    val root = scv_adapter_v1_store_root(repo_root)
+    if immutable_store_v1_init(root) != "":
+        return ""
+    val tmp = secure_temp_dir_raw(root + "/staging", "scvgc-")
+    if tmp == "":
+        return ""
+    val parts = tmp.replace("\\", "/").split("/")
+    dir_remove_all(tmp)
+    "{_SCVA1_RUN_OWNER_PREFIX}{parts[parts.len() - 1]}"
+
 # Import every reachable on-disk `sha256_` chunk and pin the keys under
-# `scv-gc-<generation>-<n>` (<= 16384 refs each) for `owner`. Pins are
-# append-only, so each call writes a NEW generation first and only then
-# releases the older `scv-gc-*` generations. `reachable` is the
-# newline-separated id set from scv_gc_roots_reachable_checked.
-pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: text) -> ScvPinV1:
+# `scv-gc-<generation>-<n>` (<= 16384 refs each) for `owner`, then a
+# `scv-gc-done-<generation>` marker (no refs) saying this run's pins are
+# complete. Nothing is released here. `reachable` is the newline-separated id
+# set from scv_gc_roots_reachable_checked.
+pub fn scv_adapter_v1_pin_write(repo_root: text, reachable: text, owner: text) -> ScvPinV1:
     if repo_root == "":
         return _scva1_pin_rejected("repo-root-empty", 0, 0)
     if owner == "":
@@ -154,14 +182,12 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
     val entries = match dir_list_optional(pins_dir):
         case Some(value): value
         case None: return _scva1_pin_rejected("pins-dir-unlistable", 0, skipped)
-    var old_pins: [text] = []
     var generation: i64 = 0
     for entry in entries:
         val name = entry.trim()
-        val old_generation = _scva1_pin_generation(name)
+        var old_generation = _scva1_pin_generation(name)
         if old_generation < 0:
-            continue
-        old_pins.push(name)
+            old_generation = _scva1_done_generation(name)
         if old_generation >= generation:
             generation = old_generation + 1
     var batches: i64 = 0
@@ -175,12 +201,62 @@ pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: tex
             return _scva1_pin_rejected(reason, start, skipped)
         batches = batches + 1
         start = end
-    # Old generations are released only after every new pin is written.
-    for name in old_pins:
-        val released = immutable_store_v1_release_pin(root, name, owner)
-        if released != "" and released != "pin-missing":
-            return _scva1_pin_rejected(released, keys.len(), skipped)
-    ScvPinV1(status: "ok", reason: "", pinned: StoreCountV1(keys.len()), skipped: StoreCountV1(skipped))
+    val marked = immutable_store_v1_pin(root, "{_SCVA1_DONE_PREFIX}{generation}", owner, [])
+    if marked != "":
+        return _scva1_pin_rejected(marked, keys.len(), skipped)
+    ScvPinV1(status: "ok", reason: "", pinned: StoreCountV1(keys.len()), skipped: StoreCountV1(skipped), generation: ScvGenerationV1(generation))
+
+fn _scva1_pin_owner(pin_dir: text, fallback: text) -> text:
+    match file_read_regular_no_follow_bounded(pin_dir + "/owner", 512):
+        case Ok(value): value
+        case Err(_): fallback
+
+# Release pins strictly below the newest COMPLETED generation (marker present).
+# A pin of a new-style run (`scv-gc:` owner) is released only when its own
+# marker exists, so a concurrent run's in-flight generation is never touched;
+# legacy/ownerless pins carry no marker and are released. Each pin is released
+# with the owner it was written under (release_pin rechecks it). Pin
+# generations before their marker, marker last, so a crash leaves a retryable
+# leak, never a lost pin.
+pub fn scv_adapter_v1_pin_release_older(repo_root: text, owner: text) -> text:
+    val root = scv_adapter_v1_store_root(repo_root)
+    val pins_dir = root + "/pins"
+    val entries = match dir_list_optional(pins_dir):
+        case Some(value): value
+        case None: return "pins-dir-unlistable"
+    var newest: i64 = -1
+    for entry in entries:
+        val done = _scva1_done_generation(entry.trim())
+        if done > newest:
+            newest = done
+    var markers: [text] = []
+    for entry in entries:
+        val name = entry.trim()
+        val generation = _scva1_pin_generation(name)
+        if generation >= 0 and generation < newest:
+            val pin_owner = _scva1_pin_owner(pins_dir + "/" + name, owner)
+            val has_marker = is_dir("{pins_dir}/{_SCVA1_DONE_PREFIX}{generation}")
+            if has_marker or not pin_owner.starts_with(_SCVA1_RUN_OWNER_PREFIX):
+                val released = immutable_store_v1_release_pin(root, name, pin_owner)
+                if released != "" and released != "pin-missing" and released != "pin-owner-changed":
+                    return released
+        val done = _scva1_done_generation(name)
+        if done >= 0 and done < newest:
+            markers.push(name)
+    for name in markers:
+        val released = immutable_store_v1_release_pin(root, name, _scva1_pin_owner(pins_dir + "/" + name, owner))
+        if released != "" and released != "pin-missing" and released != "pin-owner-changed":
+            return released
+    ""
+
+pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: text) -> ScvPinV1:
+    val written = scv_adapter_v1_pin_write(repo_root, reachable, owner)
+    if written.status != "ok":
+        return written
+    val released = scv_adapter_v1_pin_release_older(repo_root, owner)
+    if released != "":
+        return _scva1_pin_rejected(released, written.pinned.value, written.skipped.value)
+    written
 
 # Explicit opt-in: creates `<repo>/.scv/store` so `scv gc` imports and pins
 # reachable chunks (import_bytes and pin_reachable also init it on demand, but
