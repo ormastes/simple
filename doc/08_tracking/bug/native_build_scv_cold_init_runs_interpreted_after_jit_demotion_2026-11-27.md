@@ -276,3 +276,11 @@ Seed `simple-local-20261127r.exe`, `SIMPLE_EXECUTION_MODE=jit run src/app/cli/na
   the closure); forced interpret 1m22. So for this entry the interpreter is faster to first output;
   JIT is not a win on cold start, and the >600 s silence after load_sources is not explained by this
   demotion alone (the c27 stage trace owns that). Logs: scratchpad d29f/{jit,jit2,jit3,interp}.log.
+
+Worker mode (answer to the trace lane): native_build_main.spl:2794-2803 sets `SIMPLE_EXECUTION_MODE=jit`
+in the coordinator env when it is unset and the route is not a compiled bootstrap capsule, and the worker
+inherits it, so the worker REQUESTS jit. Before the fix above its closure then hit the
+`jit-compile-error` demotion and ran fully interpreted, which matches stage_parse at ~500 chars/s
+(interpreter speed) while the separately spawned parse shards (a different, smaller closure) stay on JIT
+at 0.2-0.4 s per file. Re-measure stage_parse in the real worker with this fix before concluding; the
+shards' front-end cache reuse by stage_parse was not investigated (time box).
