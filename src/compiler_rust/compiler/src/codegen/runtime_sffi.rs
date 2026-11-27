@@ -1143,10 +1143,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_driver_poll_flags", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_poll_data", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_driver_poll_data_len", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I64]),
+    // extern "C" fn -> bool (Rust async_driver_sffi.rs and C runtime.h alike):
+    // I8, or the caller reads undefined RAX bits 8..63 (see
+    // runtime_h_bool_returns_use_i8_abi).
+    RuntimeFuncSpec::new("rt_driver_cancel", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_driver_backend_name", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_driver_supports_sendfile", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_driver_supports_zero_copy", &[I64], &[I8]),
     // =========================================================================
     // Generator operations
     // =========================================================================
@@ -3236,11 +3239,71 @@ mod tests {
         assert_eq!(start.returns, [I64]);
     }
 
+    /// A C runtime function declared `bool rt_x(...)` only defines AL; x86-64
+    /// SysV and Win64 leave RAX bits 8..63 undefined. Declaring such an import
+    /// with an I64 return makes the caller read those bits: clang's
+    /// `rt_process_is_running` ends `sete %bl; movl %ebx, %eax`, so the
+    /// caller's saved RBX bits 8..31 leaked into the result and
+    /// `not process_is_running(pid)` read false for an exited child
+    /// (doc/08_tracking/bug/seed_native_inline_if_else_or_chain_false_2026-11-27.md).
+    /// Every `bool` prototype in runtime.h with a spec must use I8 unless it is
+    /// a named exception below.
+    #[test]
+    fn runtime_h_bool_returns_use_i8_abi() {
+        // Rust provider returns a tagged RuntimeValue while the C runtime
+        // returns `bool`, so neither I8 nor I64 is right for both lanes. Named
+        // gap in the bug doc above; not decided here.
+        const LANE_CONFLICT: &[&str] = &[
+            "rt_terminal_disable_raw_mode",
+            "rt_terminal_enable_raw_mode",
+            "rt_terminal_is_tty",
+            "rt_terminal_stdout_is_tty",
+        ];
+        let header_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/runtime.h");
+        let header = std::fs::read_to_string(&header_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", header_path.display()));
+        let mut checked = 0usize;
+        let mut wrong = Vec::new();
+        let mut stale = Vec::new();
+        for line in header.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("bool") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            let Some(name) = rest.split(|c: char| c == '(' || c.is_whitespace()).next() else {
+                continue;
+            };
+            if !name.starts_with("rt_") {
+                continue;
+            }
+            let Some(spec) = spec_for(name) else { continue };
+            checked += 1;
+            let is_i8 = spec.returns == [I8];
+            match (LANE_CONFLICT.contains(&name), is_i8) {
+                (false, false) => wrong.push(format!("{name} returns {:?}", spec.returns)),
+                (true, true) => stale.push(name.to_string()),
+                _ => {}
+            }
+        }
+        assert!(checked > 0, "no `bool rt_*` prototype in runtime.h matched a spec");
+        assert!(
+            wrong.is_empty(),
+            "C `bool` runtime imports must declare an I8 return: {wrong:?}"
+        );
+        assert!(stale.is_empty(), "LANE_CONFLICT entries now I8; remove them: {stale:?}");
+    }
+
     #[test]
     fn process_bool_sffi_specs_use_i8_return_abi() {
-        for name in ["rt_process_is_running", "rt_process_kill", "rt_process_exists"] {
-            let spec = spec_for(name).unwrap_or_else(|| panic!("missing process bool spec: {name}"));
-            assert_eq!(spec.params, [I64], "{name} params");
+        for name in [
+            "rt_process_is_running",
+            "rt_process_kill",
+            "rt_process_exists",
+            "rt_driver_cancel",
+            "rt_driver_supports_sendfile",
+            "rt_driver_supports_zero_copy",
+        ] {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing bool-returning spec: {name}"));
             assert_eq!(spec.returns, [I8], "{name} must use I8 to match extern \"C\" fn -> bool");
         }
     }
