@@ -14,6 +14,10 @@ extern fn sys_get_args() -> [text]
 # Importing driver.spl directly lets discovery pull the driver and its
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use app.cli.bootstrap_driver_provider_client_v1.{
+    BootstrapDriverProviderRouteV1, BootstrapDriverProviderOutcomeV1,
+    bootstrap_driver_provider_route_v1, bootstrap_driver_provider_compile_v1
+}
 use app.cli.bootstrap_surface_inspection_v1.{bootstrap_surface_inspection_plan_v1,
     bootstrap_surface_inspection_reserve_v1}
 use app.cli.bootstrap_focused_native_build.{run_focused_native_surface_inspection_v1}
@@ -971,8 +975,21 @@ fn run_native_build_bootstrap_leased(args: [text], lease: NativeCacheLease) -> i
         env_set(LIBRARY_UNITS_ENV_V1, "1")
         env_set(STAGE3_LIB_DYNLIB_ENV_V1, "0")
         env_set("SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "")
-    val driver = compiler_driver_create(options)
-    val result = compiler_driver_run_compile(driver)
+    val provider_route = bootstrap_driver_provider_route_v1()
+    var compile_ok = false
+    var compile_errors: [text] = []
+    var provider_refused_code: i64 = 0
+    if provider_route.requested:
+        val provider_outcome = bootstrap_driver_provider_compile_v1(provider_route, options)
+        compile_ok = provider_outcome.compiled
+        compile_errors = provider_outcome.diagnostics
+        if provider_outcome.loader_refused:
+            provider_refused_code = provider_outcome.exit_code
+    else:
+        val driver = compiler_driver_create(options)
+        val result = compiler_driver_run_compile(driver)
+        compile_ok = compile_result_is_success(result)
+        compile_errors = compile_result_errors(result)
     if positional_runtime_path != "":
         native_build_env_restore_v1("SIMPLE_RUNTIME_PATH", old_runtime_path)
     if positional_runtime_bundle != "":
@@ -990,11 +1007,15 @@ fn run_native_build_bootstrap_leased(args: [text], lease: NativeCacheLease) -> i
     if not output_restored:
         print "error: could not restore native-build output-mode environment"
         return 1
+    if provider_refused_code != 0:
+        for diag in compile_errors:
+            print "error: in-process native-build: {diag}"
+        return provider_refused_code
     # Free-function accessors, NOT result.is_success()/.get_errors(): this
     # entry is MIR-lowered without HIR type inference, so method calls on the
     # lazy-import-returned result never resolve (Task #145 erased-receiver
     # class); plain imported calls resolve by symbol name.
-    if compile_result_is_success(result):
+    if compile_ok:
         # Positive-artifact assertion, same contract as run_compile_bootstrap's
         # SMF path: a Success verdict is NOT evidence a binary was emitted. The
         # cli_mode_text lane above exists precisely because compile() could fall
@@ -1010,10 +1031,9 @@ fn run_native_build_bootstrap_leased(args: [text], lease: NativeCacheLease) -> i
             return 1
         return 0
     else:
-        val errors = compile_result_errors(result)
-        if errors.len() == 0:
+        if compile_errors.len() == 0:
             print "error: in-process native-build: compiler reported failure without diagnostics (source={entry_path}, backend={backend}, output={output})"
-        for err in errors:
+        for err in compile_errors:
             print "error: in-process native-build: {err}"
         return 1
 
@@ -1109,9 +1129,26 @@ fn run_compile_bootstrap(args: [text]) -> i64:
     options.backend_plugin_path = native_build_backend_plugin_from_args(args, 0)
     options.low_memory = native_build_low_memory_from_args(args)
     options = compileoptions_normalize_mir_optimization(options)
-    val driver = compiler_driver_create(options)
-    val result = compiler_driver_run_compile(driver)
-    if compile_result_is_success(result):
+    val provider_route = bootstrap_driver_provider_route_v1()
+    var compile_ok = false
+    var compile_errors: [text] = []
+    var provider_refused_code: i64 = 0
+    if provider_route.requested:
+        val provider_outcome = bootstrap_driver_provider_compile_v1(provider_route, options)
+        compile_ok = provider_outcome.compiled
+        compile_errors = provider_outcome.diagnostics
+        if provider_outcome.loader_refused:
+            provider_refused_code = provider_outcome.exit_code
+    else:
+        val driver = compiler_driver_create(options)
+        val result = compiler_driver_run_compile(driver)
+        compile_ok = compile_result_is_success(result)
+        compile_errors = compile_result_errors(result)
+    if provider_refused_code != 0:
+        for diag in compile_errors:
+            print "error: in-process SMF compile: {diag}"
+        return provider_refused_code
+    if compile_ok:
         if not file_exists(output):
             print "error: in-process SMF compile reported success without creating '{output}'"
             return 1
@@ -1122,7 +1159,7 @@ fn run_compile_bootstrap(args: [text]) -> i64:
             return 1
         0
     else:
-        for err in compile_result_errors(result):
+        for err in compile_errors:
             print "error: in-process SMF compile: {err}"
         1
 

@@ -1,0 +1,80 @@
+# Host verification spec for opt-in callable driver provider routing in bootstrap_main
+# Bug: doc/08_tracking/bug/compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.md
+# @req REQ-SSPEC-COMPILER
+
+use std.spec.{describe, it, expect, step}
+use app.cli.bootstrap_driver_provider_client_v1.{
+    BOOTSTRAP_DRIVER_PROVIDER_ENV_V1,
+    BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1,
+    BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1,
+    bootstrap_driver_provider_route_v1,
+    bootstrap_driver_provider_compile_v1
+}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use app.io.env_ops.{env_get, env_set}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "bootstrap_main callable driver provider wiring":
+    it "wires both positional native-build and SMF compile through bootstrap_driver_provider_route_v1":
+        step("inspect bootstrap_main.spl for provider-before-static-driver dispatch and env restore order")
+        val src = (rt_file_read_text("src/app/cli/bootstrap_main.spl") ?? "").replace("\r\n", "\n")
+        expect(src).to_contain("use app.cli.bootstrap_driver_provider_client_v1.")
+
+        val pos_start = src.find("pub fn run_native_build_bootstrap(args: [text]) -> i64:") ?? -1
+        val pos_end = src.find("fn bootstrap_compile_source_from_args(", pos_start) ?? -1
+        expect(pos_start).to_be_greater_than(-1)
+        expect(pos_end).to_be_greater_than(pos_start)
+        val pos_body = src.substring(pos_start, pos_end)
+
+        val pos_route = pos_body.find("val provider_route = bootstrap_driver_provider_route_v1()") ?? -1
+        val pos_call = pos_body.find("bootstrap_driver_provider_compile_v1(provider_route, options)", pos_route) ?? -1
+        val pos_static = pos_body.find("val driver = compiler_driver_create(options)", pos_call) ?? -1
+        val pos_restore = pos_body.find("native_build_env_restore_v1(\"SIMPLE_NATIVE_RUNTIME_BUNDLE\", old_runtime_bundle)", pos_static) ?? -1
+        val pos_refused = pos_body.find("if provider_refused_code != 0:", pos_restore) ?? -1
+        val pos_ret = pos_body.find("return provider_refused_code", pos_refused) ?? -1
+        expect(pos_route).to_be_greater_than(0)
+        expect(pos_call).to_be_greater_than(pos_route)
+        expect(pos_static).to_be_greater_than(pos_call)
+        expect(pos_restore).to_be_greater_than(pos_static)
+        expect(pos_refused).to_be_greater_than(pos_restore)
+        expect(pos_ret).to_be_greater_than(pos_refused)
+
+        val smf_start = src.find("fn run_compile_bootstrap(args: [text]) -> i64:") ?? -1
+        val smf_end = src.find("fn get_cli_args() -> [text]:", smf_start) ?? -1
+        expect(smf_start).to_be_greater_than(pos_end)
+        expect(smf_end).to_be_greater_than(smf_start)
+        val smf_body = src.substring(smf_start, smf_end)
+
+        val smf_route = smf_body.find("val provider_route = bootstrap_driver_provider_route_v1()") ?? -1
+        val smf_call = smf_body.find("bootstrap_driver_provider_compile_v1(provider_route, options)", smf_route) ?? -1
+        val smf_static = smf_body.find("val driver = compiler_driver_create(options)", smf_call) ?? -1
+        val smf_refused = smf_body.find("if provider_refused_code != 0:", smf_static) ?? -1
+        expect(smf_route).to_be_greater_than(0)
+        expect(smf_call).to_be_greater_than(smf_route)
+        expect(smf_static).to_be_greater_than(smf_call)
+        expect(smf_refused).to_be_greater_than(smf_static)
+
+    it "activates callable provider loading from env and fails closed with exit code 3 when unmapped":
+        step("activate provider route via env vars and confirm fail-closed exit code 3 without fallback")
+        val old_path = env_get(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1) ?? ""
+        val old_digest = env_get(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1) ?? ""
+
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, "build/providers/w5_2_missing_driver_provider.dll")
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1, "a" * 64)
+        val active_route = bootstrap_driver_provider_route_v1()
+        val outcome = bootstrap_driver_provider_compile_v1(active_route, driver_core_compile_options_default())
+
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, "")
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1, "")
+        val inactive_route = bootstrap_driver_provider_route_v1()
+
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_ENV_V1, old_path)
+        env_set(BOOTSTRAP_DRIVER_PROVIDER_DIGEST_ENV_V1, old_digest)
+
+        expect(active_route.requested).to_equal(true)
+        expect(outcome.loader_refused).to_equal(true)
+        expect(outcome.compiled).to_equal(false)
+        expect(outcome.exit_code).to_equal(BOOTSTRAP_DRIVER_PROVIDER_EXIT_CODE_V1)
+        expect(outcome.exit_code).to_equal(3)
+        expect(inactive_route.requested).to_equal(false)

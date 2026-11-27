@@ -19,6 +19,7 @@ use std.gc_async_mut.gpu.browser_engine.browser_file_ops.{browser_file_read_byte
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir, simple_web_layout_render_html_software_pixels}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io_runtime.{platform_name}
 use std.process.{process_run}
 use std.common.path_pure.{to_backslash}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition, draw_ir_composition}
@@ -70,10 +71,32 @@ fn _abs_path(p: text) -> text:
 fn _shell_quote(s: text) -> text:
     "'" + s.replace("'", "'\\''") + "'"
 
+pub fn web_render_backend_subprocess_refusal_reason(platform: text, kernel_env: text, target: text) -> text:
+    """Return a non-empty refusal reason when external subprocess spawning is disabled."""
+    val p = platform.trim().lower()
+    val k = kernel_env.trim().lower()
+    val t = target.trim().lower()
+    if k == "simpleos" or p.contains("baremetal") or p.contains("simpleos") or t.contains("baremetal") or t.contains("simpleos") or t.contains("unknown-none"):
+        return "subprocess execution disabled on baremetal/SimpleOS target (platform={platform}, target={target})"
+    ""
+
+fn _subprocess_guard(context: text) -> bool:
+    val reason = web_render_backend_subprocess_refusal_reason(
+        platform_name(),
+        env_get("SIMPLE_OS_KERNEL") ?? "",
+        env_get("SIMPLE_TARGET") ?? ""
+    )
+    if reason != "":
+        print "web_render_backend: {context}: {reason}"
+        return false
+    true
+
 fn _render_html_via_chromium(html: text, width: i32, height: i32) -> [u32]:
     """Render `html` through real Chromium (offscreen Electron) and read the
     pixels back as a 0xAARRGGBB buffer. Returns an empty buffer on failure so
     the caller can detect it — never substitutes another engine's output."""
+    if not _subprocess_guard("chromium"):
+        return []
     val html_path = _chromium_html_path()
     val out_path  = _chromium_out_path()
     val wrote = browser_file_write_text(html_path, html)
@@ -224,6 +247,8 @@ impl WebRenderBackend:
         render_html_to_pixels() stays the path for the bit-level comparison gate;
         this is the path for live display."""
         if self.backend != "chromium":
+            return false
+        if not _subprocess_guard("show_live_window"):
             return false
         val root = _repo_root()
         val is_windows = (_env_or("OS", "") == "Windows_NT")
