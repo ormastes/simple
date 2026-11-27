@@ -346,3 +346,20 @@ So the stage_parse blocker is fixed (interpreter demotion was the cause; ~200x f
 seed's `error_handling.rs` message; the worker's own stderr tail ends right after `mir_verify` idx=8). No exe; todo 478 and the plan
 STILL OWED stay open. Next: find the unresolved callee in the backend-session open path (run the worker under SIMPLE_EXECUTION_MODE=jit
 with a seed that names the symbol, or bisect `BackendSessionOwnedLeaseV2.open`), then rerun; coordinator part (cold init) took 1435 s.
+
+## RESOLVED: backend session open dispatch gap, exe produced (2026-11-28, seed r, lane c27-variant)
+
+The unresolved symbol was `CraneliftCodegenState.supports_target` (the seed prints it on the line BEFORE the generic
+"unresolved symbol" text: `Runtime error: Function '<name>' not found`; the earlier tail missed it). Cause: `src/compiler/70.backend/codegen.spl`
+declared `type Codegen = CraneliftCodegenState`, re-exported from `src/compiler/70.backend/__init__.spl`, which collides by simple name
+with the `Codegen` trait in `codegen_types.spl`. Under JIT, trait-object calls such as `codegen.supports_target(target)` in
+`builtin_adapter.spl:204` (receiver from `CodegenFactory.create`) resolved to the alias's struct, which has no such method. Fix: delete the
+unused alias and its re-export (no importer of `Codegen` from `compiler.backend` / `compiler.backend.codegen` exists).
+
+Fast harness (about 1 min, no cold init): a .spl that installs the K1 backend table (as `native_build_worker.spl` does) and calls
+`BackendSessionOwnedLeaseV2.open(driver_aot_backend_plugin_request_v1("llvm", ...))`, run with `SIMPLE_EXECUTION_MODE=jit SIMPLE_MIR_SHARDING=0`.
+Before: `Function 'CraneliftCodegenState.supports_target' not found`, rc 70. After: `open ok`.
+
+Full smoke (with the d29-f commits applied; seed r; `SIMPLE_MIR_SHARDING=0`): `native-build smoke.spl -o smoke.exe` rc=0, 209920-byte exe, running it
+prints `true` then `false`. Timeline: shards done at 659 s, worker returned at 892 s (cold init included). Entry was a 3-line print stand-in, not
+`dir_sync` itself. Todo 478 closed. Depends on the d29-f lane (work/native-build-worker-engine-mode-20261127) landing.
