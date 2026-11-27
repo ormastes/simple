@@ -25,7 +25,6 @@ fn conditional_empty_array_preserves_symbol_keys_in_both_orders() {
 #[test]
 fn conditional_empty_array_does_not_retype_populated_or_unrelated_aggregates() {
     for (expression, expected) in [
-        ("if flag: [1] else: words", TypeId::I64),
         ("if flag: [] else: (1, 2)", TypeId::I32),
         ("if flag: [] else: []", TypeId::I32),
         ("if flag: [\"typed\"; 0] else: [1]", TypeId::STRING),
@@ -268,10 +267,11 @@ fn if_join_weak_empty_dict_match_arm_does_not_beat_concrete_sibling_dict() {
 
 #[test]
 fn weak_empty_rule_ignores_ill_kinded_and_explicit_repeat_siblings() {
-    // `[]` vs a Dict sibling is ill-kinded: the join must keep the `[]` side
-    // (seed m behaviour) rather than adopt the Dict type.
+    // `[]` vs a Dict sibling is ill-kinded: a type error in safe code (see
+    // `disagreeing_value_arms_are_a_type_error_in_safe_code`); inside `unsafe`
+    // the join keeps the `[]` side rather than adopt the Dict type.
     let k = "enum K:\n    A\n    B\n";
-    let source = format!("{k}fn k3(d: Dict<text, i64>, kk: K) -> i64:\n    val r = match kk:\n        case K.A: []\n        case _: d\n    0\n");
+    let source = format!("{k}fn k3(d: Dict<text, i64>, kk: K) -> i64:\n    unsafe:\n        val r = match kk:\n            case K.A: []\n            case _: d\n    0\n");
     let module = parse_and_lower(&source).unwrap();
     assert!(matches!(local_ty(&module, "k3", "r"), Some(HirType::Array { .. })), "{:?}", local_ty(&module, "k3", "r"));
 
