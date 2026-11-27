@@ -1,0 +1,148 @@
+# Pure DATA fixtures over the production post-Start inspect classifier. This does not prove installed
+# custody, native containment or a live Podman run; the stateful start path is exercised only in the guest.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.{MachineFreshEpochRecordV1}
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2,
+    ContainerExecutionRequestV2, container_scope_fence_id_v2}
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.linux_fresh_workload_inspect_field_names_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.contracts.distributed_operation_state_v2.{distributed_operation_transition_v2}
+use std.common.json.value.*
+
+fn start_evidence_epoch_v3() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192,
+        observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512,
+        outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+fn start_evidence_scope_v3() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "service_1",
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+
+fn start_evidence_record_v3() -> MachineFreshWorkloadRecordV2:
+    val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1024,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = start_evidence_scope_v3()
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    val request = ContainerExecutionRequestV2(plan: plan, request_bytes: linux_oci_retained_request_encode_v1(native).unwrap())
+    machine_fresh_workload_record_v2(start_evidence_epoch_v3(), "9".repeat(64), scope, request,
+        "linux:uid:20001", "8".repeat(64), 500, 512).unwrap()
+
+fn start_evidence_native_id_v3() -> text:
+    "3".repeat(64)
+
+# The fixed 42-field post-Start inspect payload of this owner's own container, as modeled DATA.
+fn start_evidence_data_v3(id: text, status: text, pid: i64, cgroup: text, privileged: bool) -> text:
+    var value = JsonValue.Object([], [])
+    for key in linux_fresh_workload_inspect_field_names_v2(): value = json_value_object_set(value, key, JsonValue.Null)
+    for pair in [("id", id), ("pod_uid", "job_1"), ("attempt", "1"), ("operation_id", "operation_1"),
+            ("provider_generation", "7"), ("node_boot_id", container_scope_fence_id_v2(start_evidence_scope_v3()).unwrap()),
+            ("cgroup", cgroup), ("status", status), ("manager", "cgroupfs"), ("cgroup_mode", "private"), ("pid_mode", "private")]:
+        value = json_value_object_set(value, pair.0, JsonValue.Str(pair.1))
+    for pair in [("pid", pid), ("effective_caps", 0), ("bounding_caps", 0)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Int(pair.1))
+    value = json_value_object_set(value, "privileged", JsonValue.Bool(privileged))
+    value = json_value_object_set(value, "readonly_rootfs", JsonValue.Bool(true))
+    value = json_value_object_set(value, "no_new_privileges", JsonValue.Bool(true))
+    json_value_serialize(value)
+
+fn start_evidence_of_v3(status: text, pid: i64, cgroup: text) -> Result<MachineFreshWorkloadStartEvidenceV3, text>:
+    machine_fresh_workload_start_evidence_v3(start_evidence_record_v3(), start_evidence_native_id_v3(),
+        start_evidence_data_v3(start_evidence_native_id_v3(), status, pid, cgroup, false))
+
+describe "fresh workload V3 post-Start evidence":
+    it "keeps the association gate closed to a workload that already exited":
+        step("The running-subject decoder is unchanged: an exited container is never a native subject")
+        val record = start_evidence_record_v3()
+        val id = start_evidence_native_id_v3()
+        val running = machine_fresh_workload_inspect_v2(record, id, start_evidence_data_v3(id, "running", 4242, "/simple/epoch/containers/x", false))
+        expect(running.is_ok()).to_equal(true)
+        expect(running.unwrap().pid).to_equal(4242)
+        for status in ["exited", "stopped"]:
+            val gone = machine_fresh_workload_inspect_v2(record, id, start_evidence_data_v3(id, status, 0, "", false))
+            expect(gone.is_err()).to_equal(true)
+            expect(gone.unwrap_err()).to_equal("machine-fresh-workload-inspect-identity")
+
+    it "classifies a populated running container as the native subject":
+        val observed = start_evidence_of_v3("running", 4242, "/simple/epoch/containers/x")
+        expect(observed.is_ok()).to_equal(true)
+        expect(observed.unwrap()).to_equal(MachineFreshWorkloadStartEvidenceV3.Running(MachineFreshWorkloadInspectV2(4242, "/simple/epoch/containers/x")))
+
+    it "accepts a terminal status with no process and no cgroup as a proven start":
+        step("Podman reports stopped until its cleanup runs and exited afterwards; both follow running only")
+        for status in ["exited", "stopped"]:
+            val observed = start_evidence_of_v3(status, 0, "")
+            expect(observed.is_ok()).to_equal(true)
+            expect(observed.unwrap()).to_equal(MachineFreshWorkloadStartEvidenceV3.Exited)
+
+    it "reports a container still in created as never started":
+        val observed = start_evidence_of_v3("created", 0, "")
+        expect(observed.is_ok()).to_equal(true)
+        expect(observed.unwrap()).to_equal(MachineFreshWorkloadStartEvidenceV3.NeverStarted)
+
+    it "fails closed on ambiguous terminal evidence":
+        step("A terminal status that still names a process or cgroup, or any unlisted status, proves nothing")
+        for pair in [("exited", 4242, ""), ("stopped", 4242, ""), ("exited", 0, "/simple/epoch/containers/x"),
+                ("created", 4242, ""), ("created", 0, "/simple/epoch/containers/x")]:
+            val observed = start_evidence_of_v3(pair.0, pair.1, pair.2)
+            expect(observed.is_err()).to_equal(true)
+            expect(observed.unwrap_err()).to_equal("machine-fresh-workload-start-evidence-ambiguous")
+        for status in ["paused", "removing", "stopping", "configured", "initialized", "unknown", "", "Exited"]:
+            val observed = start_evidence_of_v3(status, 0, "")
+            expect(observed.is_err()).to_equal(true)
+            expect(observed.unwrap_err()).to_equal("machine-fresh-workload-start-evidence-ambiguous")
+        val unpopulated = start_evidence_of_v3("running", 0, "")
+        expect(unpopulated.is_err()).to_equal(true)
+        expect(unpopulated.unwrap_err()).to_equal("machine-fresh-workload-inspect-subject")
+
+    it "accepts terminal evidence only for the owner's own native id and unchanged security":
+        val record = start_evidence_record_v3()
+        val id = start_evidence_native_id_v3()
+        val other = machine_fresh_workload_start_evidence_v3(record, id, start_evidence_data_v3("4".repeat(64), "exited", 0, "", false))
+        expect(other.is_err()).to_equal(true)
+        val short = machine_fresh_workload_start_evidence_v3(record, "abc", start_evidence_data_v3("abc", "exited", 0, "", false))
+        expect(short.is_err()).to_equal(true)
+        expect(short.unwrap_err()).to_equal("machine-fresh-workload-full-native-id")
+        val privileged = machine_fresh_workload_start_evidence_v3(record, id, start_evidence_data_v3(id, "exited", 0, "", true))
+        expect(privileged.is_err()).to_equal(true)
+        expect(privileged.unwrap_err()).to_equal("machine-fresh-workload-inspect-security")
+        val malformed = machine_fresh_workload_start_evidence_v3(record, id, "{\"status\":\"exited\"}")
+        expect(malformed.is_err()).to_equal(true)
+
+    it "requires both post-Start samples to agree before an exited start is proven":
+        expect(machine_fresh_workload_exited_start_confirmed_v3(MachineFreshWorkloadStartEvidenceV3.Exited,
+            MachineFreshWorkloadStartEvidenceV3.Exited)).to_equal(true)
+        val subject = MachineFreshWorkloadStartEvidenceV3.Running(MachineFreshWorkloadInspectV2(4242, "/simple/epoch/containers/x"))
+        for pair in [(MachineFreshWorkloadStartEvidenceV3.Exited, subject), (subject, MachineFreshWorkloadStartEvidenceV3.Exited),
+                (MachineFreshWorkloadStartEvidenceV3.Exited, MachineFreshWorkloadStartEvidenceV3.NeverStarted),
+                (MachineFreshWorkloadStartEvidenceV3.NeverStarted, MachineFreshWorkloadStartEvidenceV3.NeverStarted), (subject, subject)]:
+            expect(machine_fresh_workload_exited_start_confirmed_v3(pair.0, pair.1)).to_equal(false)
+
+    it "does not release the charge of a start that never had a native subject":
+        step("Settlement still needs the associated, retained native subject; an exited start has neither")
+        val initial = machine_fresh_workload_action_initial_v2(start_evidence_record_v3(), "absence", 7).unwrap()
+        val executing = distributed_operation_transition_v2(initial, "executing", "").unwrap()
+        val terminal = distributed_operation_transition_v2(executing, "completed", "a".repeat(64)).unwrap()
+        val progress = MachineFreshWorkloadSettlementProgressV2(false, true, false, true, false, false, "idle")
+        val refused = machine_fresh_workload_prepare_settlement_v2(progress, start_evidence_record_v3(), terminal, 1)
+        expect(refused.is_err()).to_equal(true)
+        expect(refused.unwrap_err()).to_equal("machine-fresh-workload-settlement-ineligible")

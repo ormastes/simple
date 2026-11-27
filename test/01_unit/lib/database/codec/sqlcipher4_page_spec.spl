@@ -76,22 +76,6 @@ fn _to_list_at(arr: [u8], off: i64, n: i64) -> list:
         i = i + 1
     out
 
-fn _to_i64_flat(arr: list) -> [i64]:
-    var out: [i64] = []
-    var i = 0
-    while i < arr.length():
-        out.append(arr[i] & 0xFF)
-        i = i + 1
-    out
-
-fn _to_i64_u8(arr: [u8]) -> [i64]:
-    var out: [i64] = []
-    var i = 0
-    while i < arr.len():
-        out.push(rt_bytes_u8_at(arr, i) & 0xFF)
-        i = i + 1
-    out
-
 fn _to_u8(arr: list) -> [u8]:
     var out: [u8] = []
     var i = 0
@@ -254,17 +238,17 @@ describe "SQLCipher 4 page codec — page geometry":
         step("Verify: trailer HMAC matches ciphertext || IV || pgno_le32")
         # Page 7: ciphertext extent is [0,4016).
         val p7 = _encode_page7()
-        val expected7 = hmac_sha512_bytes(_to_i64_u8(_hmac_key()), _to_i64_flat(_hmac_input(0, 4016, p7, 7)))
-        expect(_to_list_at(p7, SQLCIPHER4_HMAC_OFFSET, 64)).to_equal(expected7)
+        val expected7 = hmac_sha512_bytes(_hmac_key(), _to_u8(_hmac_input(0, 4016, p7, 7)))
+        expect(_to_u8(_to_list_at(p7, SQLCIPHER4_HMAC_OFFSET, 64))).to_equal(expected7)
         # Page 1: ciphertext extent is [16,4016) — the salt is NOT HMACed.
         val p1 = _encode_page1()
-        val expected1 = hmac_sha512_bytes(_to_i64_u8(_hmac_key()), _to_i64_flat(_hmac_input(16, 4000, p1, 1)))
-        expect(_to_list_at(p1, SQLCIPHER4_HMAC_OFFSET, 64)).to_equal(expected1)
+        val expected1 = hmac_sha512_bytes(_hmac_key(), _to_u8(_hmac_input(16, 4000, p1, 1)))
+        expect(_to_u8(_to_list_at(p1, SQLCIPHER4_HMAC_OFFSET, 64))).to_equal(expected1)
 
     it "binds the page number LITTLE-endian, not big-endian":
         step("Verify: HMAC input uses LE page number (CIPHER_FLAG_LE_PGNO)")
         val p7 = _encode_page7()
-        val le = hmac_sha512_bytes(_to_i64_u8(_hmac_key()), _to_i64_flat(_hmac_input(0, 4016, p7, 7)))
+        val le = hmac_sha512_bytes(_hmac_key(), _to_u8(_hmac_input(0, 4016, p7, 7)))
         # Same input with the page number big-endian must NOT authenticate.
         var be_input = []
         var i = 0
@@ -279,7 +263,7 @@ describe "SQLCipher 4 page codec — page geometry":
         be_input.append((7 >> 16) & 0xFF)
         be_input.append((7 >> 8) & 0xFF)
         be_input.append(7 & 0xFF)
-        val be = hmac_sha512_bytes(_to_i64_u8(_hmac_key()), _to_i64_flat(be_input))
+        val be = hmac_sha512_bytes(_hmac_key(), _to_u8(be_input))
         expect(be == le).to_equal(false)
 
 # ============================================================================
@@ -441,28 +425,28 @@ describe "SQLCipher 4 page codec — constant-time HMAC comparator":
 
     it "returns true only for exact matches":
         step("Verify: positive and negative comparator vectors")
-        var a: [i64] = []
-        var b: [i64] = []
+        var a: [u8] = []
+        var b: [u8] = []
         var i = 0
         while i < 64:
-            a.push(i & 0xFF)
-            b.push(i & 0xFF)
+            a.push((i & 0xFF).to_u8())
+            b.push((i & 0xFF).to_u8())
             i = i + 1
         expect(sqlcipher4_constant_time_eq(a, b)).to_equal(true)
-        b[63] = (b[63] & 0xFF) ^ 0x01
+        b[63] = ((b[63] as i64) ^ 0x01).to_u8()
         expect(sqlcipher4_constant_time_eq(a, b)).to_equal(false)
         b[63] = a[63]
-        b[0] = (b[0] & 0xFF) ^ 0x80
+        b[0] = ((b[0] as i64) ^ 0x80).to_u8()
         expect(sqlcipher4_constant_time_eq(a, b)).to_equal(false)
 
     it "distinguishes all-0x00 from all-0xFF HMACs of equal length":
         step("Verify: all-0x00 vs all-0xFF, equal length")
-        var zeros: [i64] = []
-        var ones: [i64] = []
+        var zeros: [u8] = []
+        var ones: [u8] = []
         var i = 0
         while i < 64:
-            zeros.push(0)
-            ones.push(0xFF)
+            zeros.push(0u8)
+            ones.push(0xFFu8)
             i = i + 1
         expect(sqlcipher4_constant_time_eq(zeros, ones)).to_equal(false)
         expect(sqlcipher4_constant_time_eq(zeros, zeros)).to_equal(true)
@@ -470,15 +454,15 @@ describe "SQLCipher 4 page codec — constant-time HMAC comparator":
 
     it "returns false for different lengths without scanning content":
         step("Verify: length mismatch is false")
-        var short: [i64] = []
-        var long: [i64] = []
+        var short: [u8] = []
+        var long: [u8] = []
         var i = 0
         while i < 64:
-            long.push(0xAB)
+            long.push(0xABu8)
             i = i + 1
         var j = 0
         while j < 63:
-            short.push(0xAB)
+            short.push(0xABu8)
             j = j + 1
         expect(sqlcipher4_constant_time_eq(short, long)).to_equal(false)
         expect(sqlcipher4_constant_time_eq(long, short)).to_equal(false)

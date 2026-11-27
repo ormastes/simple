@@ -182,7 +182,7 @@ impl LinuxOciEngineExecOwnerV3:
                 case Err(reason): Err(reason)
         if matched.is_err(): return engine_exec_rejected_v3(matched.unwrap_err())
         if request.timeout_ms > admission.operation.duration_ms: return engine_exec_rejected_v3("engine-exec-duration-mismatch")
-        val create = match linux_engine_exec_create_request_v3(request):
+        val create = match linux_engine_exec_create_request_v3(request, policy.exec_terminal_mode):
             case Ok(value): value
             case Err(reason): return engine_exec_rejected_v3(reason)
         val payload_fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-engine-exec-payload-v3"),
@@ -251,7 +251,8 @@ impl LinuxOciEngineExecOwnerV3:
                         row.intent_digest != initial.intent_digest or row.control_digest != initial.control_digest):
                     owner.error = "engine-exec-original-intent-mismatch"
                 if owner.error == "" and action == "inspect" and row.native_exec_id == "" and row.create_armed:
-                    match linux_engine_exec_recover_birth_v3(state_root, path, row, request, installed.intent.control_policy_digest):
+                    match linux_engine_exec_recover_birth_v3(state_root, path, row, request, installed.intent.control_policy_digest,
+                            policy.exec_terminal_mode):
                         case Ok(repaired): row = repaired
                         case Err(reason): owner.error = reason
                 if owner.error == "" and action == "create":
@@ -293,9 +294,10 @@ impl LinuxOciEngineExecOwnerV3:
 
     me _next_exchange(kind: text) -> bool:
         val request = self.admission.request
-        val built = if kind == "create": linux_engine_exec_create_request_v3(request) else:
-            if kind == "start": linux_engine_exec_start_request_v3(request, self.row.native_exec_id) else:
-                linux_engine_exec_inspect_request_v3(request, self.row.native_exec_id)
+        val terminal = self.policy.exec_terminal_mode
+        val built = if kind == "create": linux_engine_exec_create_request_v3(request, terminal) else:
+            if kind == "start": linux_engine_exec_start_request_v3(request, self.row.native_exec_id, terminal) else:
+                linux_engine_exec_inspect_request_v3(request, self.row.native_exec_id, terminal)
         if built.is_err():
             self._fail(built.unwrap_err())
             return false
@@ -324,7 +326,8 @@ impl LinuxOciEngineExecOwnerV3:
             if native.is_err():
                 self._fail(native.unwrap_err())
                 return false
-            val query = linux_engine_exec_query_digest_v3(linux_engine_exec_create_request_v3(self.admission.request).unwrap(),
+            val query = linux_engine_exec_query_digest_v3(linux_engine_exec_create_request_v3(self.admission.request,
+                    self.policy.exec_terminal_mode).unwrap(),
                 linux_oci_installed_policy_digest_v3(self.policy).unwrap())
             if query.is_err():
                 self._fail(query.unwrap_err())
@@ -349,7 +352,8 @@ impl LinuxOciEngineExecOwnerV3:
             self.row.native_exec_id = native.unwrap()
             self.row.phase = "known-created"
         elif self.exchange == "inspect" or self.exchange == "verify":
-            val inspected = linux_engine_exec_inspect_decode_v3(response.unwrap().body, self.admission.request, self.row.native_exec_id)
+            val inspected = linux_engine_exec_inspect_decode_v3(response.unwrap().body, self.admission.request, self.row.native_exec_id,
+                self.policy.exec_terminal_mode)
             if inspected.is_err():
                 self._fail(inspected.unwrap_err())
                 return false

@@ -121,7 +121,14 @@ fn value_to_runtime_inner(v: &Value) -> RuntimeValue {
                 variant,
                 u32::from(payload.is_some()),
             );
-            simple_runtime::value::rt_enum_new(
+            // A user variant named `None` carries the stamp a compiled
+            // constructor gives it (`enum_constructor_symbol`).
+            let new_enum = if variant == "None" && enum_id >= 2 {
+                simple_runtime::value::rt_enum_new_none
+            } else {
+                simple_runtime::value::rt_enum_new
+            };
+            new_enum(
                 enum_id,
                 discriminant,
                 payload.as_deref().map_or(RuntimeValue::NIL, value_to_runtime),
@@ -676,6 +683,29 @@ mod tests {
         assert_eq!(rt_enum_id(runtime), i64::from(enum_runtime_type_id("Option")));
         assert_eq!(rt_enum_discriminant(runtime), i64::from(hash_variant_discriminant("Some")));
         assert_eq!(rt_enum_payload(runtime).as_int(), 42);
+    }
+
+    /// A user variant named `None` crosses the bridge with the stamp a
+    /// compiled constructor gives it; the builtin `None` and other variants
+    /// carry none (`rt_is_none` answers for the builtin).
+    /// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+    #[test]
+    fn value_to_runtime_stamps_a_user_none_variant() {
+        use simple_runtime::value::{rt_is_none_variant, rt_is_some};
+
+        let unit = |enum_name: &str, variant: &str| {
+            value_to_runtime(&Value::Enum {
+                enum_name: enum_name.to_string(),
+                variant: variant.to_string(),
+                payload: None,
+            })
+        };
+        let user_none = unit("BridgeStampQ", "None");
+        assert!(rt_is_none_variant(user_none) && rt_is_some(user_none));
+        assert!(!rt_is_none_variant(unit("BridgeStampQ", "Here")));
+        let builtin_none = unit("Option", "None");
+        assert!(!rt_is_some(builtin_none) && rt_is_none_variant(builtin_none));
+        assert!(!rt_is_none_variant(unit("Result", "None")));
     }
 
     #[test]

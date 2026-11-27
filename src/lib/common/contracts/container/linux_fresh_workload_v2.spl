@@ -1,5 +1,7 @@
 # Closed DATA projection. No value here is admission, custody or a launch grant.
 use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_epoch_v1.{LinuxFreshEpochProfileV1, linux_fresh_epoch_build_root_path_v1,
+    linux_fresh_epoch_overlap_v1, linux_fresh_epoch_workload_build_root_prefix_v1, linux_fresh_epoch_workload_terminal_mode_v1}
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.sdn.value.SdnValue
 use std.common.sdn.encode.sdn_encode_canonical
@@ -36,6 +38,74 @@ pub struct LinuxFreshWorkloadCommandV2:
     helper_cpu_millis: i64
     helper_memory_bytes: i64
     observed_image_id: text = ""
+    # Installed-profile gated extensions; the defaults are the historical
+    # first profile. Both roots are set together or not at all.
+    build_input_root: text = ""
+    build_output_root: text = ""
+    terminal_mode: text = "none"
+
+# What the root-installed fresh-epoch profile admits beyond the first workload
+# profile. DATA only: the installed owner re-derives it before every launch.
+# Empty prefix refuses build roots; `none` refuses a workload TTY.
+pub struct LinuxFreshWorkloadAdmissionV2:
+    build_root_prefix: text
+    terminal_mode: text
+
+pub const LINUX_FRESH_WORKLOAD_BUILD_INPUT_GUEST_V2 = "/simple-build/inputs"
+pub const LINUX_FRESH_WORKLOAD_BUILD_OUTPUT_GUEST_V2 = "/simple-build/outputs"
+
+pub fn linux_fresh_workload_admission_refused_v2() -> LinuxFreshWorkloadAdmissionV2:
+    LinuxFreshWorkloadAdmissionV2(build_root_prefix: "", terminal_mode: "none")
+
+pub fn linux_fresh_workload_admission_v2(profile: LinuxFreshEpochProfileV1) -> Result<LinuxFreshWorkloadAdmissionV2, text>:
+    Ok(LinuxFreshWorkloadAdmissionV2(build_root_prefix: linux_fresh_epoch_workload_build_root_prefix_v1(profile)?,
+        terminal_mode: linux_fresh_epoch_workload_terminal_mode_v1(profile)?))
+
+# Shape only (no admission): `none` or `tty`, and build roots as a complete
+# disjoint pair of canonical option-free host paths.
+pub fn linux_fresh_workload_features_shape_v2(build_input_root: text, build_output_root: text,
+        terminal_mode: text) -> Result<(), text>:
+    if terminal_mode != "none" and terminal_mode != "tty": return Err("fresh-workload-terminal-not-admitted")
+    if build_input_root == "" and build_output_root == "": return Ok(())
+    if build_input_root == "" or build_output_root == "": return Err("fresh-workload-build-root-incomplete")
+    if (not linux_fresh_epoch_build_root_path_v1(build_input_root) or
+            not linux_fresh_epoch_build_root_path_v1(build_output_root)): return Err("fresh-workload-build-root-shape")
+    if linux_fresh_epoch_overlap_v1(build_input_root, build_output_root): return Err("fresh-workload-build-root-overlap")
+    Ok(())
+
+# Refused by default: each feature needs the matching installed admission, and
+# both roots must lie strictly beneath the admitted prefix.
+pub fn linux_fresh_workload_features_v2(admission: LinuxFreshWorkloadAdmissionV2, build_input_root: text,
+        build_output_root: text, terminal_mode: text) -> Result<(), text>:
+    if admission.terminal_mode != "none" and admission.terminal_mode != "tty": return Err("fresh-workload-admission-invalid")
+    if terminal_mode != "none" and (terminal_mode != "tty" or admission.terminal_mode != "tty"):
+        return Err("fresh-workload-terminal-not-admitted")
+    if build_input_root == "" and build_output_root == "": return Ok(())
+    if admission.build_root_prefix == "": return Err("fresh-workload-build-root-not-admitted")
+    if not linux_fresh_epoch_build_root_path_v1(admission.build_root_prefix): return Err("fresh-workload-admission-invalid")
+    if build_input_root == "" or build_output_root == "": return Err("fresh-workload-build-root-incomplete")
+    if (not linux_fresh_epoch_build_root_path_v1(build_input_root) or
+            not linux_fresh_epoch_build_root_path_v1(build_output_root)): return Err("fresh-workload-build-root-shape")
+    for root in [build_input_root, build_output_root]:
+        if not root.starts_with(admission.build_root_prefix + "/"): return Err("fresh-workload-build-root-outside-admitted-prefix")
+    if linux_fresh_epoch_overlap_v1(build_input_root, build_output_root): return Err("fresh-workload-build-root-overlap")
+    Ok(())
+
+# The admission a request actually used: the audit value a record retains.
+pub fn linux_fresh_workload_used_admission_v2(admission: LinuxFreshWorkloadAdmissionV2, build_input_root: text,
+        build_output_root: text, terminal_mode: text) -> Result<LinuxFreshWorkloadAdmissionV2, text>:
+    linux_fresh_workload_features_v2(admission, build_input_root, build_output_root, terminal_mode)?
+    Ok(LinuxFreshWorkloadAdmissionV2(
+        build_root_prefix: if build_input_root != "": admission.build_root_prefix else: "",
+        terminal_mode: terminal_mode))
+
+# The two fixed `--mount` values of a build-root command; empty without roots.
+pub fn linux_fresh_workload_build_mounts_v2(command: LinuxFreshWorkloadCommandV2) -> [text]:
+    if command.build_input_root == "": return []
+    ["type=bind,src=" + command.build_input_root + ",dst=" + LINUX_FRESH_WORKLOAD_BUILD_INPUT_GUEST_V2 +
+            ",ro,nosuid,nodev,bind-propagation=rprivate",
+        "type=bind,src=" + command.build_output_root + ",dst=" + LINUX_FRESH_WORKLOAD_BUILD_OUTPUT_GUEST_V2 +
+            ",rw,nosuid,nodev,bind-propagation=rprivate"]
 
 pub struct LinuxFreshHostContextV2:
     native_machine_id: text
@@ -109,6 +179,7 @@ pub fn linux_fresh_workload_command_validate_v2(command: LinuxFreshWorkloadComma
         return Err("fresh-workload-explicit-entrypoint-required")
     for value in [command.image] + command.entrypoint + command.args:
         if value.byte_len() > 4096 or value.contains("\0"): return Err("fresh-workload-command-argument")
+    linux_fresh_workload_features_shape_v2(command.build_input_root, command.build_output_root, command.terminal_mode)?
     # Restrictive comparison against exact canonical retained provider bytes.
     # Full provider digest decoding remains the upper private admission's job.
     val parsed = match sdn_parse_strict_v1(command.request.request_bytes, SdnStrictLimitsV1(max_source_bytes: 1048576,
@@ -125,17 +196,22 @@ pub fn linux_fresh_workload_command_validate_v2(command: LinuxFreshWorkloadComma
         "timeoutMs": SdnValue.Int(command.timeout_ms), "cpuLimitMillis": SdnValue.Int(command.cpu_millis),
         "memoryLimitBytes": SdnValue.Int(command.memory_bytes), "pidLimit": SdnValue.Int(command.pid_limit),
         "networkPolicy": SdnValue.String("none"), "filesystemPolicy": SdnValue.String("read-only"),
-        "buildInputRoot": SdnValue.String(""), "buildOutputRoot": SdnValue.String(""), "replaceEntrypoint": SdnValue.Bool(true),
+        "buildInputRoot": SdnValue.String(command.build_input_root), "buildOutputRoot": SdnValue.String(command.build_output_root),
+        "replaceEntrypoint": SdnValue.Bool(true),
         "environment": SdnValue.Array([]), "workingDirectory": SdnValue.String("")}
+    # A workload TTY selects the retained V2 form, exactly as the codec does.
+    if command.terminal_mode != "none":
+        expected["version"] = SdnValue.Int(2)
+        expected["terminalMode"] = SdnValue.String(command.terminal_mode)
     # Optional V4 containment selector is immutable metadata only, not a runtime
-    # or kernel enforcement grant. User/terminal/mount modes remain unsupported.
+    # or kernel enforcement grant. User and generic mount modes remain unsupported.
     if fields.contains_key("containmentProfileDigest"):
         val digest = match fields["containmentProfileDigest"]:
             case SdnValue.String(value): value
             case _: return Err("fresh-workload-containment-selector")
         if not builder_digest_valid_v1(digest): return Err("fresh-workload-containment-selector")
         expected["version"] = SdnValue.Int(4)
-        expected["terminalMode"] = SdnValue.String("none")
+        expected["terminalMode"] = SdnValue.String(command.terminal_mode)
         expected["userUid"] = SdnValue.Int(-1)
         expected["userGid"] = SdnValue.Int(-1)
         expected["userNamespaceMode"] = SdnValue.String("")

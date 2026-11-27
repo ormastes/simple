@@ -1444,6 +1444,13 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     return (int64_t)(intptr_t)value;
 }
 
+/* This legacy lane has no object header to stamp and no rt_is_none: a
+ * `None`-named variant is built like any other. */
+SPL_WEAK
+int64_t rt_enum_new_none(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    return rt_enum_new(enum_id, discriminant, payload);
+}
+
 SPL_WEAK
 int64_t rt_enum_id(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
@@ -1786,6 +1793,20 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded(
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
+}
+
+/* Raw pointer/length ABI twins for the low-level sffi tier
+ * (src/compiler/70.backend/sffi_minimal.spl): same behaviour, distinct names,
+ * so the raw `(ptr, len) -> i64?` view never shares a name with the typed
+ * `(text) -> text?` view (seed extern return types are keyed by bare name).
+ * See doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_read_text(path_ptr, path_len);
+}
+
+SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_read_regular_no_follow_bounded_raw(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    return rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes);
 }
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */

@@ -16,6 +16,7 @@ use std.common.contracts.container.linux_fresh_workspace_v3.{LinuxFreshWorkspace
 use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
 use std.common.contracts.container.linux_fresh_workload_v2.{LinuxFreshWorkloadCommandV2, LinuxFreshWorkloadActionV2, LinuxFreshWorkloadClosureV2}
+use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_workload_read_prior_v3
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
@@ -474,6 +475,10 @@ pub class MachineFreshWorkloadLifecycleV2:
         if state.permit != "idle": return Err("machine-fresh-workload-action-already-attempted")
         val probe_action = ["probe-wait", "probe-logs"].contains(action)
         if probe_action and state.probe_custody.is_none(): return Err("machine-probe-profile-not-selected")
+        # Bounded once-only reads of an ordinary CPU workload. The provider probe lane owns its own
+        # probe-wait/probe-logs pair and its own settlement rule, so the two never mix in one record.
+        val read_action = action == "wait" or action == "logs"
+        if read_action and state.probe_custody.is_some(): return Err("machine-fresh-workload-read-probe-lane-owned")
         val prior = match action:
             case "probe-wait": "start"
             case "probe-logs": "probe-wait"
@@ -485,6 +490,8 @@ pub class MachineFreshWorkloadLifecycleV2:
             case "inspect-confirm": "inspect"
             case "primary-attach": "inspect-confirm"
             case "inspect-exit": "inspect-confirm"
+            case "wait": linux_fresh_workload_read_prior_v3(action)?
+            case "logs": linux_fresh_workload_read_prior_v3(action)?
             case "stop": if state.outcome_unknown: "create" else: (if state.probe_custody.is_some(): "probe-logs" else: "inspect-confirm")
             case "remove": "stop"
             case "absence": "remove"
@@ -812,6 +819,22 @@ pub class MachineFreshWorkloadLifecycleV2:
     pub fn settled_v2() -> Result<bool, text>:
         val state = self.state_v2()?
         Ok(state.settled)
+
+    # A start whose own post-Start sample and its confirmation both show the container already exited:
+    # proven to have run, never associated, holding no native subject. Derived from the retained outputs
+    # of this owner's own completed helpers, so there is no flag for a caller or a replay to set.
+    # @allow(primitive_api) reason: predicate over this owner's own retained outputs; bool is the predicate result
+    pub fn exited_start_v3() -> Result<bool, text>:
+        val state = self.state_v2()?
+        if state.associated or state.containment.is_some() or state.uncertain or state.native_id == "": return Ok(false)
+        for name in ["start", "inspect", "inspect-confirm"]:
+            if (not state.operations.contains_key(name) or state.operations[name].state != "completed" or
+                    not state.outputs.contains_key(name)): return Ok(false)
+        val record = self.record_v3()?
+        val first = machine_fresh_record_start_evidence_v3(record, state.native_id, state.outputs["inspect"])
+        val confirmed = machine_fresh_record_start_evidence_v3(record, state.native_id, state.outputs["inspect-confirm"])
+        Ok(first.is_ok() and confirmed.is_ok() and
+            machine_fresh_workload_exited_start_confirmed_v3(first.unwrap(), confirmed.unwrap()))
 
     pub fn running_v2(custody: LinuxFreshEpochSuccessorCustodyV1, command: LinuxFreshWorkloadCommandV2) -> Result<LinuxContainerContainmentSnapshotV1, text>:
         val state = self.state_v2()?

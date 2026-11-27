@@ -1,0 +1,208 @@
+"""
+## Purpose and audience
+Purpose: Pin where Chrome 159 puts the dashes of a square `dashed` border when
+the fitted gap is fractional, at device scale 1 and 4: dash i starts at
+i * (L - dash) / (n - 1) in DEVICE px (L the side's device length, dash 2t or,
+below 3 device px, 3t), and a pixel the dash only partly covers is painted at
+that coverage. Along a horizontal side the coverage is the exact fraction;
+along a vertical side it is the share of the pixel's four sub-scanline centres
+(y + 1/8, 3/8, 5/8, 7/8) the dash covers (Skia's supersampled AA). The engine
+used to round each dash start to a whole CSS px, so at device scale 4 a side of
+432 device px got 35 gaps of 4 and one of 8 instead of 35 gaps of 4.114.
+Audience: browser-engine maintainers.
+
+Chrome 159 arm64 headless, --window-size=400,300, device scale 1 and 4: three
+97 x 53 border-box boxes (1px, 2px, 3px `dashed #000`). A profile is the grey
+level along a side, `<count>:<hex>` runs; every line of the border band equals
+it (top = bottom, left = right in Chrome). Tolerance 8 per pixel.
+"""
+
+"""
+Traceability: doc/00_llm_process/feature_expert/web_render_css_parity/skill.md
+("2026-11-27 -- device-px dashed borders re-landed (csslayout lane)").
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels, _simple_web_opacity_fold_command
+}
+use common.ui.draw_ir.{draw_ir_rect_clipped, draw_ir_rect_bounds, draw_ir_style_prop}
+
+val DA_PAGE = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;box-sizing:border-box;width:97px;height:53px;border-style:dashed;border-color:#000;left:10px;top:10px;border-width:1px'></div><div style='position:absolute;box-sizing:border-box;width:97px;height:53px;border-style:dashed;border-color:#000;left:120px;top:10px;border-width:2px'></div><div style='position:absolute;box-sizing:border-box;width:97px;height:53px;border-style:dashed;border-color:#000;left:230px;top:10px;border-width:3px'></div></body></html>"
+val DA_W = 340
+val DA_H = 70
+val DA_BOX_X: [i32] = [10, 120, 230]
+
+val DA_K1_T1_TOP = "3:00 1:FF 1:F0 2:00 1:10 1:FF 1:E4 2:00 1:1C 1:FF 1:D4 2:00 1:2C 1:FF 1:C8 2:00 1:38 1:FF 1:BC 2:00 1:44 1:FF 1:AC 2:00 1:54 1:FF 1:A0 2:00 1:60 1:FF 1:94 2:00 1:6C 1:FF 1:84 2:00 1:7C 1:FF 1:78 2:00 1:88 1:FF 1:68 2:00 1:98 1:FF 1:5C 2:00 1:A4 1:FF 1:50 2:00 1:B0 1:FF 1:40 2:00 1:C0 1:FF 1:34 2:00 1:CC 1:FF 1:28 2:00 1:D8 1:FF 1:18 2:00 1:E8 1:FF 1:0C 2:00 1:F4 1:FF 3:00"
+val DA_K1_T1_LEFT = "3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00 2:FF 3:00"
+val DA_K1_T2_TOP = "6:00 4:FF 1:1B 5:00 1:E3 3:FF 1:37 5:00 1:C7 3:FF 1:54 5:00 1:AA 3:FF 1:70 5:00 1:8E 3:FF 1:8D 5:00 1:71 3:FF 1:A9 5:00 1:55 3:FF 1:C6 5:00 1:38 3:FF 1:E2 5:00 1:1C 4:FF 6:00"
+val DA_K1_T2_LEFT = "6:00 3:FF 1:7F 5:00 1:7F 2:FF 1:BF 5:00 1:3F 3:FF 1:3F 5:00 1:BF 2:FF 1:7F 5:00 1:7F 3:FF 6:00"
+val DA_K1_T3_TOP = "6:00 3:FF 1:18 5:00 1:E6 2:FF 1:32 5:00 1:CC 2:FF 1:4B 5:00 1:B3 2:FF 1:65 5:00 1:99 2:FF 1:7F 5:00 1:7F 2:FF 1:98 5:00 1:66 2:FF 1:B2 5:00 1:4C 2:FF 1:CB 5:00 1:33 2:FF 1:E5 5:00 1:19 3:FF 6:00"
+val DA_K1_T3_LEFT = "6:00 3:FF 1:7F 5:00 1:7F 2:FF 1:BF 5:00 1:3F 3:FF 1:3F 5:00 1:BF 2:FF 1:7F 5:00 1:7F 3:FF 6:00"
+val DA_K4_T1_TOP = "8:00 3:FF 1:DF 7:00 1:1F 3:FF 1:BF 7:00 1:3F 3:FF 1:9F 7:00 1:5F 3:FF 1:7F 7:00 1:7F 3:FF 1:5F 7:00 1:A0 3:FF 1:3E 7:00 1:C0 3:FF 1:1E 7:00 1:DF 3:FF 8:00 3:FF 1:DF 7:00 1:1F 3:FF 1:BF 7:00 1:3F 3:FF 1:9E 7:00 1:60 3:FF 1:7E 7:00 1:80 3:FF 1:5E 7:00 1:A0 3:FF 1:3E 7:00 1:C0 3:FF 1:1E 7:00 1:E0 2:FF 1:FE 8:00 3:FF 1:DE 7:00 1:20 3:FF 1:BE 7:00 1:3F 3:FF 1:9F 7:00 1:5F 3:FF 1:7F 7:00 1:7F 3:FF 1:5F 7:00 1:9F 3:FF 1:3F 7:00 1:BF 3:FF 1:1F 7:00 1:DF 3:FF 8:00 3:FF 1:DF 7:00 1:1F 3:FF 1:BF 7:00 1:3F 3:FF 1:9F 7:00 1:5F 3:FF 1:7F 7:00 1:7F 3:FF 1:5F 7:00 1:9F 3:FF 1:3F 7:00 1:BF 3:FF 1:1F 7:00 1:DF 3:FF 8:00"
+val DA_K4_T1_LEFT = "8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00 4:FF 8:00"
+val DA_K4_T2_TOP = "16:00 7:FF 1:3F 15:00 1:BF 6:FF 1:7F 15:00 1:7F 6:FF 1:BF 15:00 1:3F 7:FF 16:00 7:FF 1:3F 15:00 1:BF 6:FF 1:7F 15:00 1:7F 6:FF 1:BF 15:00 1:3F 7:FF 16:00 7:FF 1:3F 15:00 1:BF 6:FF 1:7F 15:00 1:7F 6:FF 1:BF 15:00 1:3F 7:FF 16:00 7:FF 1:3F 15:00 1:BF 6:FF 1:7F 15:00 1:7F 6:FF 1:BF 15:00 1:3F 7:FF 16:00"
+val DA_K4_T2_LEFT = "16:00 8:FF 1:7F 15:00 1:7F 8:FF 16:00 8:FF 1:7F 15:00 1:7F 8:FF 16:00 8:FF 1:7F 15:00 1:7F 8:FF 16:00 8:FF 1:7F 15:00 1:7F 8:FF 16:00"
+val DA_K4_T3_TOP = "24:00 12:FF 1:65 23:00 1:99 11:FF 1:CB 23:00 1:33 12:FF 1:32 23:00 1:CC 11:FF 1:98 23:00 1:66 12:FF 24:00 12:FF 1:65 23:00 1:99 11:FF 1:CB 23:00 1:33 12:FF 1:32 23:00 1:CC 11:FF 1:98 23:00 1:66 12:FF 24:00"
+val DA_K4_T3_LEFT = "24:00 13:FF 1:7F 23:00 1:7F 13:FF 1:3F 23:00 1:BF 12:FF 1:BF 23:00 1:3F 13:FF 1:7F 23:00 1:7F 13:FF 24:00"
+
+fn da_hex(s: text) -> i32:
+    val digits = "0123456789ABCDEF"
+    (digits.index_of(s.substring(0, 1)) ?? 0) * 16 + (digits.index_of(s.substring(1, 2)) ?? 0)
+
+# Expands `<count>:<hex>` runs to one grey level per pixel.
+fn da_profile(enc: text) -> [i32]:
+    var out: [i32] = []
+    # cpu-lane-loop-ok: test pin decode; bound is the run count
+    for tok in enc.split(" "):
+        if tok.len() == 0:
+            continue
+        val colon = tok.index_of(":") ?? 0
+        val n = tok.substring(0, colon).to_int()
+        val v = da_hex(tok.substring(colon + 1, tok.len()))
+        var i = 0
+        # cpu-lane-loop-ok: test pin decode; bound is the run length
+        while i < n:
+            out.push(v)
+            i = i + 1
+    out
+
+fn da_off(p: u32, want: i32) -> bool:
+    var sh = 0u32
+    var off = false
+    # cpu-lane-loop-ok: three colour channels
+    while sh <= 16u32:
+        val d = ((p >> sh) & 0xFFu32) as i32 - want
+        if d > 8 or d < -8:
+            off = true
+        sh = sh + 8u32
+    off
+
+# Mismatches of every band line of one box: its top/bottom rows against `top`,
+# its left/right columns against `left`.
+fn da_box_mismatches(px: [u32], fw: i32, k: i32, bx: i32, t: i32, top: text, left: text, lane: text) -> i32:
+    val tp = da_profile(top)
+    val lp = da_profile(left)
+    val x0 = bx * k
+    val y0 = 10 * k
+    val w = 97 * k
+    val h = 53 * k
+    if tp.len() != w or lp.len() != h:
+        print "{lane} profile length {tp.len()}/{lp.len()} want {w}/{h}"
+        return 99999
+    var bad = 0
+    var j = 0
+    # cpu-lane-loop-ok: test pin scan; bound is the device border thickness
+    while j < t * k:
+        var i = 0
+        # cpu-lane-loop-ok: test pin scan; bound is the side length
+        while i < w:
+            if da_off(px[(y0 + j) * fw + x0 + i], tp[i]) or da_off(px[(y0 + h - 1 - j) * fw + x0 + i], tp[i]):
+                if bad < 6:
+                    print "{lane} horizontal x={x0 + i} line {j} want {tp[i]}"
+                bad = bad + 1
+            i = i + 1
+        i = 0
+        # cpu-lane-loop-ok: test pin scan; bound is the side length
+        while i < h:
+            if da_off(px[(y0 + i) * fw + x0 + j], lp[i]) or da_off(px[(y0 + i) * fw + x0 + w - 1 - j], lp[i]):
+                if bad < 6:
+                    print "{lane} vertical y={y0 + i} line {j} want {lp[i]}"
+                bad = bad + 1
+            i = i + 1
+        j = j + 1
+    bad
+
+fn da_mismatches(px: [u32], k: i32, tops: [text], lefts: [text], lane: text) -> i32:
+    if px.len() != DA_W * k * DA_H * k:
+        print "{lane} frame size {px.len()}"
+        return 99999
+    var total = 0
+    var b = 0
+    # cpu-lane-loop-ok: the three boxes of the page
+    while b < 3:
+        val bad = da_box_mismatches(px, DA_W * k, k, DA_BOX_X[b], b + 1, tops[b], lefts[b], "{lane} {b + 1}px")
+        if bad > 0:
+            print "{lane} {b + 1}px mismatches {bad}"
+        total = total + bad
+        b = b + 1
+    total
+
+describe "dashed border dash positions in device px (Chrome 159)":
+    it "raster places 1px/2px/3px dashes with partial-coverage ends at device scale 1":
+        val px = simple_web_layout_render_html_software_pixels(DA_PAGE, DA_W, DA_H)
+        expect(da_mismatches(px, 1, [DA_K1_T1_TOP, DA_K1_T2_TOP, DA_K1_T3_TOP], [DA_K1_T1_LEFT, DA_K1_T2_LEFT, DA_K1_T3_LEFT], "raster k1")).to_equal(0)
+
+    it "cpu_simd places 1px/2px/3px dashes with partial-coverage ends at device scale 1":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(DA_PAGE, DA_W, DA_H, 1, "cpu_simd")
+        expect(da_mismatches(px, 1, [DA_K1_T1_TOP, DA_K1_T2_TOP, DA_K1_T3_TOP], [DA_K1_T1_LEFT, DA_K1_T2_LEFT, DA_K1_T3_LEFT], "cpu_simd k1")).to_equal(0)
+
+    it "cpu_simd places 1px/2px/3px dashes in device px at device scale 4":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(DA_PAGE, DA_W, DA_H, 4, "cpu_simd")
+        expect(da_mismatches(px, 4, [DA_K4_T1_TOP, DA_K4_T2_TOP, DA_K4_T3_TOP], [DA_K4_T1_LEFT, DA_K4_T2_LEFT, DA_K4_T3_LEFT], "cpu_simd k4")).to_equal(0)
+
+# A dashed side inside CSS opacity groups: the Draw IR side command then also
+# carries the group's nest prop (two nested groups) and must still paint the
+# dashes. Reference: the same box with no opacity on cpu_simd, composited over
+# white at the group opacity (0.5, or 0.25 for two nested 0.5 groups), i.e.
+# grey g -> 255 - (255 - g) * a. Base f43f68c218e paints this pattern; a solid
+# side reads 191 everywhere in the nested case.
+fn da_opacity_page(groups: i32) -> text:
+    var html = "<div style='position:absolute;box-sizing:border-box;left:10px;top:10px;width:97px;height:20px;border:2px dashed #000'></div>"
+    var g = 0
+    # cpu-lane-loop-ok: wraps the box in `groups` opacity groups (0..2)
+    while g < groups:
+        html = "<div style='opacity:.5'>" + html + "</div>"
+        g = g + 1
+    "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'>" + html + "</body></html>"
+
+fn da_band_diff(groups: i32, lane: text) -> i32:
+    val r = simple_web_layout_render_html_pixels_engine2d_at_device_scale(da_opacity_page(0), 120, 40, 1, "cpu_simd")
+    val c = simple_web_layout_render_html_pixels_engine2d_at_device_scale(da_opacity_page(groups), 120, 40, 1, "cpu_simd")
+    if r.len() != 4800 or c.len() != 4800:
+        print "{lane} frame size {r.len()}/{c.len()}"
+        return 99999
+    val div = if groups == 2: 4 else: 2
+    var bad = 0
+    var j = 0
+    # cpu-lane-loop-ok: test scan; two border rows / columns
+    while j < 2:
+        var i = 0
+        # cpu-lane-loop-ok: test scan; bound is the side length
+        while i < 97:
+            val idx = (10 + j) * 120 + 10 + i
+            val want = 255 - (255 - ((r[idx] >> 8u32) & 0xFFu32) as i32) / div
+            if da_off(c[idx], want):
+                if bad < 6:
+                    print "{lane} top x={10 + i} line {j} want {want} got {(c[idx] >> 8u32) & 0xFFu32}"
+                bad = bad + 1
+            i = i + 1
+        i = 0
+        # cpu-lane-loop-ok: test scan; bound is the side length
+        while i < 20:
+            val idx = (10 + i) * 120 + 10 + j
+            val want = 255 - (255 - ((r[idx] >> 8u32) & 0xFFu32) as i32) / div
+            if da_off(c[idx], want):
+                if bad < 6:
+                    print "{lane} left y={10 + i} line {j} want {want} got {(c[idx] >> 8u32) & 0xFFu32}"
+                bad = bad + 1
+            i = i + 1
+        j = j + 1
+    bad
+
+describe "dashed border inside CSS opacity groups (cpu_simd)":
+    it "paints the dashes inside one opacity group":
+        expect(da_band_diff(1, "opacity1")).to_equal(0)
+
+    it "paints the dashes, not a solid side, inside two nested opacity groups":
+        expect(da_band_diff(2, "opacity2")).to_equal(0)
+
+    it "folds a demoted opacity root into every dash-runs run colour":
+        # A side is ONE command now, so a demoted single-command root folds
+        # its opacity into it: the command colour AND each run colour.
+        var cmd = draw_ir_rect_clipped("dash", 0, 0, 10, 2, 0xFF000000u32, draw_ir_rect_bounds(0, 0, 10, 2))
+        cmd.computed_style = [draw_ir_style_prop("dash-runs", "0,0,6,4278190080,6,1,2130706432")]
+        val folded = _simple_web_opacity_fold_command(cmd, 50)
+        expect(folded.computed_style[0].value).to_equal("0,0,6,2147483648,6,1,1073741824")

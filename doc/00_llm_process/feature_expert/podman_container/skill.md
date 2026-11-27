@@ -191,3 +191,56 @@ nil" rather than the real upstream error — print the error field first.
 - `oci_engine_policy_spec` "executes an exact scripted absolute route" and
   `oci_execution_user_v2_spec:34` (`with` not found) fail for unrelated reasons.
 - Provider journal compaction and a provider-level label sweep are not built.
+
+## Fresh route workspace/TTY admission (2026-11-27)
+
+The shared-API fresh install route (`simple_container_open_fresh_v2`) admits
+build roots and a workload TTY only when the root-installed
+`/etc/simple/container/fresh-epoch-profile.sdn` carries both optional keys
+`workloadBuildRootPrefix` and `workloadTerminalMode` (refused by default, reason
+`machine-fresh-workload-profile-unsupported` unchanged). The gate that matters is
+`linux_fresh_workload_argv_v2`, which re-derives the admission from the profile
+the installed owner holds; the record keeps what was used in
+`admitted_build_root_prefix` / `admitted_terminal_mode`. A secondary exec TTY
+needs `execTerminalMode: tty` in the installed exec policy and is always
+detached. Records and traps:
+`doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md`.
+
+Traps hit while doing it:
+- The chain is exact-byte at five places (request projection, command
+  canonical bytes, argv, created-config inspect, profile key set). Changing one
+  alone yields `fresh-workload-command-request-fields-differ`, not a refusal.
+- `}}` inside a Simple string literal is an escaped `}`. A JSON fixture ending
+  in `}}` silently loses a brace (`Unclosed object`); write `"}" + "}"`.
+- Canonical SDN writes bare strings (`execTerminalMode: tty`, no quotes), so a
+  `replace` on the quoted form is a silent no-op; assert the text changed.
+- Fresh-route `wait`/`logs` (2026-11-27,
+  `container_fresh_route_wait_logs_unsupported_2026-11-27.md`): two named
+  stages of the Inspect action, bound through the existing closed probe
+  projection (`linux_fresh_workload_probe_project_v3`, tail
+  `<verb> -- <native id>`). Not new `LinuxFreshWorkloadActionV2` values, not the
+  probe custody lane (that one needs a compiled provider-CLI request and only
+  accepts exit `0`), and no new profile key. `logs` needs a completed `wait`;
+  each read runs once and then replays; a failed read sets `outcome_unknown`,
+  which still allows `destroy`. Source-only so far: `podman_shared_api_live_spec`
+  is not proven green, and a fast-exit workload may be refused at `start`.
+- A new operation name on the fresh route must be added in three places or a
+  later publish fails: the record's closed name list
+  (`machine_fresh_workload_action_initial_v2`), the `prior` table in
+  `action_begin_v2`, and the bind/validate branch in
+  `machine_fresh_workload_begin_v3`. The workspace record keeps its own list.
+- A fast-exit workload is already terminal at the first post-Start inspect.
+  Measured on this host (podman 4.9.3 rootless, `busybox sh -c 'echo hi; exit 7'`):
+  `created`/pid 0 before start; `stopped`/pid 0/empty `CgroupPath` right after
+  `start` returned 0; `exited` one second later. So a "did it start" check must
+  accept both `stopped` and `exited`, and two samples can differ in status.
+  `podman stop` on an exited container exits 0. The fresh route classifies this
+  with `machine_fresh_workload_start_evidence_v3` (never the running-subject
+  decoder, which stays the association gate) and replies `start` with phase
+  `exited`.
+- An exited start is never associated, so it has no native subject and its
+  charge cannot be settled: `destroy` refuses with
+  `machine-fresh-workload-exited-start-settlement-unproven`
+  (`doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md`).
+  Any association failure other than "gone at both samples" still latches
+  `outcome_unknown`, which refuses `wait`/`logs`.

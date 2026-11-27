@@ -557,3 +557,5 @@ Shard knobs, `.spab` (`SIMPLE_FRONTEND_SPAB`, opt-in), DigestV1 (unknown algo =
 miss) and the Lean cache gates: `doc/07_guide/tooling/bootstrap_options.md`.
 *(2026-11-22 reconciliation: `build-phase3-phase4.sh` defaults to `--compile-mode=shard` / `SIMPLE_FILE_WORKERS=0` with `--compile-mode=file` optional; see "Unified Phase 3 / Phase 4 Architecture & Protected Bootstrap Policy (2026-11-22)" above.)*
 Never `git stash`; never GCC on Windows.
+
+**Independent oracle (2026-11-27):** a test oracle or fixture generator whose value is that it is NOT Simple (reference `hashlib`/`cryptography`/`sqlite3`, an independent HTTP/SigV4 checker) stays Python as the policy exception `INDEPENDENT_ORACLE`; census rows in `doc/08_tracking/todo/python_phase_census_2026-11-27.md`.
