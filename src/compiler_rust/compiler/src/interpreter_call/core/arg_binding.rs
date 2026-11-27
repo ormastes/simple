@@ -341,7 +341,7 @@ pub(crate) fn present_value_as_bool_arg(value: &Value, ty: Option<&Type>) -> Opt
 /// non-nil scalar bound to a scalar `T?` parameter becomes `Some(value)`. The pure-Simple MIR lowering does the
 /// same (`mir_lowering_stmts.spl` Optional arm -> `ensure_option_handle`) and
 /// `-> T?` returns are already Some-wrapped (`function_exec.rs`). Without it,
-/// `param?` saw a raw array and failed with "? operator requires Result or
+/// `param?` on a scalar `T?` saw a raw scalar and failed with "? operator requires Result or
 /// Option type" while `match param: case Some(x)` accepted it.
 /// `nil` stays nil (the interpreter's None) and `any?` is left untouched,
 /// matching the return-side rule. `?` itself stays strict on non-Options.
@@ -359,7 +359,7 @@ pub(crate) fn wrap_plain_into_optional_param(value: Value, ty: Option<&Type>) ->
         inner.as_ref(),
         Type::Simple(name) if matches!(
             name.as_str(),
-            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "f32" | "f64" | "float" | "bool" | "char"
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize" | "uint" | "int" | "f32" | "f64" | "float" | "bool" | "char"
         )
     );
     if !scalar {
