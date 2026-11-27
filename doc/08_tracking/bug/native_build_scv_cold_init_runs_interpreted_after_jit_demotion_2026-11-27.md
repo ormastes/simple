@@ -174,3 +174,29 @@ are discarded on timeout kill. Next: make the worker's output live (or flush cap
 
 Follow-up: verify that JIT-run parse shards write front-end cache entries identical to interpreted ones (the lint entry has a known
 JIT wrong-answer precedent, `src/compiler_rust/driver/src/exec_core.rs:1971-1987`); a faster but divergent cache warm would be silent.
+
+## Live worker log + phase breakdown (2026-11-27, seed simple-local-20261127m, worktree c27-variant)
+
+Visibility fix: `SIMPLE_BUILD_TRACE_FILE=<path>` (with `SIMPLE_BUILD_TRACE=1`) makes `log_build_trace` append every
+`[build-trace]` line to that file per line, in the coordinator, parse shards and the final worker alike (env is inherited).
+`SIMPLE_BUILD_PROGRESS_EVENTS=<path>` already did the same for `[build]` progress events. Both work on Windows while the
+worker is still running and survive the cap kill. New trace points: `driver:stage_parse:start`,
+`driver:stage_lower_hir:start/done`.
+
+Second defect found by this run (fixed): with `SIMPLE_SCV_INVENTORY_COLD_INIT=1` on the JIT coordinator the cold-init scan died with
+`match statement exhausted without matching any pattern` at `inventory_events.spl:474` for the skipped non-source path
+`examples/10_tooling/README.md` (`Ok(None)` of `Result<CompileSourceEventV1?, text>` matched neither the `Ok(Some(ev))` nor the
+`Ok(None)` arm) -> `git-event-refresh-failed`. The match now uses `case Ok(item): if item.is_some(): events.push(item!)`.
+
+Phase breakdown of the smoke (`SIMPLE_MIR_SHARDING=0`, JIT children), wall seconds from coordinator start:
+
+| phase | time |
+|---|---|
+| SCV cold-init scan + decode (102761 git rows, 47274 inventory rows) | 0 -> 720 s (dominant; one-time per worktree) |
+| parse shards (5, warm) + hir=2 shard decision | 720 -> 794 s |
+| final worker start -> `driver:compile:start` | 126 s |
+| `driver:load_sources` (192 sources, 2.1 MB) | 90 s (done at worker +217 s) |
+| after `load_sources:done` (stage_parse / stage_lower_hir of the 192-source closure) | silent for >600 s when I stopped it (worker +217 s .. +830 s); no further trace line, so the time is inside stage_parse or serial HIR lowering; the new trace points will say which |
+
+Smoke NOT completed (stopped at ~14 min of worker time to honour the time box); todo 478 and the plan-doc "STILL OWED" stay open.
+Next: rerun with the new `stage_parse/stage_lower_hir` trace points (cold init is now cached, so ~80 s to worker start).
