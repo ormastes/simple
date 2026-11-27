@@ -1,0 +1,133 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare `fn()` callable dependency: no fabricated position
+
+Pins the fix for
+doc/08_tracking/bug/hir_bare_fn_callable_dep_fabricated_position_2026-08-29.md.
+
+A callable whose signature names the bare-callable type (`handler: fn()`,
+the `std.nogc_sync_mut.io.signal_stubs.signal_handler_install` shape) used to
+send the keyword spelling `fn` through the cross-module dependency
+materialization walk (src/compiler/20.hir/hir_lowering/_Items/
+module_reexport_materialization.spl). No module can ever declare a type
+literally named `fn` -- lower_named_kind resolves it in a primitive arm
+(hir_lowering/types.spl) BEFORE any symbol lookup -- so the owner's sweep
+always missed, recorded the `[hir-callable-dep-origin-unresolved]
+owner=... dependency=fn` advisory, and the failure resurfaced much later as a
+hard `unresolved type: fn` attributed to whichever module imported the
+callable -- a fabricated position in an unrelated module.
+
+Fix (79d816ea3cd): `fn` joins hir_dependency_is_builtin_type, the spelling
+filter both miss handlers and the re-export chase already gate on, so the
+owner walk never runs for a spelling that cannot have an owner. This spec
+pins the predicate, the quiet owner/consumer lowering for the callable and
+field twins, and the control row proving the miss machinery stays live for
+genuine gaps (so the filter is the deliberate exclusion, not a dead walk).
+
+Receipts asserted in-process, in the harness idiom of the neighbouring walk
+specs (census_r3_unresolved_name_resolver_spec): a callable-dep miss records
+its owner key in the payload-origin miss memo, so `lookup == false` proves
+the miss handler never ran for `fn`.
+"""
+
+# @tag: unit, compiler, hir, materialization, callable, bare-fn
+
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering._Items.module_reexport_materialization.{hir_dependency_is_builtin_type, hir_dependency_type_name, hir_payload_origin_miss_key}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.config.{Logger}
+
+fn barefn_logger() -> Logger:
+    Logger(level: 0)
+
+fn barefn_undecl_count(messages: [text]) -> i64:
+    var count = 0
+    for message in messages:
+        if message.contains("W-HIR-UNDECL-IMPORT-001"):
+            count = count + 1
+    count
+
+describe "bare fn() callable dependency has no fabricated position":
+    it "treats the bare fn spelling as builtin and leaves lookalikes fail-closed":
+        expect(hir_dependency_is_builtin_type("fn")).to_equal(true)
+        expect(hir_dependency_is_builtin_type(hir_dependency_type_name("has_fn"))).to_equal(true)
+        expect(hir_dependency_is_builtin_type("Fn")).to_equal(false)
+        expect(hir_dependency_is_builtin_type("func")).to_equal(false)
+        expect(hir_dependency_is_builtin_type("fn2")).to_equal(false)
+
+    it "pins the fn arm in the spelling filter next to its bug record":
+        val source = file_read("src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl")
+        expect(source).to_contain("if dependency == \"fn\":")
+        expect(source).to_contain("doc/08_tracking/bug/hir_bare_fn_callable_dep_fabricated_position_2026-08-29.md")
+
+    it "lowers an imported callable with a bare fn() parameter with no owner miss":
+        val log = barefn_logger()
+        # The signal_stubs.signal_handler_install shape: the bare `fn()`
+        # callable parameter is the dependency this row fabricated a
+        # position for.
+        val owner_source = "fn signal_handler_install(signal: i64, handler: fn()) -> bool:\n    true\n\nfn atexit_register(handler: fn()) -> bool:\n    false"
+        val consumer_source = "use probe.barefn_owner.\{signal_handler_install, atexit_register\}\nfn consume() -> bool:\n    val a = signal_handler_install(2, fn(): ())\n    val b = atexit_register(fn(): ())\n    a and b"
+        val owner = parse_full_frontend(owner_source, "probe/barefn_owner.spl", "probe.barefn_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "probe/barefn_consumer.spl", "probe.barefn_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["probe.barefn_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "probe/barefn_owner.spl", content: owner_source, module_name: "probe.barefn_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("probe/barefn_consumer.spl", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(barefn_undecl_count(lowering.diagnostic_messages)).to_equal(0)
+        # The callable-dep miss handler never ran: no owner-miss receipt for
+        # the `fn` spelling (a recorded miss would make the lookup true).
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable probe.barefn_owner", "fn"))).to_equal(false)
+        expect(hir.symbols.lookup("signal_handler_install") != nil).to_equal(true)
+        expect(hir.symbols.lookup("atexit_register") != nil).to_equal(true)
+        expect(hir.symbols.lookup("consume") != nil).to_equal(true)
+
+    it "lowers an imported struct with a bare fn() field with no owner miss":
+        val log = barefn_logger()
+        val owner_source = "struct SignalSlot:\n    handler: fn()\n    signal: i64\n\nfn make_slot(signal: i64, handler: fn()) -> SignalSlot:\n    SignalSlot(handler: handler, signal: signal)"
+        val consumer_source = "use probe.barefn_field_owner.\{SignalSlot, make_slot\}\nfn consume() -> i64:\n    val slot = make_slot(2, fn(): ())\n    slot.signal"
+        val owner = parse_full_frontend(owner_source, "probe/barefn_field_owner.spl", "probe.barefn_field_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "probe/barefn_field_consumer.spl", "probe.barefn_field_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["probe.barefn_field_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "probe/barefn_field_owner.spl", content: owner_source, module_name: "probe.barefn_field_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("probe/barefn_field_consumer.spl", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(barefn_undecl_count(lowering.diagnostic_messages)).to_equal(0)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable probe.barefn_field_owner", "fn"))).to_equal(false)
+        expect(hir.symbols.lookup("make_slot") != nil).to_equal(true)
+
+    it "keeps the owner-miss receipt live for a genuine undeclared dependency":
+        # Control row: a non-builtin spelling the owner neither declares nor
+        # imports must still record the owner-side miss -- the same receipt
+        # `fn` produced pre-fix. Proves the quiet `fn` path is the filter's
+        # deliberate exclusion and the walk itself is not dead.
+        val log = barefn_logger()
+        val owner_source = "fn broken_install(signal: i64, handler: BareFnProbeWidget) -> bool:\n    true"
+        val consumer_source = "use probe.barefn_control_owner.\{broken_install\}\nfn consume() -> i64:\n    1"
+        val owner = parse_full_frontend(owner_source, "probe/barefn_control_owner.spl", "probe.barefn_control_owner", log)
+        val consumer = parse_full_frontend(consumer_source, "probe/barefn_control_consumer.spl", "probe.barefn_control_consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["probe.barefn_control_owner"] = owner
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "probe/barefn_control_owner.spl", content: owner_source, module_name: "probe.barefn_control_owner")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        var lowering = hirlowering_for_module("probe/barefn_control_consumer.spl", result.unwrap())
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.payload_origin_miss_memo_lookup(hir_payload_origin_miss_key("callable probe.barefn_control_owner", "BareFnProbeWidget"))).to_equal(true)
+        expect(barefn_undecl_count(lowering.diagnostic_messages)).to_equal(1)

@@ -1,0 +1,52 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+# Inventory git-event refusal names its branch and row
+
+**Bug:** doc/08_tracking/bug/seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28.md
+
+A Stage 2 candidate pinned at `c6e3ee3c112` refused every cold SCV admission
+with a bare `SCV-E-ADMISSION: git-event-refresh-failed`: the row walk returned
+`None` and the reason (which check, which row) was lost. The cause was a free
+`fn byte_len(data: [u8])` in `os/kernel/loader/byte_utils.spl` that the Rust
+seed binds every text `x.byte_len()` in the closure to, once that module is
+reachable from `bootstrap_main.spl`; on arm64 it reads 0 for a text.
+
+Red (before): the refusal helpers do not exist, the per-path refusal is the
+bare `invalid`, and `byte_utils.spl` declares a free `byte_len`.
+Green: each refusal names its branch and the offending row or path, and the
+loader helper is `lb_byte_len`.
+"""
+
+use std.spec.*
+use app.io.mod.{file_read}
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_listed_row_refusal_v1, _compiler_inventory_event_for_path_cost_v1}
+
+fn event_refusal(path: text) -> text:
+    match _compiler_inventory_event_for_path_cost_v1(".", "create", path, None):
+        case Err(why): why
+        case Ok(_): ""
+
+describe "inventory git-event refusal reason":
+    it "accepts a well-formed `<tag> <path>` row":
+        expect(compiler_inventory_listed_row_refusal_v1("H src/a.spl")).to_equal("")
+        expect(compiler_inventory_listed_row_refusal_v1("? test/b_spec.spl")).to_equal("")
+        expect(compiler_inventory_listed_row_refusal_v1("C examples/10_tooling/README.md")).to_equal("")
+
+    it "names the row-shape branch, the measured byte length and the row":
+        expect(compiler_inventory_listed_row_refusal_v1("Hsrc/a.spl")).to_equal("row-shape:byte_len=10:Hsrc/a.spl")
+        expect(compiler_inventory_listed_row_refusal_v1("H")).to_equal("row-shape:byte_len=1:H")
+
+    it "names the row-tag branch and the row":
+        expect(compiler_inventory_listed_row_refusal_v1("X src/a.spl")).to_equal("row-tag:X src/a.spl")
+
+    it "names the per-path branch and the path":
+        expect(event_refusal("\"src/q.spl\"")).to_equal("quoted-path:\"src/q.spl\"")
+        expect(event_refusal("examples/elsewhere/a.spl")).to_equal("family-invalid:examples/elsewhere/a.spl")
+
+describe "loader byte helpers":
+    it "declare no free `byte_len` that the seed could bind text.byte_len() to":
+        val source = file_read("src/os/kernel/loader/byte_utils.spl")
+        expect(source).to_contain("\nfn lb_byte_len(data: [u8]) -> i64:")
+        expect(source).not.to_contain("\nfn byte_len(")

@@ -757,10 +757,12 @@ impl Lowerer {
         callee: &Expr,
         resolved_symbol: Option<&str>,
     ) -> Option<crate::hir::lower::lowerer::GenericIdentityParamSpec> {
+        // A resolved symbol names the exact function called; the bare callee
+        // name may belong to a same-named function of another module.
         if let Some(sym) = resolved_symbol {
-            if let Some(spec) = self.generic_identity_param.get(sym) {
-                return Some(spec.clone());
-            }
+            return (self.generic_identity_param.get(sym))
+                .or_else(|| self.resolve_function_alias(sym).and_then(|orig| self.generic_identity_param.get(orig)))
+                .cloned();
         }
         match callee {
             Expr::Identifier(name) => {
@@ -794,23 +796,40 @@ impl Lowerer {
         ret: TypeId,
         ctx: &FunctionContext,
     ) -> TypeId {
-        if ret != TypeId::ANY {
+        if !matches!(ret, TypeId::ANY | TypeId::VOID) {
             return ret;
         }
         let (base_callee, explicit_type_args) = match callee {
             Expr::GenericInst { expr, type_args } => (expr.as_ref(), Some(type_args.as_slice())),
             other => (other, None),
         };
+        // A local of that name shadows the function.
+        if matches!(base_callee, Expr::Identifier(name) if ctx.local_map.contains_key(name)) {
+            return ret;
+        }
         let Some(spec) = self.lookup_generic_identity_param_spec(base_callee, resolved_symbol) else {
             return ret;
         };
-        let arg = args
-            .iter()
-            .find(|a| a.name.as_deref() == Some(spec.name.as_str()))
-            .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(spec.index));
-        if let Some(arg) = arg {
+        // `()` is what a call to an unannotated function declared further down
+        // is typed before its body is lowered; only that implicit shape counts.
+        if ret == TypeId::VOID && spec.generic_param_pos.is_some() {
+            return ret;
+        }
+        let arg_of = |index: usize, name: &str| {
+            args.iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(index))
+        };
+        if let Some(arg) = arg_of(spec.index, &spec.name) {
             if let Ok(ty) = self.infer_type(&arg.value, ctx) {
-                if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                // One type variable, one type: `max(0, x)` with `x: f64` does
+                // not instantiate `T` to the first argument's `i64`.
+                let agree = spec.same_type_params.iter().all(|(index, name)| {
+                    arg_of(*index, name)
+                        .and_then(|other| self.infer_type(&other.value, ctx).ok())
+                        .is_some_and(|other| other == ty || self.module.types.get(other) == self.module.types.get(ty))
+                });
+                if agree && self.is_instantiable_type(ty) {
                     return ty;
                 }
             }
@@ -823,6 +842,11 @@ impl Lowerer {
                     }
                 }
             }
+        }
+        // Not instantiated: the erased identity still returns its argument as
+        // a tagged word, never `()`.
+        if ret == TypeId::VOID {
+            return TypeId::ANY;
         }
         ret
     }
@@ -1918,13 +1942,18 @@ impl Lowerer {
             .method_return_types
             .iter()
             .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
-            .min_by_key(|(name, _)| name.len())
+            // Shortest name, ties by name: `method_return_types` is a HashMap, and
+            // a length-only key picked `A.pos` or `B.pos` by hash order per run.
+            .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
         {
             // A guess borrowed from some same-named method (`xs.join(",")` on an
             // untyped `xs` typed as an imported `A.join() -> text?`): flag it so
             // the caller can give it a private type id the Option->scalar
             // return rule skips.
             self.last_method_return_guessed.set(true);
+            if matches!(ret_ty, TypeId::F32 | TypeId::F64) {
+                self.guessed_float_in_function.set(true);
+            }
             return ret_ty;
         }
         // Builtin string methods that return a RAW native i64 (a code point /

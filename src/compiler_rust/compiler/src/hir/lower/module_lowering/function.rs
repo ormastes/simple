@@ -481,7 +481,7 @@ impl Lowerer {
     /// `is_float_into_int`). Called beside `reject_callable_for_enum_slot` at
     /// every call site whose parameter types are resolved.
     pub(crate) fn reject_float_for_int_slot(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
-        if !is_float_into_int(expected, value.ty) {
+        if !is_float_into_int(expected, value.ty) || self.guessed_float_in_function.get() {
             return Ok(());
         }
         let name = |t: TypeId| match t {
@@ -1288,6 +1288,50 @@ impl Lowerer {
         f: &ast::FunctionDef,
         owner_type: Option<&str>,
     ) -> LowerResult<HirFunction> {
+        // The body saves and restores these fields on its SUCCESS path only;
+        // every error return used to skip the restore because the module pass
+        // aborted at the first error. The pass now continues past E1003-class
+        // verdicts to collect independent type errors across functions
+        // (seed_lowering_reports_only_first_type_error_2026-11-26), so an
+        // error must leave the lowerer exactly as it found it or the next
+        // function would lower against the failed one's context.
+        let previous_class_type = self.current_class_type;
+        let previous_function_name = self.current_function_name.clone();
+        let previous_function_line = self.current_function_line;
+        let previous_function_owner = self.current_function_owner.clone();
+        // Same owner computation the body uses; the flatten struct-name
+        // overlay is selected per owner, so it must be installed before the
+        // overlay enter below.
+        self.current_function_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
+        let previous_type_scope = self.enter_flatten_struct_scope();
+        let result = self.lower_function_body(f, owner_type);
+        // Restore unconditionally: the body only restores on its success path,
+        // and the module pass may continue with the next function after an
+        // E1003-class verdict.
+        self.module.types.replace_scope_aliases(previous_type_scope);
+        match result {
+            Ok(hir_function) => Ok(hir_function),
+            Err(error) => {
+                self.current_class_type = previous_class_type;
+                self.current_function_name = previous_function_name;
+                self.current_function_line = previous_function_line;
+                self.current_function_owner = previous_function_owner;
+                // `lower_function_body` enters the function lifetime scope
+                // before any fallible step and exits it only on success;
+                // every error path below leaves exactly that one scope open.
+                self.lifetime_context.exit_scope();
+                Err(error)
+            }
+        }
+    }
+
+    /// Body of [`Lowerer::lower_function`]; see the wrapper for why the
+    /// context restores live there and not on this function's error paths.
+    fn lower_function_body(
+        &mut self,
+        f: &ast::FunctionDef,
+        owner_type: Option<&str>,
+    ) -> LowerResult<HirFunction> {
         // Local IDs restart for every function. Capabilities retained from the
         // previous function would therefore alias unrelated locals that happen
         // to reuse the same numeric ID. Reuse the table allocation but begin a
@@ -1309,8 +1353,8 @@ impl Lowerer {
         let previous_function_name = self.current_function_name.clone();
         let previous_function_line = self.current_function_line;
         let fn_flatten_owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
-        let previous_function_owner = std::mem::replace(&mut self.current_function_owner, fn_flatten_owner.clone());
-        let previous_type_scope = self.enter_flatten_struct_scope();
+        // `current_function_owner` is set (and restored) by `lower_function`,
+        // the wrapper; the body only reads it.
         let mut active_generics = self.active_impl_generic_params.clone();
         for gp in &f.generic_params {
             if !active_generics.contains(gp) {
@@ -1325,6 +1369,7 @@ impl Lowerer {
         // `Expr::Identifier` has no span, so the enclosing function's
         // declaration line is the tightest source location available.
         self.current_function_line = Some(f.span.line);
+        let previous_guessed_float = self.guessed_float_in_function.replace(false);
         self.lifetime_context.set_function(&func_name);
 
         // Enter function scope for lifetime tracking
@@ -1437,6 +1482,10 @@ impl Lowerer {
                 param.inject,
             );
             self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
+            if param.ty.is_none() && ty == TypeId::ANY {
+                let origin = format!("unannotated parameter `{}` of `{}`", param.name, f.name);
+                ctx.uninferred_locals.insert(param_index, (origin, None));
+            }
             if let Some(n) = param.ty.as_ref().and_then(Self::simple_type_name) {
                 match self.unit_kind_of_type_name(&n) {
                     Some(kind) => {
@@ -1509,6 +1558,9 @@ impl Lowerer {
         };
         ctx.return_type = return_type;
         self.method_return_types.insert(func_name.clone(), return_type);
+        if let Some(verdict) = self.unannotated_return_fns.get_mut(&func_name) {
+            *verdict = Some(return_type != TypeId::VOID && !Self::body_ends_in_unit(&body));
+        }
 
         // Implicit-return counterpart of the `Node::Return` bool coercion in
         // stmt_lowering: a function declared `-> bool` whose trailing
@@ -1688,8 +1740,7 @@ impl Lowerer {
         self.current_class_type = previous_class_type;
         self.current_function_name = previous_function_name;
         self.current_function_line = previous_function_line;
-        self.current_function_owner = previous_function_owner;
-        self.module.types.replace_scope_aliases(previous_type_scope);
+        self.guessed_float_in_function.set(previous_guessed_float);
         self.active_fn_generic_params = previous_fn_generics;
         self.active_fn_generic_bounds = previous_fn_bounds;
 

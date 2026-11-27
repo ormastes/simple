@@ -1056,7 +1056,7 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    fn is_unsigned_int_type(ty: TypeId) -> bool {
+    pub(super) fn is_unsigned_int_type(ty: TypeId) -> bool {
         matches!(ty, TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64)
     }
 

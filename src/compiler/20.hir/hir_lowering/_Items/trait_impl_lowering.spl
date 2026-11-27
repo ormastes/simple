@@ -672,20 +672,19 @@ impl HirLowering:
                             case _: infer
                     case _: infer
             case HirExprKind.Var(const_sym) | HirExprKind.NamedVar(const_sym, _):
-                # #3131: register arrays contain module constant references,
-                # whose expressions may have no type payload. Declaration
-                # collection already records their annotated scalar types,
-                # independent of constant lowering order. Preserve that exact
-                # width/sign evidence for the existing homogeneous-array check.
-                # Do not guess from a name or traverse unresolved initializers.
+                # #3131 / cold-HIR const inference: preserve any settled
+                # declared or inferred constant type (local or imported)
+                # rather than limiting to Int/Array or traversing unresolved
+                # initializers.
                 if val const_info = self.symbols.get_symbol_raw(const_sym.id):
                     match const_info.kind:
                         case SymbolKind.Const:
                             if val const_type = const_info.type_:
-                                match const_type.kind:
-                                    case HirTypeKind.Int(_, _): return const_type
-                                    case HirTypeKind.Array(_, _): return const_type
-                                    case _: ()
+                                if hir_const_type_settled(const_type):
+                                    return const_type
+                            if val imported_inferred = self.lookup_imported_const_inferred_type(const_sym.id):
+                                if hir_const_type_settled(imported_inferred):
+                                    return imported_inferred
                         case _: ()
                 infer
             case HirExprKind.Binary(cat_op, cat_left, cat_right):
@@ -764,7 +763,82 @@ impl HirLowering:
                         return infer
                     elem_idx = elem_idx + 1
                 HirType(kind: HirTypeKind.Array(first_elem, None), span: span)
+            case HirExprKind.ArrayRepeat(rep_elem, _, _):
+                val elem_type = self.lowered_const_value_type(rep_elem, span)
+                if hir_const_type_settled(elem_type):
+                    return HirType(kind: HirTypeKind.Array(elem_type, None), span: span)
+                infer
+            case HirExprKind.TupleLit(elements):
+                val tuple_elements: [HirExpr] = elements
+                if tuple_elements.len() == 0:
+                    return infer
+                var elem_types: [HirType] = []
+                var tuple_idx = 0
+                while tuple_idx < tuple_elements.len():
+                    val elem_type = self.lowered_const_value_type(tuple_elements[tuple_idx], span)
+                    if not hir_const_type_settled(elem_type):
+                        return infer
+                    elem_types = elem_types.push(elem_type)
+                    tuple_idx = tuple_idx + 1
+                HirType(kind: HirTypeKind.Tuple(elem_types), span: span)
+            case HirExprKind.DictLit(entries, _, _):
+                val dict_entries: [(HirExpr, HirExpr)] = entries
+                if dict_entries.len() == 0:
+                    return infer
+                val first_k = self.lowered_const_value_type(dict_entries[0].0, span)
+                val first_v = self.lowered_const_value_type(dict_entries[0].1, span)
+                if not hir_const_type_settled(first_k) or not hir_const_type_settled(first_v):
+                    return infer
+                var entry_idx = 1
+                while entry_idx < dict_entries.len():
+                    val kt = self.lowered_const_value_type(dict_entries[entry_idx].0, span)
+                    val vt = self.lowered_const_value_type(dict_entries[entry_idx].1, span)
+                    if not hir_types_equal(first_k, kt) or not hir_types_equal(first_v, vt):
+                        return infer
+                    entry_idx = entry_idx + 1
+                HirType(kind: HirTypeKind.Dict(first_k, first_v), span: span)
             case _: infer
+
+    me update_const_symbol_type_if_settled(symbol: SymbolId, type_: HirType):
+        # The declaration and reads of this exact binding must share its
+        # settled semantic type. Never locate a replacement by display name:
+        # a synthetic-main local or another owner may use the same spelling.
+        if hir_const_type_settled(type_):
+            if val definition = self.symbols.get_symbol_raw(symbol.id):
+                if definition.kind == SymbolKind.Const:
+                    var updated = definition
+                    updated.type_ = type_
+                    self.symbols.register_preserved_symbol(updated)
+
+    me settle_const_decls_v1(constants: [HirConst]) -> [HirConst]:
+        """Settle unordered same-module constant chains up to a fixed point."""
+        var out = constants
+        var has_unsettled = false
+        var check_idx = 0
+        while check_idx < out.len():
+            if not hir_const_type_settled(out[check_idx].type_):
+                has_unsettled = true
+                break
+            check_idx = check_idx + 1
+        if not has_unsettled:
+            return out
+        var pass_idx = 0
+        var changed = true
+        while changed and pass_idx <= out.len():
+            changed = false
+            var i = 0
+            while i < out.len():
+                var current = out[i]
+                if not hir_const_type_settled(current.type_):
+                    val settled = self.lowered_const_value_type(current.value, current.span)
+                    if hir_const_type_settled(settled):
+                        current.type_ = settled
+                        out[i] = current
+                        self.update_const_symbol_type_if_settled(current.symbol, settled)
+                        changed = true
+                i = i + 1
+            pass_idx = pass_idx + 1
+        out
 
     me lower_hir_const_decl(const_: ParserConst) -> HirConst:
         var symbol = self.symbols.lookup_or_invalid(const_.name)
@@ -782,15 +856,7 @@ impl HirLowering:
                 if const_.has_type_: shape_type else: self.lowered_const_value_type(value, const_.span)
             case _: shape_type
 
-        # The declaration and reads of this exact binding must share its
-        # settled semantic type. Never locate a replacement by display name:
-        # a synthetic-main local or another owner may use the same spelling.
-        if hir_const_type_settled(type_):
-            if val definition = self.symbols.get_symbol_raw(symbol.id):
-                if definition.kind == SymbolKind.Const:
-                    var updated = definition
-                    updated.type_ = type_
-                    self.symbols.register_preserved_symbol(updated)
+        self.update_const_symbol_type_if_settled(symbol, type_)
 
         HirConst(
             symbol: symbol,

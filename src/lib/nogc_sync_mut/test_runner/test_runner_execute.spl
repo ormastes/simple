@@ -18,6 +18,7 @@ use std.test_runner.compiler_select.{select_test_child_binary}
 use std.test_runner.test_runner_config.{interpreter_run_diverts_to_native, interpreter_mcdc_not_instrumented_notice}
 use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads, native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt, native_test_source_roots_identity}
 use std.test_runner.native_compile_contract.{native_test_artifact_path_v1, native_test_temporary_artifact_path}
+use std.test_runner.native_compile_contract.{native_test_shared_artifact_key_v1, native_test_shared_artifact_path_v1, NATIVE_SHARED_ARTIFACT_MIN_BYTES, NATIVE_SHARED_ARTIFACT_READY_SUFFIX, NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX}
 use std.nogc_sync_mut.test_runner.native_execution_evidence.{native_execution_completion_v1}
 use std.common.test_runner.native_framework_wrapper.{spipe_partition_source, spipe_rewrite_infix_expect_line, native_framework_wrapper_source, native_plain_wrapper_source}
 use std.common.test_runner.wrapper_filename.{spipe_wrapper_filename}
@@ -33,7 +34,7 @@ use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
 use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
 use std.test_runner.test_runner_metrics.{test_resource_class, test_resource_class_name, test_execution_cohort_id, test_child_memory_bytes}
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete, file_hardlink}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use std.nogc_sync_mut.env.variables.{env_unset}
 use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
@@ -1289,6 +1290,37 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 duration_ms: 0, setup_ms: 0, error: selected_kind.unwrap_err(), timed_out: false, cached: false)
         native_kind = selected_kind.unwrap()
 
+    # Shared native artifact cache (bug sffi_manifest_signature_native_test_compile_cost_2026-08-21):
+    # an unchanged closure (same spec bytes, producer, backend, source roots,
+    # library mode, runtime path) reuses its previously compiled executable
+    # instead of recompiling -- a focused leaf spec such as the executable
+    # manifest signature verifier no longer pays the full closure compile on
+    # every admission. Coverage runs are excluded: their instrumented wrapper
+    # is per-run evidence and must be compiled fresh.
+    var shared_artifact_path = ""
+    if explicit_aot and not options.coverage:
+        shared_artifact_path = native_test_shared_artifact_path_v1(
+            _tp_get_temp_dir(), file_path, file_hash_sha256_or_empty(file_path),
+            options.native_backend, producer_digest, options.native_source_roots,
+            options.library_mode,
+            env_get("SIMPLE_RUNTIME_PATH") ?? "", env_get("SIMPLE_LIB") ?? "")
+        if _shared_native_artifact_valid_v1(shared_artifact_path):
+            var shared_mcdc_manifest = ""
+            if mcdc_enabled:
+                shared_mcdc_manifest = read_file_content(
+                    shared_artifact_path + NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX)
+                if shared_mcdc_manifest == "":
+                    # An mcdc consumer needs the obligation manifest this run
+                    # did not compile; recompile so it is regenerated.
+                    shared_artifact_path = ""
+            if shared_artifact_path != "":
+                if options.verbose:
+                    print "[native] shared cache hit {file_path} -> {shared_artifact_path}"
+                return _run_shared_native_artifact(file_path, options, shared_artifact_path,
+                    native_kind, shared_mcdc_manifest, start)
+        if options.verbose:
+            print "[native] shared cache miss {file_path} -> {shared_artifact_path}"
+
     # Native mode normally compiles SMF. Coverage must execute the MIR probes,
     # so it uses the LLVM AOT path and the core-C coverage owner instead.
     # Step 1: Preprocess SPipe files (wrap in fn main())
@@ -1653,6 +1685,18 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
                 duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
                 error: "native-test: cannot allocate invocation evidence", timed_out: false, cached: false)
 
+    # Populate the shared slot for later admissions of the same closure. The
+    # hard link is exclusive: a concurrent publisher that got there first
+    # wins, and this run still executes its own freshly compiled artifact
+    # below. The .ready marker is written only after the link succeeds, so a
+    # partial executable can never satisfy the hit check.
+    if shared_artifact_path != "" and file_hardlink(smf_path, shared_artifact_path):
+        if mcdc_enabled and mcdc_manifest != "":
+            file_write(shared_artifact_path + NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX, mcdc_manifest)
+        file_write(shared_artifact_path + NATIVE_SHARED_ARTIFACT_READY_SUFFIX, "native-shared-artifact-v1")
+        if options.verbose:
+            print "[native] shared cache stored {shared_artifact_path}"
+
     # Step 3: Run the compiled .smf
     if options.verbose:
         print "[native] Running {smf_path}"
@@ -1721,6 +1765,92 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             timed_out: false, cached: false)
         return _attach_scope_evidence(empty_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms, None)
     _attach_scope_evidence(base_result, _combine_usage(compile_scoped.usage, run_scoped.usage), run_scoped.budget_status, file_path, options, compile_ms, execution_ms, run_scoped.completion)
+
+fn _shared_native_artifact_valid_v1(artifact_path: text) -> bool:
+    """A shared slot is authoritative only with its completion marker and a
+    non-stub executable; the marker is written only after an exclusive hard
+    link of a fully compiled artifact, so a partial file never qualifies."""
+    artifact_path != "" and
+        file_exists(artifact_path + NATIVE_SHARED_ARTIFACT_READY_SUFFIX) and
+        file_size_raw(artifact_path) >= NATIVE_SHARED_ARTIFACT_MIN_BYTES
+
+fn _run_shared_native_artifact(file_path: text, options: TestOptions, artifact_path: text,
+        native_kind: text, mcdc_manifest: text, start: i64) -> TestFileResult:
+    """Execute a shared-cache hit with the same child argv, MC/DC manifest
+    transport, and completion-evidence checks as a fresh compile. The compile
+    phase is skipped: compile_ms stays 0 and cached is true, so phase timing
+    (setup / compile / execution) reports the reuse honestly."""
+    val timeout_ms = options.timeout * 1000
+    var native_evidence_path = ""
+    for attempt in 0..4:
+        if native_evidence_path != "": break
+        val nonce = test_runner_random_hex(16)
+        if nonce.is_some():
+            val candidate = artifact_path + ".evidence-" + nonce.unwrap()
+            native_evidence_path = allocate_native_completion_path_v1(candidate)
+    if native_evidence_path == "":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+            error: "native-test: cannot allocate invocation evidence", timed_out: false, cached: false)
+    var mcdc_manifest_path = ""
+    if mcdc_manifest != "":
+        var manifest_attempt = 0
+        while manifest_attempt < 4 and mcdc_manifest_path == "":
+            val nonce = test_runner_random_hex(16)
+            if nonce.is_some():
+                val candidate = _tp_get_temp_dir() + "/mcdc-" + nonce.unwrap() + ".obligations.sdn"
+                if rt_file_create_excl(candidate, mcdc_manifest):
+                    mcdc_manifest_path = candidate
+            manifest_attempt = manifest_attempt + 1
+        if mcdc_manifest_path == "" or rt_package_chmod(mcdc_manifest_path, 256) != 0:
+            if mcdc_manifest_path != "" and file_exists(mcdc_manifest_path): file_delete(mcdc_manifest_path)
+            return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+                error: "test-runner: cannot securely persist MC/DC obligation manifest",
+                timed_out: false, cached: false)
+    var run_args: [text] = ["--simple-native-evidence=" + native_evidence_path]
+    if options.gc_log and not options.coverage:
+        run_args.push("--gc-log")
+    if options.gc_off and not options.coverage:
+        run_args.push("--gc=off")
+    for manifest_arg in mcdc_manifest_transport_args(mcdc_manifest_path, mcdc_manifest):
+        run_args.push(manifest_arg)
+
+    val memory_bytes = test_child_memory_bytes(options)
+    val run_started = time_now_unix_micros()
+    val run_scoped = _run_scoped_child(test_resource_class(file_path), artifact_path, run_args,
+        timeout_ms, memory_bytes, 0, 0, if options.no_limits: 0 else: options.max_procs,
+        not options.no_limits, owned_test: true)
+    val execution_ms = (time_now_unix_micros() - run_started) / 1000
+    if run_scoped.result.limit_exceeded:
+        remove_native_completion_evidence_v1(native_evidence_path)
+        return TestFileResult(path: file_path, passed: 0, failed: if limit_is_unverified(run_scoped.result.limit_type): 0 else: 1,
+            skipped: 0, pending: 0,
+            duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
+            error: limit_exceeded_message(run_scoped.result, options),
+            timed_out: run_scoped.result.limit_type.contains("timeout"), cached: false,
+            compile_ms: 0, execution_ms: execution_ms,
+            resource_usage: run_scoped.usage,
+            resource_class: if file_path.contains("/03_system/"): "system" elif file_path.contains("/02_integration/"): "integration" else: "unit",
+            cohort_id: test_execution_cohort_id(file_path, options), budget_status: run_scoped.budget_status,
+            anomaly_status: "incomplete", process_completion: run_scoped.completion)
+    val duration_ms = (time_now_unix_micros() - start) / 1000
+    if mcdc_manifest_path != "" and not options.keep_artifacts and file_exists(mcdc_manifest_path):
+        file_delete(mcdc_manifest_path)
+    var base_result = make_native_completion_result_v1(file_path, run_scoped.result.stdout,
+        run_scoped.result.stderr, run_scoped.result.exit_code, duration_ms, options.timeout,
+        native_evidence_path, native_kind)
+    if not options.keep_artifacts: remove_native_completion_evidence_v1(native_evidence_path)
+    if base_result.passed + base_result.failed == 0:
+        val empty_result = TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "Native backend executable reported no assertions: " + options.native_backend,
+            timed_out: false, cached: false)
+        return _attach_scope_evidence(empty_result, run_scoped.usage, run_scoped.budget_status,
+            file_path, options, 0, execution_ms, None)
+    base_result.cached = true
+    _attach_scope_evidence(base_result, run_scoped.usage, run_scoped.budget_status,
+        file_path, options, 0, execution_ms, run_scoped.completion)
 
 pub fn allocate_native_completion_path_v1(candidate: text) -> text:
     if file_exists(candidate + ".complete") or not file_create_exclusive(candidate, ""): return ""
@@ -1852,6 +1982,8 @@ export smf_compile_degrade_token, scoped_limit_exceeded_result, mcdc_manifest_ab
 export mcdc_compiler_lacks_probes, mcdc_compiler_identity_lacks_probes, MCDC_UNAVAILABLE_DEGRADE_TOKEN, MCDC_UNAVAILABLE_REASON
 export native_test_request_error, native_test_compile_threads, native_test_compile_args
 export native_test_compile_args_with_threads, native_test_invocation_receipt
+export native_test_shared_artifact_key_v1, native_test_shared_artifact_path_v1
+export NATIVE_SHARED_ARTIFACT_MIN_BYTES, NATIVE_SHARED_ARTIFACT_READY_SUFFIX, NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX
 export cleanup_native_generated_files, make_native_completion_result_v1, native_test_source_kind_v1, allocate_native_completion_path_v1
 export prepare_native_generated_source
 export preprocess_spipe_file_checked

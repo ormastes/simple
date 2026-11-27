@@ -285,7 +285,16 @@ impl Lowerer {
             Expr::Identifier(name) => self.owner_scoped_extern_return(name).unwrap_or(ret_ty),
             _ => ret_ty,
         };
-        let ret_ty = self.refine_generic_identity_return(orig_callee, resolved_callee_symbol, args, ret_ty, ctx);
+        let erased_ret_ty = ret_ty;
+        // Only a callee that resolved to a global function has a generic
+        // signature to instantiate: a local callable (lambda, fn-typed
+        // parameter) that shadows a same-named function does not.
+        let ret_ty = match &func_hir.kind {
+            HirExprKind::Global(symbol) => {
+                self.refine_generic_identity_return(orig_callee, Some(symbol.as_str()), args, ret_ty, ctx)
+            }
+            _ => ret_ty,
+        };
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may
         // carry a different (owner-mangled) symbol than `callee`'s bare text,
@@ -531,13 +540,14 @@ impl Lowerer {
         // Prefer the declared return type for the named callee when we know it.
         // This keeps local variables initialized from imported/helper calls on a
         // concrete type path instead of degrading to ANY at the next field access.
-        Ok(HirExpr {
+        let call = HirExpr {
             kind: HirExprKind::Call {
                 func: func_hir,
                 args: args_hir,
             },
-            ty: ret_ty,
-        })
+            ty: erased_ret_ty,
+        };
+        Ok(self.instantiate_generic_call(call, ret_ty))
     }
 
     /// Reject a function or type (constructor) value bound to an enum-typed
@@ -1596,13 +1606,26 @@ mod some_record_payload_tests {
     }
 
     #[test]
-    fn scalar_dynamic_and_array_payloads_keep_the_existing_erased_route() {
-        for parameter in ["i64", "any", "[i64]"] {
+    fn scalar_and_dynamic_payloads_keep_the_existing_erased_route() {
+        for parameter in ["i64", "any"] {
             let source = format!("fn wrap(value: {parameter}) -> any:\n    return Some(value)\n");
             let module = parse_and_lower(&source).expect("unchanged Some fallback fixture");
             assert_eq!(returned_type(&module, "wrap"), TypeId::ANY,
                 "non-record/function payload {parameter} must not acquire a nominal owner");
         }
+    }
+
+    // #12253: `Some(<array with a declared type>)` is `Option<[T]>`, not erased.
+    #[test]
+    fn array_payload_with_a_declared_type_is_typed_option() {
+        let source = "fn wrap(value: [i64]) -> any:\n    return Some(value)\n";
+        let module = parse_and_lower(source).expect("typed array payload fixture");
+        let Some(HirType::Enum { name, type_bindings, .. }) = module.types.get(returned_type(&module, "wrap")) else {
+            panic!("Some([i64] local) must be an Option enum");
+        };
+        assert_eq!(name, "Option");
+        let payload = type_bindings.get("T").copied().expect("Option<T> binding");
+        assert!(matches!(module.types.get(payload), Some(HirType::Array { element, .. }) if *element == TypeId::I64));
     }
 
     #[test]

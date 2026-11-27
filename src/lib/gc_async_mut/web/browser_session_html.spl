@@ -14,8 +14,9 @@ use common.web.html_escape.{html_escape_core}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.web.browser_session.{
     BrowserStylesheetSource, BrowserStylesheetExpansion, BrowserScriptBlock,
-    BrowserImageSource, BROWSER_MAX_IMAGE_RESOURCES
+    BrowserImageSource
 }
+use std.gc_async_mut.web.browser_session_limits.{BROWSER_MAX_IMAGE_RESOURCES}
 use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url, collapse_url_dot_segments}
 use std.gc_async_mut.web.browser_session_context.{
     browser_meta_content_security_policy
@@ -32,7 +33,9 @@ use std.common.string_core.{text_to_bytes}
 fn _find_ascii_case_insensitive(
     haystack: text, lowercase_needle: text, start: i64
 ) -> i64:
-    if start < 0 or start > haystack.len() or lowercase_needle.len() == 0:
+    # Byte-offset family (ADR-005): the scanner walks text_to_bytes and returns
+    # a BYTE index, so the bounds must be byte_len(), not len().
+    if start < 0 or start > haystack.byte_len() or lowercase_needle.len() == 0:
         return -1
     val haystack_bytes = text_to_bytes(haystack)
     val needle_bytes = text_to_bytes(lowercase_needle)
@@ -65,7 +68,10 @@ fn extract_title_text(html: text) -> text:
     val end = _find_ascii_case_insensitive(html, "</title>", content_start)
     if end < 0:
         return ""
-    html[content_start:end].trim()
+    # start/end are BYTE indices from the byte scanner; `html[a:b]` slices by
+    # code point (ADR-005), which on non-ASCII titles grabbed one unit too far
+    # ("Case İ<"). substring() is the byte-offset family.
+    html.substring(content_start, end).trim()
 
 fn extract_body_inner_html(html: text) -> text:
     val body_open = _find_ascii_case_insensitive(html, "<body", 0)
@@ -77,9 +83,10 @@ fn extract_body_inner_html(html: text) -> text:
     val body_close = _find_ascii_case_insensitive(
         html, "</body>", open_end + 1
     )
+    # Byte-offset family (ADR-005): open_end/body_close are byte indices.
     if body_close < 0:
-        return html[open_end + 1:html.len()]
-    html[open_end + 1:body_close]
+        return html.substring(open_end + 1, html.byte_len())
+    html.substring(open_end + 1, body_close)
 
 fn own_text(value: text) -> text:
     # Force a fresh owned text value instead of retaining a borrowed slice.

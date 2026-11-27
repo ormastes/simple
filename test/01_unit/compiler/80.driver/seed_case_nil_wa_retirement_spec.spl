@@ -1,0 +1,47 @@
+"""Regression and prevention spec for retiring all seed_case_nil_pattern_eq_2026-11-02 tags in 80.driver."""
+
+use std.spec.{describe, it, expect, expect_not}
+use std.io.{file_read}
+use compiler.driver.driver_build.incremental.{incremental_digest_tag_v1, incremental_digest_untag_v1}
+
+val SAMPLE_HEX: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+describe "seed_case_nil_pattern_eq_2026-11-02 retirement":
+    it "runs incremental digest tag and untag with case None intact":
+        expect(incremental_digest_tag_v1(SAMPLE_HEX)).to_equal("sha256:" + SAMPLE_HEX)
+        expect(incremental_digest_tag_v1("")).to_equal("")
+        expect(incremental_digest_tag_v1("bad-hex")).to_equal("")
+        expect(incremental_digest_untag_v1("sha256:" + SAMPLE_HEX)).to_equal(SAMPLE_HEX)
+        expect(incremental_digest_untag_v1("blake3:" + SAMPLE_HEX)).to_equal("")
+        expect(incremental_digest_untag_v1(SAMPLE_HEX)).to_equal("")
+        expect(incremental_digest_untag_v1("")).to_equal("")
+
+    it "keeps all 80.driver sites free of @workaround bug=seed_case_nil_pattern_eq_2026-11-02 and case nil while keeping case None":
+        val bridge_src = file_read("src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl")
+        val inc_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
+        val receipt_src = file_read("src/compiler/80.driver/driver_build/native_link_receipt_v1.spl")
+
+        for body in [bridge_src, inc_src, receipt_src]:
+            expect(body.len()).to_be_greater_than(0)
+            expect_not(body.contains("seed_case_nil_pattern_eq_2026-11-02"))
+            expect_not(body.contains("case nil:"))
+
+        expect(bridge_src).to_contain("case None: return Err(FileFiberTldrBridgeErrorV1.Busy)")
+        expect(inc_src.split("case None: \"\"").len() - 1).to_equal(2)
+        expect(receipt_src).to_contain("case None:\n            return nil")
+
+    it "pins updated hashes and records complete W8-1 retirement evidence":
+        val bindings = file_read("src/verification/cache_protocol/source_bindings.txt")
+        expect(bindings).to_contain("incremental.spl#incremental_digest_tag_v1")
+        expect(bindings).to_contain("incremental.spl#incremental_digest_untag_v1")
+        expect(bindings).to_contain("native_link_receipt_v1.spl#_toolchain_digests_v1")
+
+        val review = file_read("src/verification/cache_protocol/seed_case_none_workaround_review_2026-11-02.txt")
+        expect(review).to_contain("Addendum (2026-11-27, W8-1)")
+
+        val bug_doc = file_read("doc/08_tracking/bug/seed_case_nil_pattern_eq_2026-11-02.md")
+        expect(bug_doc).to_contain("W8-1 retirement 2026-11-27")
+
+        val shard = file_read("doc/08_tracking/bug/db/seed_case_nil_pattern_eq_2026-11-02.sdn")
+        expect(shard).to_contain("seed_case_nil_pattern_eq_2026-11-02, P0, fixed,")
+        expect(shard).to_contain("close_evidence reproducer=")
