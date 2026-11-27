@@ -32,3 +32,14 @@ A separately labeled fixture may bind the already-existing native tuple facades 
 - `test/01_unit/compiler/backend/native_runtime_tuple_result_abi_spec.spl`: 7 total, 7 passed, 0 failed.
 - `test/01_unit/compiler/backend/runtime_tuple_result_facade_census_spec.spl`: 4 total, 4 passed, 0 failed.
 - `sh scripts/check/check-nil-outside-unsafe-added.shs --rank` on `core_codegen.spl`, `llvm_process_tuple_facade_origin_spec.spl`, `stage4_process_provider_spec.spl` (`0` each) and `git diff --check` clean (6 pre-existing `nil`s remain untouched in `native_runtime_tuple_result_abi_spec.spl`, 0 added).
+
+
+### Re-verification (2026-11-27, P1-1 Batch 3)
+
+- `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl` left untouched per hard fence.
+- Re-verified all 4 cited unit specs under `wa3_shared_bin\simple.exe --mode=interpreter` on `origin/release/1.0.0` (`7ec0a1ed579`):
+  - `test/01_unit/compiler/backend/llvm_process_tuple_facade_origin_spec.spl`: `11 total, 11 passed, 0 failed`
+  - `test/01_unit/compiler/backend/stage4_process_provider_spec.spl`: `7 total, 7 passed, 0 failed`
+  - `test/01_unit/compiler/backend/native_runtime_tuple_result_abi_spec.spl`: `7 total, 7 passed, 0 failed`
+  - `test/01_unit/compiler/backend/runtime_tuple_result_facade_census_spec.spl`: `4 total, 4 passed, 0 failed`
+- Sharded `llvm_process_tuple_facade_not_selected_2026-11-14` to `doc/08_tracking/bug/db/llvm_process_tuple_facade_not_selected_2026-11-14.sdn` with status `fix-implemented-verification-pending` (`waiting-for: native AArch64 P2 probe verification`).

@@ -1,6 +1,6 @@
 # Provisional stage2 compiler cannot native-build the MCP entry closures (byte_len MIR runtime-fallback + per-file cold-HIR receipt gap)
 
-- Status: open
+- Status: fix-implemented-verification-pending (2026-11-27; waiting-for: Stage 2/3 MCP native-build verification)
 - Found: 2026-11-11
 - Component: compiler (MIR lowering, per-file sharded route), `src/app/mcp/main_lazy_source_tools.spl`
 - Binary: stage2-admitted pure-Simple compiler preserved at `/private/tmp/s3-par2/stage2/simple` (built 2026-11-07 from `4ff1e3b51f5`, self-consistent source tree at `/private/tmp/s3-par2/wt`)
@@ -74,3 +74,20 @@ Source inspection and targeted interpreter specs (`SIMPLE_LIB=C:\dev\wt\bf-5-app
 2. **Whole-program `byte_len()` MIR lowering / `main_lazy_source_tools.spl`:** `src/app/mcp/main_lazy_source_tools.spl:12,29` now use `str_len` (`std.common.string_core`) instead of `.byte_len()`, and `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3500-3541,4067-4079` lowers proven `text` `byte_len()` calls to `rt_string_len`. Targeted specs `test/01_unit/app/mcp/source_open_contract_spec.spl` (`13/13`), `test/01_unit/compiler/50.mir/byte_at_untyped_call_to_i64_spec.spl` (`11/11`), and `test/01_unit/app/compiler_entrypoint/inventory_split_line_byte_len_spec.spl` (`2/2`) all passed.
 
 **Remaining blocker (status stays `open`):** End-to-end `native-build` of `src/app/mcp/main.spl` and `src/app/simple_lsp_mcp/main.spl` remains blocked in this lane — only the Windows Rust seed (`wa3_shared_bin/simple.exe`, build commit `89b32c2e80d`) is available on this host, `native-build` is unrunnable without a bootstrapped Stage 2/3 pure-Simple compiler, and `src/compiler/**` was left untouched per BF-5 lane ownership.
+
+## Verification 2026-11-27 (P1-1 Batch 3)
+
+- Audited `src/app/mcp/main.spl`, `src/app/mcp/main_lazy_source_tools.spl`, `src/app/mcp/main_lazy_query_tools.spl`, `src/app/simple_lsp_mcp/**`, `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:411-477` (`cold_hir_receipt_capture_scope_v1` / `cold_hir_semantic_seed_v1.spl:283-295`), and `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3543-3584, 4110, 6279-6312` on `origin/release/1.0.0` (`7ec0a1ed579`): no remaining `cold_hir_receipt_capture_scope_v1` or `byte_len` lowering gap remains in source.
+- Added focused MIR regression spec `test/01_unit/compiler/50.mir/mcp_entry_byte_len_shapes_spec.spl` (`1 total, 1 passed, 0 failed`), verifying untyped `val`-call, tuple-destructured, optional-coalesced (`??`), and chained `text.byte_len()` receiver shapes used across `src/app/mcp/**` and `src/app/simple_lsp_mcp/**` lower through `HirLowering -> MirLowering` directly to `rt_string_len` with zero `rt_string_to_int_lenient` fallback.
+- Verified host interpreter specs (`wa3_shared_bin\simple.exe --mode=interpreter`):
+  - `test/01_unit/compiler/cache/cold_hir_unit_subset_capture_spec.spl`: `10 total, 10 passed, 0 failed`
+  - `test/01_unit/app/mcp/source_open_contract_spec.spl`: `13 total, 13 passed, 0 failed`
+  - `test/01_unit/compiler/50.mir/byte_at_untyped_call_to_i64_spec.spl`: `11 total, 11 passed, 0 failed`
+  - `test/01_unit/app/compiler_entrypoint/inventory_split_line_byte_len_spec.spl` (`SIMPLE_TEST_BINARY`): `2 total, 2 passed, 0 failed`
+  - `test/02_integration/app/mcp_stdio_integration_spec.spl` (`SIMPLE_BINARY`): `16 total, 16 passed, 0 failed`
+  - `test/01_unit/app/mcp/mcp_startup_closure_isolation_prevention_spec.spl`: `4 total, 4 passed, 0 failed`
+  - `test/01_unit/app/mcp/mcp_json_framing_spec.spl`: `15 total, 15 passed, 0 failed`
+  - `test/01_unit/app/simple_lsp_mcp/lsp_non_ascii_paths_spec.spl` (`SIMPLE_BINARY`): `8 total, 8 passed, 0 failed`
+  - `test/01_unit/app/t32_lsp_mcp/t32_lsp_mcp_symlink_alias_spec.spl`: `2 total, 2 passed, 0 failed`
+- Sharded `stage2_compiler_mcp_entry_native_build_blocked_2026_11_11` to `doc/08_tracking/bug/db/stage2_compiler_mcp_entry_native_build_blocked_2026_11_11.sdn` with status `fix-implemented-verification-pending` (`waiting-for: full Stage 2/3 MCP native-build verification`; heavy `native-build` runs intentionally deferred on this Windows host).
+
