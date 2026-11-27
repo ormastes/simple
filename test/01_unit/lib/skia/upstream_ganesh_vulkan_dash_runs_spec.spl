@@ -1,0 +1,177 @@
+# @req REQ-2D-005 NFR-2D-005
+# Upstream Skia Ganesh Vulkan admission and V1/V2/V3 wire expansion for
+# Draw IR `dash-runs` dashed border sides with translucent AA end pixels.
+
+use std.spec.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    DRAW_IR_SCHEMA_VERSION_V4,
+    DrawIrCommand,
+    DrawIrComposition,
+    draw_ir_affine2d,
+    draw_ir_affine_rect,
+    draw_ir_batch,
+    draw_ir_batch_with_source_v4,
+    draw_ir_composition,
+    draw_ir_composition_v4,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_rect_bounds,
+    draw_ir_rect_clipped,
+    draw_ir_source_manual,
+    draw_ir_style_prop
+}
+use std.skia.backend.upstream_ganesh_vulkan.provider.{
+    UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1,
+    UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2,
+    UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3,
+    upstream_skia_ganesh_vulkan_payload_bytes,
+    upstream_skia_ganesh_vulkan_payload_bytes_affine_v3_candidate,
+    upstream_skia_ganesh_vulkan_preflight,
+    upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate
+}
+
+val CLEAR_WHITE: u32 = 0xffffffffu32
+val END_HALF: u32 = 0x80112233u32   # 2148606515
+val DASH_SOLID: u32 = 0xff112233u32 # 4279312947
+val END_QUARTER: u32 = 0x40112233u32 # 1074864691
+
+fn _dash_cmd(id: text, x: i32, y: i32, w: i32, h: i32, color: u32, enc: text) -> DrawIrCommand:
+    var cmd = draw_ir_rect(id, x, y, w, h, color)
+    cmd.computed_style = [draw_ir_style_prop("dash-runs", enc)]
+    cmd
+
+fn _dash_clipped_cmd(id: text, x: i32, y: i32, w: i32, h: i32, color: u32, enc: text, clip: DrawIrRect) -> DrawIrCommand:
+    var cmd = draw_ir_rect_clipped(id, x, y, w, h, color, clip)
+    cmd.computed_style = [draw_ir_style_prop("dash-runs", enc)]
+    cmd
+
+fn _scene_v1(commands: [DrawIrCommand]) -> DrawIrComposition:
+    draw_ir_composition("ganesh-dash", "scene", DRAW_IR_BACKEND_GPU, [
+        draw_ir_batch("only", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "root", 0, 0, 32, 32, 0, 1000, false),
+            commands)
+    ])
+
+fn _scene_v4(commands: [DrawIrCommand]) -> DrawIrComposition:
+    draw_ir_composition_v4("ganesh-dash-v4", "scene", DRAW_IR_BACKEND_GPU, [
+        draw_ir_batch_with_source_v4("only", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config("surface", "root", 0, 0, 32, 32, 0, 1000, false),
+            commands, draw_ir_source_manual())
+    ])
+
+fn _u32_le(bytes: [i64], offset: i64) -> i64:
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+
+fn _u64_le_i64(bytes: [i64], offset: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 0
+    while i < 8:
+        v = v | (bytes[offset + i] << (i * 8))
+        i = i + 1
+    v
+
+describe "upstream Skia Ganesh Vulkan dash-runs admission":
+    it "admits unclipped horizontal dash-runs in V1 wire format with expanded rect count":
+        val comp = _scene_v1([
+            draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+            _dash_cmd("top", 2, 4, 16, 2, END_HALF,
+                "0,0,1,2148606515,1,5,4279312947,6,1,1074864691")
+        ])
+        val adm = upstream_skia_ganesh_vulkan_preflight(comp)
+        expect(adm.accepted).to_equal(true)
+        expect(adm.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1)
+        expect(adm.rect_count).to_equal(4)
+        expect(adm.rect_stride).to_equal(40)
+
+        val payload = upstream_skia_ganesh_vulkan_payload_bytes(comp)
+        match payload:
+            case Err(e): fail("expected V1 dash-runs payload bytes, got {e}")
+            case Ok(bytes):
+                expect(bytes.len().to_i64()).to_equal(16 + 4 * 40)
+                expect(_u32_le(bytes, 12)).to_equal(4)
+                # Record 1 = first run at x=2, color=0x80112233
+                expect(_u32_le(bytes, 16 + 40 + 32)).to_equal(END_HALF.to_i64())
+                # Record 2 = solid run at x=3, color=0xff112233
+                expect(_u32_le(bytes, 16 + 80 + 32)).to_equal(DASH_SOLID.to_i64())
+                # Record 3 = trailing AA run, color=0x40112233
+                expect(_u32_le(bytes, 16 + 120 + 32)).to_equal(END_QUARTER.to_i64())
+
+    it "admits clipped vertical dash-runs in V2 wire format and preserves per-run clip":
+        val clip = draw_ir_rect_bounds(26, 4, 2, 12)
+        val comp = _scene_v1([
+            draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+            _dash_clipped_cmd("right", 26, 2, 2, 20, DASH_SOLID,
+                "1,0,1,2148606515,1,6,4279312947,7,1,1074864691", clip)
+        ])
+        val adm = upstream_skia_ganesh_vulkan_preflight(comp)
+        expect(adm.accepted).to_equal(true)
+        expect(adm.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2)
+        expect(adm.rect_count).to_equal(4)
+        expect(adm.rect_stride).to_equal(64)
+
+        match upstream_skia_ganesh_vulkan_payload_bytes(comp):
+            case Err(e): fail("expected V2 dash-runs payload bytes, got {e}")
+            case Ok(bytes):
+                expect(bytes.len().to_i64()).to_equal(16 + 4 * 64)
+                # Record 0 (clear) has clip flag 0; Records 1..3 carry clip flag 1.
+                expect(_u64_le_i64(bytes, 16 + 56)).to_equal(0)
+                expect(_u64_le_i64(bytes, 16 + 64 + 56)).to_equal(1)
+                expect(_u32_le(bytes, 16 + 64 + 40)).to_equal(26)
+                expect(_u32_le(bytes, 16 + 64 + 44)).to_equal(4)
+                expect(_u32_le(bytes, 16 + 64 + 48)).to_equal(2)
+                expect(_u32_le(bytes, 16 + 64 + 52)).to_equal(12)
+                expect(_u64_le_i64(bytes, 16 + 3 * 64 + 56)).to_equal(1)
+                expect(_u32_le(bytes, 16 + 3 * 64 + 32)).to_equal(END_QUARTER.to_i64())
+
+    it "admits dash-runs in V3 candidate preflight and byte serialization":
+        val comp = _scene_v4([
+            draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+            _dash_cmd("top", 2, 4, 16, 2, DASH_SOLID,
+                "0,0,1,2148606515,1,5,4279312947")
+        ])
+        val adm = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(comp)
+        expect(adm.accepted).to_equal(true)
+        expect(adm.draw_format).to_equal(UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3)
+        expect(adm.rect_count).to_equal(3)
+        match upstream_skia_ganesh_vulkan_payload_bytes_affine_v3_candidate(comp):
+            case Err(e): fail("expected V3 dash-runs payload bytes, got {e}")
+            case Ok(bytes):
+                expect(bytes.len().to_i64()).to_equal(16 + 3 * 128)
+                expect(_u32_le(bytes, 16 + 128 + 32)).to_equal(END_HALF.to_i64())
+                expect(_u32_le(bytes, 16 + 2 * 128 + 32)).to_equal(DASH_SOLID.to_i64())
+
+    it "continues rejecting plain translucent rects, first-command dash-runs, extra styles, and invalid runs":
+        val translucent_plain = _scene_v1([
+            draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+            draw_ir_rect("alpha", 2, 2, 8, 8, END_HALF)
+        ])
+        val adm_alpha = upstream_skia_ganesh_vulkan_preflight(translucent_plain)
+        expect(adm_alpha.accepted).to_equal(false)
+        expect(adm_alpha.reason).to_equal("opaque rectangle required")
+
+        val adm_alpha_v3 = upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
+            _scene_v4([
+                draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+                draw_ir_rect("alpha", 2, 2, 8, 8, END_HALF)
+            ]))
+        expect(adm_alpha_v3.accepted).to_equal(false)
+        expect(adm_alpha_v3.reason).to_equal("opaque rectangle required")
+
+        val first_dash = _scene_v1([
+            _dash_cmd("clear-dash", 0, 0, 32, 32, CLEAR_WHITE, "0,0,4,4279312947")
+        ])
+        expect(upstream_skia_ganesh_vulkan_preflight(first_dash).accepted).to_equal(false)
+
+        var bad_multi = _dash_cmd("bad", 2, 2, 10, 2, DASH_SOLID, "0,0,4,4279312947")
+        bad_multi.computed_style.push(draw_ir_style_prop("border-radius", "4"))
+        expect(upstream_skia_ganesh_vulkan_preflight(_scene_v1([
+            draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+            bad_multi
+        ])).accepted).to_equal(false)
+
+        val bad_overflow = _scene_v1([
+            draw_ir_rect("clear", 0, 0, 32, 32, CLEAR_WHITE),
+            _dash_cmd("bad-ovf", 2, 2, 8, 2, DASH_SOLID, "0,0,9,4279312947")
+        ])
+        expect(upstream_skia_ganesh_vulkan_preflight(bad_overflow).accepted).to_equal(false)

@@ -1,0 +1,183 @@
+# @tag: unit, draw_ir, engine2d, vulkan
+"""
+# Strict Vulkan dash-runs dashed border sides
+
+Covers strict Vulkan preflight admission, fail-closed validation, and CPU parity
+for Draw IR rectangles carrying the `dash-runs` style property with translucent
+AA end pixels.
+"""
+
+use std.spec
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrRect,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_parse_dash_runs,
+    draw_ir_rect,
+    draw_ir_rect_bounds,
+    draw_ir_rect_clipped,
+    draw_ir_style_prop
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition,
+    engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val CLEAR_BG: u32 = 0xffffffffu32
+val DASH_END_A: u32 = 0x80102030u32   # 2148540464 (translucent AA start)
+val DASH_FULL: u32  = 0xff102030u32   # 4279246896 (opaque center dash)
+val DASH_END_B: u32 = 0x40102030u32   # 1074798640 (translucent AA end)
+val DASH_BASE_TRANSLUCENT: u32 = 0x80102030u32
+
+fn _dash_cmd(id: text, x: i32, y: i32, w: i32, h: i32, base_color: u32, enc: text) -> DrawIrCommand:
+    var cmd = draw_ir_rect(id, x, y, w, h, base_color)
+    cmd.computed_style = [draw_ir_style_prop("dash-runs", enc)]
+    cmd
+
+fn _dash_clipped_cmd(id: text, x: i32, y: i32, w: i32, h: i32, base_color: u32, enc: text, clip: DrawIrRect) -> DrawIrCommand:
+    var cmd = draw_ir_rect_clipped(id, x, y, w, h, base_color, clip)
+    cmd.computed_style = [draw_ir_style_prop("dash-runs", enc)]
+    cmd
+
+fn _strict_scene(w: i32, h: i32, cmds: [DrawIrCommand]) -> DrawIrComposition:
+    val batch = draw_ir_batch(
+        "dash-runs-strict",
+        DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("surface", "scene", 0, 0, w, h, 0, 1000, false),
+        cmds
+    )
+    draw_ir_composition("dash-runs-strict", "scene", DRAW_IR_BACKEND_GPU, [batch])
+
+describe "strict Vulkan DrawIR dash-runs":
+    it "parses valid horizontal and vertical dash-runs with translucent AA ends":
+        val hcmd = _dash_cmd("top", 2, 3, 10, 2, DASH_BASE_TRANSLUCENT,
+            "0,0,1,2148540464,1,4,4279246896,5,1,1074798640,8,2,4279246896")
+        val hres = draw_ir_parse_dash_runs(hcmd)
+        expect(hres.valid).to_equal(true)
+        expect(hres.runs.len()).to_equal(4)
+        expect(hres.runs[0].x).to_equal(2)
+        expect(hres.runs[0].y).to_equal(3)
+        expect(hres.runs[0].width).to_equal(1)
+        expect(hres.runs[0].height).to_equal(2)
+        expect(hres.runs[0].color).to_equal(DASH_END_A)
+        expect(hres.runs[1].x).to_equal(3)
+        expect(hres.runs[1].width).to_equal(4)
+        expect(hres.runs[1].color).to_equal(DASH_FULL)
+        expect(hres.runs[2].x).to_equal(7)
+        expect(hres.runs[2].width).to_equal(1)
+        expect(hres.runs[2].color).to_equal(DASH_END_B)
+
+        val vcmd = _dash_cmd("left", 4, 1, 2, 12, DASH_FULL,
+            "1,0,1,2148540464,1,3,4279246896,4,1,1074798640")
+        val vres = draw_ir_parse_dash_runs(vcmd)
+        expect(vres.valid).to_equal(true)
+        expect(vres.runs.len()).to_equal(3)
+        expect(vres.runs[1].x).to_equal(4)
+        expect(vres.runs[1].y).to_equal(2)
+        expect(vres.runs[1].width).to_equal(2)
+        expect(vres.runs[1].height).to_equal(3)
+
+    it "admits non-first horizontal, vertical, and clipped dash-runs in strict Vulkan preflight":
+        val h_comp = _strict_scene(32, 24, [
+            draw_ir_rect("clear", 0, 0, 32, 24, CLEAR_BG),
+            _dash_cmd("top", 2, 2, 20, 2, DASH_BASE_TRANSLUCENT,
+                "0,0,1,2148540464,1,6,4279246896,7,1,1074798640,12,6,4279246896"),
+            _dash_clipped_cmd("right", 24, 2, 2, 18, DASH_FULL,
+                "1,0,1,2148540464,1,5,4279246896,6,1,1074798640",
+                draw_ir_rect_bounds(24, 2, 2, 8))
+        ])
+        val reason = engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+            "vulkan", false, false, 32, 24, h_comp, [])
+        expect(reason).to_equal("")
+
+    it "keeps rejecting plain translucent rects, first-command dash-runs, extra styles, and malformed dash-runs":
+        val plain_translucent = _strict_scene(16, 16, [
+            draw_ir_rect("clear", 0, 0, 16, 16, CLEAR_BG),
+            draw_ir_rect("alpha", 1, 1, 8, 8, DASH_END_A)
+        ])
+        expect(engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+            "vulkan", false, false, 16, 16, plain_translucent, []))
+            .to_equal("strict-vulkan-opaque-rect-required")
+
+        val first_dash = _strict_scene(16, 16, [
+            _dash_cmd("clear-dash", 0, 0, 16, 16, CLEAR_BG, "0,0,4,4279246896")
+        ])
+        expect(engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+            "vulkan", false, false, 16, 16, first_dash, []))
+            .to_equal("strict-vulkan-opaque-rect-required")
+
+        var nested_dash = _dash_cmd("nested", 1, 1, 10, 2, DASH_FULL, "0,0,4,4279246896")
+        nested_dash.computed_style.push(draw_ir_style_prop("css-opacity-group-nest", "g0"))
+        val extra_style = _strict_scene(16, 16, [
+            draw_ir_rect("clear", 0, 0, 16, 16, CLEAR_BG),
+            nested_dash
+        ])
+        expect(engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+            "vulkan", false, false, 16, 16, extra_style, []))
+            .to_equal("strict-vulkan-opaque-rect-required")
+
+        for bad_enc in [
+            "2,0,4,4279246896",
+            "0,0,4",
+            "0,0,0,4279246896",
+            "0,-1,4,4279246896",
+            "0,0,11,4279246896",
+            "0,0,4,1056816",
+            "0,0,4,abc"
+        ]:
+            val malformed = _strict_scene(16, 16, [
+                draw_ir_rect("clear", 0, 0, 16, 16, CLEAR_BG),
+                _dash_cmd("bad", 1, 1, 10, 2, DASH_FULL, bad_enc)
+            ])
+            expect(engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+                "vulkan", false, false, 16, 16, malformed, []))
+                .to_equal("strict-vulkan-opaque-rect-required")
+
+    it "expands dash-runs identically to cpu_simd DrawIR execution":
+        val w = 24
+        val h = 16
+        val comp = _strict_scene(w, h, [
+            draw_ir_rect("clear", 0, 0, w, h, CLEAR_BG),
+            _dash_cmd("top", 2, 2, 16, 2, DASH_BASE_TRANSLUCENT,
+                "0,0,1,2148540464,1,4,4279246896,5,1,1074798640,9,4,4279246896"),
+            _dash_clipped_cmd("side", 20, 2, 2, 12, DASH_FULL,
+                "1,0,1,2148540464,1,5,4279246896,6,1,1074798640,8,4,4279246896",
+                draw_ir_rect_bounds(20, 2, 2, 7))
+        ])
+        var ref_eng = Engine2D.create_with_backend(w, h, "cpu_simd")
+        val ref_res = engine2d_draw_ir_adv_composition(ref_eng, comp, false)
+        val ref_pixels = ref_res.pixels
+        expect(ref_pixels.len()).to_equal(w * h)
+
+        # Replicate strict Vulkan executor run expansion directly:
+        var eng = Engine2D.create_with_backend(w, h, "cpu_simd")
+        var first = true
+        for cmd in comp.batches[0].commands:
+            if first:
+                eng.clear(cmd.color)
+            else:
+                if cmd.clip_rect.present:
+                    eng.set_clip(cmd.clip_rect.x, cmd.clip_rect.y, cmd.clip_rect.width, cmd.clip_rect.height)
+                val dash = draw_ir_parse_dash_runs(cmd)
+                expect(dash.valid).to_equal(true)
+                for run in dash.runs:
+                    eng.draw_rect_filled(run.x, run.y, run.width, run.height, run.color)
+                if cmd.clip_rect.present:
+                    eng.clear_clip()
+            first = false
+        val got_pixels = eng.read_pixels()
+        expect(got_pixels.len()).to_equal(ref_pixels.len())
+        var idx = 0
+        while idx < ref_pixels.len():
+            expect(got_pixels[idx]).to_equal(ref_pixels[idx])
+            idx = idx + 1
+        # Verify blended AA start pixel and clipped tail pixel actually took effect:
+        expect(got_pixels[2 * w + 2] != CLEAR_BG).to_equal(true)
+        expect(got_pixels[2 * w + 2] != DASH_FULL).to_equal(true)
+        expect(got_pixels[3 * w + 3]).to_equal(DASH_FULL)
+        expect(got_pixels[11 * w + 20]).to_equal(CLEAR_BG)
