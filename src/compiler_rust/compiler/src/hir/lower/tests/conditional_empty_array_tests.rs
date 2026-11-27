@@ -604,3 +604,20 @@ fn guessed_float_method_return_never_triggers_float_into_int_errors() {
     let msg = super::parse_and_lower_lenient(source).err().map(|e| e.to_string()).unwrap_or_default();
     assert!(msg.contains("binding `r` is declared as `i64` but receives `f64`"), "{msg}");
 }
+
+// An untyped (ANY) arm is the uninferred-any warning's business (#12260),
+// never the typed-arm disagreement error.
+#[test]
+fn any_arm_against_a_typed_arm_is_not_a_value_join_error() {
+    for body in [
+        "    val r = if c: o else: 5\n",
+        "    val r = if c: \"t\" else: o\n",
+        "    val r = match n:\n        case 0: o\n        case 1: [1.5]\n        case _: 2\n",
+        "    val r = if c: {} else: o\n",
+    ] {
+        let source = format!("fn probe(o, c: bool, n: i64) -> i64:\n{body}    0\n");
+        if let Err(e) = super::parse_and_lower_lenient(&source) {
+            assert!(!e.to_string().contains("value arms disagree"), "{body}{e}");
+        }
+    }
+}
