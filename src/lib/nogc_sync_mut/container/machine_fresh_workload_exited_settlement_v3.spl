@@ -1,0 +1,104 @@
+# Eligibility DATA reducer for settling an EXITED start (CPU V2 records only). Not native absence and
+# not authority: the sealed owner derives every progress field from its own retained state and obtains
+# the cohort sample from its own custody.
+#
+# Decision (2026-11-27, doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md):
+# a workload that exited before the first post-Start sample never had a pid or cgroup to capture, so the
+# subject-closure settlement cannot apply. Its charge is released only when ALL of these hold:
+#   1. the owner's own two retained post-Start samples prove the exited start (exited_start_v3);
+#   2. the owner's own Stop, Remove and Absence helpers completed on its own retained native id;
+#   3. custody then observed the whole enforced cohort empty (the same kernel-side census the finite
+#      probe lane already settles on) and that sample binds to this record, epoch and native id.
+# The census is cohort-wide, not id-specific: `native_id` in the sample is echoed from the owner's own
+# command, never observed. It therefore refuses while anything else lives in the epoch's cohort, and
+# that refusal is retryable. No caller-supplied value and no engine text is a release ground.
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.MachineFreshWorkloadSettlementProgressV2
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workload_probe_v3.{LinuxFreshWorkloadProbeAbsenceV3,
+    LinuxFreshWorkloadProbeCommandV3, LinuxFreshWorkloadProbeActionV3, linux_fresh_workload_probe_binding_v3}
+use std.common.contracts.distributed_operation_state_v2.DistributedOperationStateV2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+
+# @allow(primitive_api) reason: closed eligibility flags, the exited-start twin of MachineFreshWorkloadSettlementProgressV2
+pub struct MachineFreshWorkloadExitedSettlementProgressV3:
+    exited_start: bool
+    helper_retired: bool
+    native_held: bool
+    stop_completed: bool
+    remove_completed: bool
+    absence_completed: bool
+    uncertain: bool
+    settled: bool
+    phase: text
+
+# The cohort identity this owner's own record and native id select; custody echoes it in the sample.
+# @allow(primitive_api) reason: native_id is the owner's retained full id, re-validated by the command projector
+pub fn machine_fresh_workload_exited_cohort_command_v3(record: MachineFreshWorkloadRecordV2,
+        native_id: text) -> Result<LinuxFreshWorkloadProbeCommandV3, text>:
+    Ok(LinuxFreshWorkloadProbeCommandV3(workload: machine_fresh_workload_command_v2(record,
+        LinuxFreshWorkloadActionV2.Inspect, native_id)?, action: LinuxFreshWorkloadProbeActionV3.Logs))
+
+# Every field the custody sample carries is matched to the owner's own record and epoch: the same field
+# set machine_fresh_probe_settle_v3 checks, with one named refusal each.
+# @allow(primitive_api) reason: native_id is the owner's retained full id, re-validated by the command projector
+pub fn machine_fresh_workload_exited_cohort_absence_validate_v3(record: MachineFreshWorkloadRecordV2,
+        epoch: MachineFreshEpochRecordV1, native_id: text, closure: LinuxFreshWorkloadProbeAbsenceV3) -> Result<(), text>:
+    val command = machine_fresh_workload_exited_cohort_command_v3(record, native_id)?
+    if closure.assurance != "enforced-probe-cohort-empty-v3": return Err("machine-fresh-workload-exited-absence-assurance")
+    if closure.request_binding_digest != linux_fresh_workload_probe_binding_v3(command)?:
+        return Err("machine-fresh-workload-exited-absence-request-binding")
+    if closure.native_id != native_id: return Err("machine-fresh-workload-exited-absence-native-id")
+    if closure.partition_identity_digest != epoch.partition_identity_digest:
+        return Err("machine-fresh-workload-exited-absence-partition")
+    if closure.store_identity_digest != epoch.store_identity_digest: return Err("machine-fresh-workload-exited-absence-store")
+    if closure.native_machine_id != record.scope.native_machine_id or closure.native_boot_id != record.scope.boot_id:
+        return Err("machine-fresh-workload-exited-absence-host-incarnation")
+    if closure.owner_generation != record.scope.provider_generation:
+        return Err("machine-fresh-workload-exited-absence-owner-generation")
+    if closure.excluded_process_identity_digest != epoch.process_identity_digest or closure.service_uid != epoch.service_uid:
+        return Err("machine-fresh-workload-exited-absence-service-identity")
+    if closure.sample_started_monotonic_ns <= 0 or closure.sample_finished_monotonic_ns < closure.sample_started_monotonic_ns:
+        return Err("machine-fresh-workload-exited-absence-sample-window")
+    Ok(())
+
+# One evidence row of its own kind, then the unchanged V2 release rows.
+# @allow(primitive_api) reason: at is the same wall-clock millisecond stamp machine_fresh_workload_settle_entries_v2 takes
+pub fn machine_fresh_workload_exited_settlement_entries_v3(record: MachineFreshWorkloadRecordV2,
+        terminal: DistributedOperationStateV2, closure: LinuxFreshWorkloadProbeAbsenceV3, at: i64) -> Result<[WalEntry], text>:
+    val rows = machine_fresh_workload_settle_entries_v2(record, terminal, at)?
+    val id = machine_fresh_workload_id_v2(record)?
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("machine-fresh-workload-exited-start-settlement"),
+        "version": SdnValue.Int(3), "workloadDigest": SdnValue.String(id), "nativeId": SdnValue.String(closure.native_id),
+        "assurance": SdnValue.String(closure.assurance), "requestBinding": SdnValue.String(closure.request_binding_digest),
+        "partition": SdnValue.String(closure.partition_identity_digest), "store": SdnValue.String(closure.store_identity_digest),
+        "machine": SdnValue.String(closure.native_machine_id), "boot": SdnValue.String(closure.native_boot_id),
+        "excludedHost": SdnValue.String(closure.excluded_process_identity_digest),
+        "uid": SdnValue.Int(closure.service_uid), "subuidStart": SdnValue.Int(closure.subuid_start),
+        "subuidCount": SdnValue.Int(closure.subuid_count), "ownerGeneration": SdnValue.Int(closure.owner_generation),
+        "sampleStarted": SdnValue.Int(closure.sample_started_monotonic_ns), "sampleFinished": SdnValue.Int(closure.sample_finished_monotonic_ns)}
+    Ok([WalEntry(0, WalEntryType.Insert, "machine-fresh-workload-exited-settlements-v3", id,
+        sdn_encode_canonical(SdnValue.Dict(fields)), at)] + rows)
+
+# No row constructor is reached on a rejected precondition or an unbound sample.
+# @allow(primitive_api) reason: native_id is the owner's retained full id and at the wall-clock millisecond stamp of the V2 settle rows
+pub fn machine_fresh_workload_prepare_exited_settlement_v3(progress: MachineFreshWorkloadExitedSettlementProgressV3,
+        record: MachineFreshWorkloadRecordV2, epoch: MachineFreshEpochRecordV1, native_id: text,
+        terminal: DistributedOperationStateV2, closure: LinuxFreshWorkloadProbeAbsenceV3,
+        at: i64) -> Result<(MachineFreshWorkloadSettlementProgressV2, [WalEntry]), text>:
+    if not progress.exited_start: return Err("machine-fresh-workload-exited-start-unproven")
+    if progress.native_held: return Err("machine-fresh-workload-exited-settlement-native-held")
+    if not progress.helper_retired: return Err("machine-fresh-workload-exited-settlement-helper-active")
+    if not progress.stop_completed or not progress.remove_completed or not progress.absence_completed:
+        return Err("machine-fresh-workload-exited-settlement-cleanup-incomplete")
+    if progress.uncertain: return Err("machine-fresh-workload-exited-settlement-uncertain")
+    if progress.settled or progress.phase != "idle": return Err("machine-fresh-workload-exited-settlement-not-idle")
+    val bound = machine_fresh_workload_exited_cohort_absence_validate_v3(record, epoch, native_id, closure)?
+    val rows = machine_fresh_workload_exited_settlement_entries_v3(record, terminal, closure, at)?
+    # The existing V2 finalizer consumes this reserved phase; an exited start is never associated and
+    # never retains a native subject, and the reserved value says so.
+    Ok((MachineFreshWorkloadSettlementProgressV2(associated: false, helper_retired: true, native_retained: false,
+        absence_completed: true, uncertain: false, settled: false, phase: "settlement-reserved"), rows))

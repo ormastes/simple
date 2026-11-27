@@ -238,9 +238,15 @@ Traps hit while doing it:
   with `machine_fresh_workload_start_evidence_v3` (never the running-subject
   decoder, which stays the association gate) and replies `start` with phase
   `exited`.
-- An exited start is never associated, so it has no native subject and its
-  charge cannot be settled: `destroy` refuses with
-  `machine-fresh-workload-exited-start-settlement-unproven`
-  (`doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md`).
-  Any association failure other than "gone at both samples" still latches
-  `outcome_unknown`, which refuses `wait`/`logs`.
+- An exited start is never associated, so it has no native subject. `destroy`
+  settles it through `machine_fresh_workload_settle_exited_start_v3`, not the
+  subject settle: the owner's two retained exited samples, its own completed
+  Stop/Remove/Absence, and custody's whole-cohort-empty census
+  (`observe_probe_absence_v3`, the one the probe lane settles on). The census is
+  cohort-wide, so it refuses (plainly, retryable) while anything else lives in
+  the epoch. Decision and limits:
+  `doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md`.
+- `machine_fresh_workload_settle_cpu_v3` and `settle_v2` are body-pinned by
+  `host_linux_service_agent_v4_structure_spec.spl`. Add a sibling; do not edit them.
+- Any association failure other than "gone at both samples" still latches
+  `outcome_unknown`, which refuses `wait`/`logs` and both settles (open, same record).
