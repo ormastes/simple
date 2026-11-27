@@ -4068,6 +4068,19 @@ fn typed_words_byte_write_trap_child() {
         "u64_push" => drop(collections::rt_typed_words_u64_push(bytes, 77)),
         "i64_push" => drop(collections::rt_typed_words_i64_push(bytes, 77)),
         "u64_push_known_at" => drop(collections::rt_typed_words_u64_push_known_at(bytes, 2, 77)),
+        "u32_push_known_at" => drop(collections::rt_typed_words_u32_push_known_at(bytes, 2, 77)),
+        "u32_push_known_data_at" => drop(collections::rt_typed_words_u32_push_known_data_at(
+            bytes.as_heap_ptr() as i64,
+            rt_array_data_ptr(bytes),
+            2,
+            77,
+        )),
+        "u64_push_known_data_at" => drop(collections::rt_typed_words_u64_push_known_data_at(
+            bytes.as_heap_ptr() as i64,
+            rt_array_data_ptr(bytes),
+            2,
+            77,
+        )),
         other => panic!("unknown op {other}"),
     }
     println!("NO-TRAP {op}");
@@ -4084,6 +4097,9 @@ fn test_typed_words_writers_trap_on_byte_packed_arrays() {
         "u64_push",
         "i64_push",
         "u64_push_known_at",
+        "u32_push_known_at",
+        "u32_push_known_data_at",
+        "u64_push_known_data_at",
     ] {
         let out = std::process::Command::new(&exe)
             .args([
