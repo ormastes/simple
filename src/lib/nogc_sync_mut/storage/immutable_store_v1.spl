@@ -67,6 +67,8 @@ val _ISV1_MAX_ALIAS_BYTES: i64 = 512
 val _ISV1_MAX_ROOT_BYTES: i64 = 4194304
 val _ISV1_MAX_REFS: i64 = 16384
 val _ISV1_MAX_ROOT_CLAIM_WALK: i64 = 4096
+val _ISV1_ROOT_FLOOR_INTERVAL: i64 = 256
+val _ISV1_ROOT_HEAD_TRIES: i64 = 3
 val _ISV1_STAGING_MIN_AGE_SECS: i64 = 3600
 val _ISV1_MAX_QUARANTINE_DAYS: i64 = 4096
 val _ISV1_PUBLISH_RETRIES: i64 = 3
@@ -789,77 +791,315 @@ pub fn immutable_store_v1_open(root: text, object_key: text) -> StoreOpenV1:
         return StoreOpenV1(status: "corrupt", reason: "object-digest-mismatch", bytes: [])
     StoreOpenV1(status: "ok", reason: "", bytes: bytes)
 
-pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
-        generation: StoreGenerationV1) -> text:
+# Root claim compaction (design: doc/03_plan/platform/container/simple_container_improvement.md,
+# "Root claim compaction design"). roots/<name>.sdn is a mutable pointer hint,
+# roots/<name>.g<N>.claim the no-replace claim chain, roots/<name>.f<N>.floor a
+# byte copy of the generation-N doc. `hi`/`lo` are the highest and second
+# highest floors; claims at or below `lo` are dead and swept by compact.
+struct Isv1RootScanV1:
+    hi: i64
+    lo: i64
+    third: i64
+    floors: [i64]
+    claims: [i64]
+
+struct Isv1RootStartV1:
+    doc_text: text
+    generation: i64
+
+struct Isv1RootHeadV1:
+    hi: i64
+    generation: i64
+    doc_text: text
+
+struct Isv1RootPrepV1:
+    reason: text
+    done: bool
+    replaced: text
+    claim_generation: i64
+    floor_published: bool
+
+# N when `entry` is exactly name + infix + N + suffix with N canonical decimal
+# (no sign, no leading zero, N >= 1); otherwise -1. Root names may contain
+# dots, so no prefix matching beyond this exact form.
+fn _isv1_root_entry_number(entry: text, name: text, infix: text, suffix: text) -> i64:
+    val prefix = name + infix
+    if not entry.starts_with(prefix) or not entry.ends_with(suffix):
+        return -1
+    val eb = entry.bytes()
+    val start = prefix.bytes().len()
+    val end = eb.len() - suffix.bytes().len()
+    if end <= start or end - start > 18:
+        return -1
+    if eb[start].to_i64() == 48:
+        return -1
+    var value: i64 = 0
+    var i = start
+    while i < end:
+        val b = eb[i].to_i64()
+        if b < 48 or b > 57:
+            return -1
+        value = value * 10 + (b - 48)
+        i = i + 1
+    value
+
+fn _isv1_root_floor_path(root: text, name: text, generation: i64) -> text:
+    _isv1_join(root, "roots/" + name + ".f{generation}.floor")
+
+# One fail-closed listing of roots/, reduced to the floors and claims of `name`.
+fn _isv1_root_scan(root: text, name: text) -> Result<Isv1RootScanV1, text>:
+    val entries = match _isv1_list_fail_closed(_isv1_join(root, "roots")):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    var floors: [i64] = []
+    var claims: [i64] = []
+    var a: i64 = 0
+    var b: i64 = 0
+    var c: i64 = 0
+    for entry in entries:
+        val leaf = entry.trim()
+        val floor_n = _isv1_root_entry_number(leaf, name, ".f", ".floor")
+        if floor_n > 0:
+            floors.push(floor_n)
+            if floor_n > a:
+                c = b
+                b = a
+                a = floor_n
+            elif floor_n > b:
+                c = b
+                b = floor_n
+            elif floor_n > c:
+                c = floor_n
+            continue
+        val claim_n = _isv1_root_entry_number(leaf, name, ".g", ".claim")
+        if claim_n > 0:
+            claims.push(claim_n)
+    Ok(Isv1RootScanV1(hi: a, lo: b, third: c, floors: floors, claims: claims))
+
+# The floor doc for `generation`, checked against its file name.
+fn _isv1_root_floor_doc(root: text, name: text, generation: i64) -> Result<text, text>:
+    val path = _isv1_root_floor_path(root, name, generation)
+    if not file_exists(path):
+        return Err("root-floor-missing")
+    val doc_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_ROOT_BYTES):
+        case Ok(value): value
+        case Err(_): return Err("root-floor-unreadable")
+    if _isv1_root_doc_generation(doc_text) != generation:
+        return Err("root-floor-corrupt")
+    Ok(doc_text)
+
+fn _isv1_root_floor_error(root: text, name: text, generation: i64) -> text:
+    match _isv1_root_floor_doc(root, name, generation):
+        case Ok(_): ""
+        case Err(reason): reason
+
+# Stable head, phase 1: list, read the `hi` floor doc and the pointer, pick the
+# start doc. The pointer counts only when its generation is above `hi`.
+fn _isv1_root_head_begin(root: text, name: text) -> Result<Isv1RootStartV1, text>:
+    var tries: i64 = 0
+    while tries < _ISV1_ROOT_HEAD_TRIES:
+        tries = tries + 1
+        val scan = match _isv1_root_scan(root, name):
+            case Ok(value): value
+            case Err(reason): return Err(reason)
+        var floor_text = ""
+        var vanished = false
+        if scan.hi > 0:
+            match _isv1_root_floor_doc(root, name, scan.hi):
+                case Ok(value): floor_text = value
+                case Err(reason):
+                    if reason != "root-floor-missing":
+                        return Err(reason)
+                    vanished = true
+        if vanished:
+            continue
+        val pointer_text = match file_read_regular_no_follow_bounded(_isv1_root_path(root, name), _ISV1_MAX_ROOT_BYTES):
+            case Ok(value): value
+            case Err(_): return Err("root-unreadable")
+        val pointer_generation = _isv1_root_doc_generation(pointer_text)
+        if pointer_generation > scan.hi:
+            return Ok(Isv1RootStartV1(doc_text: pointer_text, generation: pointer_generation))
+        if scan.hi > 0:
+            return Ok(Isv1RootStartV1(doc_text: floor_text, generation: scan.hi))
+        return Err("root-corrupt")
+    Err("root-head-contended")
+
+# Stable head, phase 2: walk claims forward from the start doc, list again, and
+# retry from phase 1 when `lo` passed the start (a walked claim may be gone).
+fn _isv1_root_head_finish(root: text, name: text, start: Isv1RootStartV1, tries: i64) -> Result<Isv1RootHeadV1, text>:
+    var head_text = start.doc_text
+    var generation = start.generation
+    var steps: i64 = 0
+    var at_head = false
+    while steps < _ISV1_MAX_ROOT_CLAIM_WALK:
+        val next_path = _isv1_root_claim_path(root, name, generation + 1)
+        if not file_exists(next_path):
+            at_head = true
+            break
+        val next_text = match file_read_regular_no_follow_bounded(next_path, _ISV1_MAX_ROOT_BYTES):
+            case Ok(value): value
+            case Err(_): return Err("root-claim-unreadable")
+        if _isv1_root_doc_generation(next_text) != generation + 1:
+            return Err("root-claim-corrupt")
+        head_text = next_text
+        generation = generation + 1
+        steps = steps + 1
+    if not at_head:
+        return Err("root-claim-chain-too-long")
+    val scan = match _isv1_root_scan(root, name):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    if scan.lo > start.generation:
+        if tries <= 1:
+            return Err("root-head-contended")
+        val restart = match _isv1_root_head_begin(root, name):
+            case Ok(value): value
+            case Err(reason): return Err(reason)
+        return _isv1_root_head_finish(root, name, restart, tries - 1)
+    Ok(Isv1RootHeadV1(hi: scan.hi, generation: generation, doc_text: head_text))
+
+# The one head lookup for root_head, publish and the GC root read.
+fn _isv1_root_head_stable(root: text, name: text) -> Result<Isv1RootHeadV1, text>:
+    val start = match _isv1_root_head_begin(root, name):
+        case Ok(value): value
+        case Err(reason): return Err(reason)
+    _isv1_root_head_finish(root, name, start, _ISV1_ROOT_HEAD_TRIES)
+
+# Delete the claims at or below `lo` and the floors below the third highest.
+# Deletes nothing unless both top floors verify and roots/ is durable.
+fn _isv1_root_compact(root: text, name: text) -> text:
+    val scan = match _isv1_root_scan(root, name):
+        case Ok(value): value
+        case Err(reason): return reason
+    if scan.lo == 0:
+        return ""
+    val hi_reason = _isv1_root_floor_error(root, name, scan.hi)
+    if hi_reason != "":
+        return hi_reason
+    val lo_reason = _isv1_root_floor_error(root, name, scan.lo)
+    if lo_reason != "":
+        return lo_reason
+    if not dir_sync(_isv1_join(root, "roots")):
+        return "roots-dir-sync-failed"
+    for generation in scan.claims:
+        if generation <= scan.lo:
+            file_delete(_isv1_root_claim_path(root, name, generation))
+    for generation in scan.floors:
+        if generation < scan.third:
+            file_delete(_isv1_root_floor_path(root, name, generation))
+    ""
+
+# Best-effort compaction of every root; errors are retried by the next run.
+fn _isv1_root_compact_all(store_root: text):
+    val entries = match _isv1_list_fail_closed(_isv1_join(store_root, "roots")):
+        case Ok(value): value
+        case Err(_): return
+    for entry in entries:
+        val leaf = entry.trim()
+        if not leaf.ends_with(".sdn"):
+            continue
+        val stem = leaf.substring(0, leaf.byte_len() - 4)
+        if _isv1_name_valid(stem):
+            _isv1_root_compact(store_root, stem)
+
+fn _isv1_root_prep_done(reason: text) -> Isv1RootPrepV1:
+    Isv1RootPrepV1(reason: reason, done: true, replaced: "", claim_generation: 0, floor_published: false)
+
+# Publish phase 1 (design steps 1-2): validate, find the stable head, check the
+# expected generation and publish a floor when the chain above `hi` is
+# `interval` long.
+fn _isv1_publish_root_prepare(root: text, name: text, manifest: text,
+        generation: StoreGenerationV1, interval: i64) -> Isv1RootPrepV1:
     val expected_generation: i64 = generation.value
     if root == "":
-        return "store-root-empty"
+        return _isv1_root_prep_done("store-root-empty")
     if not _isv1_name_valid(name):
-        return "root-name-invalid"
+        return _isv1_root_prep_done("root-name-invalid")
     if expected_generation < 0:
-        return "root-generation-invalid"
+        return _isv1_root_prep_done("root-generation-invalid")
     if manifest.len() > _ISV1_MAX_ROOT_BYTES:
-        return "manifest-too-large"
+        return _isv1_root_prep_done("manifest-too-large")
     var keys: [text] = []
     for line in manifest.split("\n"):
         val trimmed = line.trim()
         if trimmed == "":
             continue
         if not _isv1_key_valid(trimmed):
-            return "manifest-key-invalid: {_isv1_bound_reason(trimmed)}"
+            return _isv1_root_prep_done("manifest-key-invalid: {_isv1_bound_reason(trimmed)}")
         keys.push(trimmed)
     val roots_dir = _isv1_join(root, "roots")
     if not dir_create_all(roots_dir) and not is_dir(roots_dir):
-        return "roots-dir-failed"
+        return _isv1_root_prep_done("roots-dir-failed")
     val path = _isv1_root_path(root, name)
     if expected_generation == 0:
         val created = _isv1_doc_encode(name, 1, keys)
         if created.byte_len() > _ISV1_MAX_ROOT_BYTES:
-            return "manifest-too-large"
+            return _isv1_root_prep_done("manifest-too-large")
         val published = _isv1_publish_text_noreplace(root, "root.sdn", created, path)
         if published == 1:
-            return ""
+            return _isv1_root_prep_done("")
         if published == 0:
-            return "root-exists"
-        return "root-publish-failed: {published}"
+            return _isv1_root_prep_done("root-exists")
+        return _isv1_root_prep_done("root-publish-failed: {published}")
     if not file_exists(path):
-        return "root-missing"
-    val current_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_ROOT_BYTES):
+        return _isv1_root_prep_done("root-missing")
+    # Truth is the claim chain above the floors; the pointer is only a start hint.
+    val head = match _isv1_root_head_stable(root, name):
         case Ok(value): value
-        case Err(_): return "root-unreadable"
-    # Truth is the contiguous claim chain; the pointer is only a cache that
-    # may lag (a stalled writer can even move it back). Claims are never
-    # deleted, so walking forward from any cached generation finds the head.
-    val head_text = match _isv1_root_head_text(root, name, current_text):
-        case Ok(value): value
-        case Err(reason): return reason
-    val head_generation = _isv1_root_doc_generation(head_text)
-    if head_generation < 0:
-        return "root-corrupt"
-    if head_text != current_text:
-        # Refresh the cache; a lost race here is healed by the next walk.
-        atomic_write_bytes(path, head_text.bytes())
-    if head_generation != expected_generation:
-        return "root-generation-mismatch"
-    # CAS: only one writer can no-replace publish the claim for generation N+1.
+        case Err(reason): return _isv1_root_prep_done(reason)
+    if head.generation != expected_generation:
+        return _isv1_root_prep_done("root-generation-mismatch")
     val replaced = _isv1_doc_encode(name, expected_generation + 1, keys)
     if replaced.byte_len() > _ISV1_MAX_ROOT_BYTES:
-        return "manifest-too-large"
-    val claimed = _isv1_publish_text_noreplace(root, "root.claim", replaced,
-        _isv1_root_claim_path(root, name, expected_generation + 1))
+        return _isv1_root_prep_done("manifest-too-large")
+    var floor_published = false
+    if head.generation - head.hi >= interval:
+        val floored = _isv1_publish_text_noreplace(root, "root.floor", head.doc_text,
+            _isv1_root_floor_path(root, name, head.generation))
+        if floored != 0 and floored != 1:
+            return _isv1_root_prep_done("root-floor-failed")
+        floor_published = floored == 1
+    Isv1RootPrepV1(reason: "", done: false, replaced: replaced,
+        claim_generation: expected_generation + 1, floor_published: floor_published)
+
+# Publish phase 2 (design steps 3-5): claim, verify against a fresh listing,
+# refresh the pointer, and compact when this publish created a floor.
+fn _isv1_publish_root_commit(root: text, name: text, prep: Isv1RootPrepV1) -> text:
+    if prep.done:
+        return prep.reason
+    val claim_path = _isv1_root_claim_path(root, name, prep.claim_generation)
+    # CAS: only one writer can no-replace publish this claim file.
+    val claimed = _isv1_publish_text_noreplace(root, "root.claim", prep.replaced, claim_path)
     if claimed == 0:
         return "root-generation-mismatch"
     if claimed != 1:
         return "root-claim-failed: {claimed}"
-    # The claim is the commit; the pointer write only refreshes the cache.
-    atomic_write_bytes(path, replaced.bytes())
+    val scan = match _isv1_root_scan(root, name):
+        case Ok(value): value
+        case Err(_): return "root-claim-unverified"
+    if scan.lo >= prep.claim_generation:
+        file_delete(claim_path)
+        return "root-claim-below-floor"
+    # The claim is the commit; the pointer write only refreshes the hint.
+    atomic_write_bytes(_isv1_root_path(root, name), prep.replaced.bytes())
+    if prep.floor_published:
+        _isv1_root_compact(root, name)
     ""
+
+fn _isv1_publish_root_inner(root: text, name: text, manifest: text,
+        generation: StoreGenerationV1, interval: i64) -> text:
+    val prep = _isv1_publish_root_prepare(root, name, manifest, generation, interval)
+    _isv1_publish_root_commit(root, name, prep)
+
+pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
+        generation: StoreGenerationV1) -> text:
+    _isv1_publish_root_inner(root, name, manifest, generation, _ISV1_ROOT_FLOOR_INTERVAL)
 
 fn _isv1_root_head_result(status: text, reason: text, generation: i64, keys: [text]) -> StoreRootHeadV1:
     StoreRootHeadV1(status: status, reason: reason, generation: StoreGenerationV1(generation), keys: keys)
 
-# Read-only head of a root: follows the claim chain past a lagging pointer and
-# returns the head's generation and validated keys, in published order.
+# Read-only head of a root: the stable head (floors, then the claim chain) with
+# its generation and validated keys, in published order.
 pub fn immutable_store_v1_root_head(root: text, name: text) -> StoreRootHeadV1:
     if root == "":
         return _isv1_root_head_result("corrupt", "store-root-empty", 0, [])
@@ -868,13 +1108,10 @@ pub fn immutable_store_v1_root_head(root: text, name: text) -> StoreRootHeadV1:
     val path = _isv1_root_path(root, name)
     if not file_exists(path):
         return _isv1_root_head_result("missing", "root-missing", 0, [])
-    val pointer_text = match file_read_regular_no_follow_bounded(path, _ISV1_MAX_ROOT_BYTES):
-        case Ok(value): value
-        case Err(_): return _isv1_root_head_result("corrupt", "root-unreadable", 0, [])
-    val head_text = match _isv1_root_head_text(root, name, pointer_text):
+    val head = match _isv1_root_head_stable(root, name):
         case Ok(value): value
         case Err(reason): return _isv1_root_head_result("corrupt", reason, 0, [])
-    val doc = match _isv1_doc_decode(head_text, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+    val doc = match _isv1_doc_decode(head.doc_text, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
         case Ok(value): value
         case Err(reason): return _isv1_root_head_result("corrupt", "root-corrupt: {reason}", 0, [])
     if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
@@ -892,28 +1129,6 @@ fn _isv1_root_doc_generation(source: text) -> i64:
     if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
         return -1
     _isv1_doc_generation(doc)
-
-# Walk roots/<name>.g<N>.claim forward from the cached pointer doc and return
-# the head doc text. Bounded so a hostile store cannot spin forever.
-fn _isv1_root_head_text(root: text, name: text, pointer_text: text) -> Result<text, text>:
-    var head_text = pointer_text
-    var generation = _isv1_root_doc_generation(pointer_text)
-    if generation < 0:
-        return Err("root-corrupt")
-    var steps: i64 = 0
-    while steps < _ISV1_MAX_ROOT_CLAIM_WALK:
-        val next_path = _isv1_root_claim_path(root, name, generation + 1)
-        if not file_exists(next_path):
-            return Ok(head_text)
-        val next_text = match file_read_regular_no_follow_bounded(next_path, _ISV1_MAX_ROOT_BYTES):
-            case Ok(value): value
-            case Err(_): return Err("root-claim-unreadable")
-        if _isv1_root_doc_generation(next_text) != generation + 1:
-            return Err("root-claim-corrupt")
-        head_text = next_text
-        generation = generation + 1
-        steps = steps + 1
-    Err("root-claim-chain-too-long")
 
 fn _isv1_pin_args_error(root: text, pin_id: text, owner: text) -> text:
     if root == "":
@@ -1113,8 +1328,8 @@ fn _isv1_list_fail_closed(dir: text) -> Result<[text], text>:
         case None: return Err("doc-dir-unlistable: {_isv1_bound_reason(dir)}")
     Err("doc-dir-unlistable")
 
-# Each root pointer is followed along its claim chain and the head's keys count
-# too (the pointer may lag the head). Superseded claims are history.
+# Each root contributes the keys of its stable head (floors, then the claim
+# chain; the pointer is only a hint). Superseded claims are history.
 fn _isv1_collect_root_keys(store_root: text) -> Result<[text], text>:
     var out: [text] = []
     val dir = _isv1_join(store_root, "roots")
@@ -1128,23 +1343,16 @@ fn _isv1_collect_root_keys(store_root: text) -> Result<[text], text>:
         val stem = name.substring(0, name.byte_len() - 4)
         if not _isv1_name_valid(stem):
             return Err("doc-name-invalid: {_isv1_bound_reason(name)}")
-        val source = match file_read_regular_no_follow_bounded(dir + "/" + name, _ISV1_MAX_ROOT_BYTES):
-            case Ok(value): value
-            case Err(_): return Err("doc-unreadable: {name}")
-        var sources: [text] = [source]
-        val head = match _isv1_root_head_text(store_root, stem, source):
+        val head = match _isv1_root_head_stable(store_root, stem):
             case Ok(value): value
             case Err(reason): return Err("{reason}: {name}")
-        if head != source:
-            sources.push(head)
-        for doc_source in sources:
-            val doc = match _isv1_doc_decode(doc_source, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
-                case Ok(value): value
-                case Err(_): return Err("doc-corrupt: {name}")
-            if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
-                return Err("doc-corrupt: {name}")
-            for key in doc.keys:
-                out.push(key)
+        val doc = match _isv1_doc_decode(head.doc_text, ["format_version", "name", "generation"], _ISV1_MAX_ROOT_BYTES):
+            case Ok(value): value
+            case Err(_): return Err("doc-corrupt: {name}")
+        if not (doc.fields.contains_key("format_version") and doc.fields["format_version"] == "1"):
+            return Err("doc-corrupt: {name}")
+        for key in doc.keys:
+            out.push(key)
     Ok(out)
 
 # Every `pins/<id>/refs/<key>` entry is a retained key. A pin directory with
@@ -1296,6 +1504,7 @@ pub fn immutable_store_v1_collect(root: text, dry_run: StoreFlagV1) -> StoreGcV1
     unreachable.sort()
     if dry_run.value:
         return StoreGcV1(status: "ok", reason: "", dry_run: StoreFlagV1(true), unreachable: unreachable, moved: StoreCountV1(0))
+    _isv1_root_compact_all(root)
     immutable_store_v1_sweep_staging(root, StoreCountV1(_ISV1_STAGING_MIN_AGE_SECS))
     var moved_keys: [text] = []
     var moved_destinations: [text] = []

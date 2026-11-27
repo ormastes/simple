@@ -9,7 +9,10 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1,
+    _isv1_publish_root_inner, _isv1_publish_root_prepare, _isv1_publish_root_commit, _isv1_root_compact,
+    _isv1_root_head_begin, _isv1_root_head_finish, _isv1_root_scan, _isv1_root_floor_path,
+    _isv1_root_claim_path, _isv1_doc_encode}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -703,4 +706,262 @@ describe "immutable_store_v1 crash and failure safety":
         expect(is_dir(root + "/staging/pinrel-dead")).to_equal(false)
         expect(is_dir(root + "/staging/pincreate-dead")).to_equal(false)
         expect(is_dir(root + "/staging/other-keep")).to_equal(true)
+        _store_cleanup(root)
+
+# Root claim compaction. A small interval drives the same code the 256
+# interval runs; prepare/commit split stages races without threads.
+# Design: doc/03_plan/platform/container/simple_container_improvement.md
+fn _two_keys(root: text) -> [text]:
+    val a = immutable_store_v1_ingest(root, "root key a".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+    val b = immutable_store_v1_ingest(root, "root key b".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+    [a, b]
+
+fn _gen_manifest(keys: [text], generation: i64) -> text:
+    keys[generation % 2] + "\n"
+
+fn _roots_create(root: text, name: text, keys: [text], interval: i64):
+    expect(_isv1_publish_root_inner(root, name, _gen_manifest(keys, 1), StoreGenerationV1(0), interval)).to_equal("")
+
+# Publish generations from_gen+1 .. to_gen, each against the generation before it.
+fn _roots_advance(root: text, name: text, keys: [text], from_gen: i64, to_gen: i64, interval: i64):
+    var g = from_gen
+    while g < to_gen:
+        val reason = _isv1_publish_root_inner(root, name, _gen_manifest(keys, g + 1), StoreGenerationV1(g), interval)
+        expect(reason).to_equal("")
+        g = g + 1
+
+fn _roots_listing(root: text) -> text:
+    var names: [text] = []
+    for entry in dir_list(root + "/roots"):
+        names.push(entry.trim())
+    names.sort()
+    var out = ""
+    for n in names:
+        out = out + n + "|"
+    out
+
+fn _roots_count(root: text, name: text) -> i64:
+    var count: i64 = 0
+    for entry in dir_list(root + "/roots"):
+        val leaf = entry.trim()
+        if leaf == name + ".sdn" or leaf.starts_with(name + ".g") or leaf.starts_with(name + ".f"):
+            count = count + 1
+    count
+
+fn _roots_write_pointer(root: text, name: text, generation: i64, keys: [text]):
+    val doc = _isv1_doc_encode(name, generation, [keys[generation % 2]])
+    expect(file_write_bytes(root + "/roots/" + name + ".sdn", doc.bytes())).to_equal(true)
+
+fn _roots_write_claim(root: text, name: text, generation: i64, keys: [text]):
+    val doc = _isv1_doc_encode(name, generation, [keys[generation % 2]])
+    expect(file_write_bytes(_isv1_root_claim_path(root, name, generation), doc.bytes())).to_equal(true)
+
+fn _roots_write_floor(root: text, name: text, file_generation: i64, doc_generation: i64, keys: [text]):
+    val doc = _isv1_doc_encode(name, doc_generation, [keys[doc_generation % 2]])
+    expect(file_write_bytes(_isv1_root_floor_path(root, name, file_generation), doc.bytes())).to_equal(true)
+
+describe "immutable_store_v1 root claim compaction":
+    it "publishes a floor at the head past the interval and sweeps claims at or below lo":
+        val root = _store_root("rc-floor")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 5, 2)
+        expect(file_exists(root + "/roots/main.f2.floor")).to_equal(true)
+        expect(file_exists(root + "/roots/main.f4.floor")).to_equal(true)
+        expect(file_exists(root + "/roots/main.g2.claim")).to_equal(false)
+        expect(file_exists(root + "/roots/main.g3.claim")).to_equal(true)
+        _roots_advance(root, "main", keys, 5, 7, 2)
+        expect(file_exists(root + "/roots/main.f6.floor")).to_equal(true)
+        for dead in [2, 3, 4]:
+            expect(file_exists(_isv1_root_claim_path(root, "main", dead))).to_equal(false)
+        for live in [5, 6, 7]:
+            expect(file_exists(_isv1_root_claim_path(root, "main", live))).to_equal(true)
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.status).to_equal("ok")
+        expect(head.generation.value).to_equal(7)
+        expect(head.keys).to_equal([keys[1]])
+        _store_cleanup(root)
+
+    it "keeps the file count of one root under the bound over many generations":
+        val root = _store_root("rc-bound")
+        val keys = _two_keys(root)
+        val interval: i64 = 4
+        _roots_create(root, "main", keys, interval)
+        var g: i64 = 1
+        while g < 60:
+            _roots_advance(root, "main", keys, g, g + 1, interval)
+            g = g + 1
+            expect(_roots_count(root, "main") <= 3 * interval + 4).to_equal(true)
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.generation.value).to_equal(60)
+        _store_cleanup(root)
+
+    it "reports root-claim-below-floor for a publisher that prepared before two floors and a compact":
+        val root = _store_root("rc-below")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        val stale = _isv1_publish_root_prepare(root, "main", _gen_manifest(keys, 2), StoreGenerationV1(1), 2)
+        expect(stale.reason).to_equal("")
+        _roots_advance(root, "main", keys, 1, 7, 2)
+        expect(file_exists(_isv1_root_claim_path(root, "main", 2))).to_equal(false)
+        expect(_isv1_publish_root_commit(root, "main", stale)).to_equal("root-claim-below-floor")
+        expect(file_exists(_isv1_root_claim_path(root, "main", 2))).to_equal(false)
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.generation.value).to_equal(7)
+        expect(head.keys).to_equal([keys[1]])
+        _store_cleanup(root)
+
+    it "reports root-generation-mismatch for a stale publisher aiming at a slot in (lo, hi]":
+        val root = _store_root("rc-mismatch")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 5, 2)
+        val stale = _isv1_publish_root_prepare(root, "main", _gen_manifest(keys, 6), StoreGenerationV1(5), 2)
+        expect(stale.reason).to_equal("")
+        _roots_advance(root, "main", keys, 5, 7, 2)
+        val scan = match _isv1_root_scan(root, "main"):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(scan.lo).to_equal(4)
+        expect(scan.hi).to_equal(6)
+        expect(file_exists(_isv1_root_claim_path(root, "main", 6))).to_equal(true)
+        expect(_isv1_publish_root_commit(root, "main", stale)).to_equal("root-generation-mismatch")
+        expect(immutable_store_v1_root_head(root, "main").generation.value).to_equal(7)
+        _store_cleanup(root)
+
+    it "advances past 4096 generations with every pointer write dropped":
+        val root = _store_root("rc-pointer-dropped")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 16)
+        var g: i64 = 1
+        while g < 4110:
+            _roots_advance(root, "main", keys, g, g + 1, 16)
+            _roots_write_pointer(root, "main", 1, keys)
+            g = g + 1
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.status).to_equal("ok")
+        expect(head.generation.value).to_equal(4110)
+        _store_cleanup(root)
+
+    it "ignores a pointer below hi and starts from a pointer above hi":
+        val root = _store_root("rc-pointer-hint")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 7, 2)
+        _roots_write_pointer(root, "main", 3, keys)
+        val below = immutable_store_v1_root_head(root, "main")
+        expect(below.status).to_equal("ok")
+        expect(below.generation.value).to_equal(7)
+        _roots_write_pointer(root, "main", 8, keys)
+        val above = immutable_store_v1_root_head(root, "main")
+        expect(above.status).to_equal("ok")
+        expect(above.generation.value).to_equal(8)
+        _store_cleanup(root)
+
+    it "retries the head lookup when lo passes its start between the two listings":
+        val root = _store_root("rc-retry")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 5, 2)
+        _roots_write_pointer(root, "main", 1, keys)
+        val start = match _isv1_root_head_begin(root, "main"):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(start.generation).to_equal(4)
+        _roots_advance(root, "main", keys, 5, 9, 2)
+        expect(file_exists(_isv1_root_claim_path(root, "main", 5))).to_equal(false)
+        val head = match _isv1_root_head_finish(root, "main", start, 3):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(head.generation).to_equal(9)
+        expect(head.hi).to_equal(8)
+        _store_cleanup(root)
+
+    it "compacts idempotently, finishes a partial delete, and never deletes the pointer":
+        val root = _store_root("rc-idem")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 9, 2)
+        val settled = _roots_listing(root)
+        expect(settled.contains("main.sdn|")).to_equal(true)
+        expect(_isv1_root_compact(root, "main")).to_equal("")
+        expect(_roots_listing(root)).to_equal(settled)
+        expect(_isv1_root_compact(root, "main")).to_equal("")
+        expect(_roots_listing(root)).to_equal(settled)
+        # A crash after the floor, before the deletes, leaves dead files.
+        _roots_write_claim(root, "main", 2, keys)
+        _roots_write_claim(root, "main", 6, keys)
+        _roots_write_floor(root, "main", 2, 2, keys)
+        expect(_roots_listing(root) == settled).to_equal(false)
+        expect(_isv1_root_compact(root, "main")).to_equal("")
+        expect(_roots_listing(root)).to_equal(settled)
+        expect(file_exists(root + "/roots/main.sdn")).to_equal(true)
+        expect(immutable_store_v1_root_head(root, "main").generation.value).to_equal(9)
+        _store_cleanup(root)
+
+    it "fails closed with root-floor-corrupt when a floor doc generation differs from its name":
+        val root = _store_root("rc-corrupt")
+        val keys = _two_keys(root)
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 7, 2)
+        _roots_write_claim(root, "main", 2, keys)
+        val before = _roots_listing(root)
+        _roots_write_floor(root, "main", 6, 5, keys)
+        expect(_isv1_root_compact(root, "main")).to_equal("root-floor-corrupt")
+        expect(_roots_listing(root)).to_equal(before)
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.status).to_equal("corrupt")
+        expect(head.reason).to_equal("root-floor-corrupt")
+        _roots_write_floor(root, "main", 6, 6, keys)
+        _roots_write_floor(root, "main", 4, 3, keys)
+        expect(_isv1_root_compact(root, "main")).to_equal("root-floor-corrupt")
+        expect(file_exists(_isv1_root_claim_path(root, "main", 2))).to_equal(true)
+        _store_cleanup(root)
+
+    it "does not count the floors and claims of a root whose name extends another":
+        val root = _store_root("rc-dots")
+        val keys = _two_keys(root)
+        _roots_create(root, "a", keys, 2)
+        _roots_create(root, "a.f1", keys, 2)
+        _roots_advance(root, "a.f1", keys, 1, 7, 2)
+        expect(file_exists(root + "/roots/a.f1.f6.floor")).to_equal(true)
+        val outer = match _isv1_root_scan(root, "a"):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(outer.hi).to_equal(0)
+        expect(outer.floors.len()).to_equal(0)
+        expect(outer.claims.len()).to_equal(0)
+        val inner = match _isv1_root_scan(root, "a.f1"):
+            case Ok(value): value
+            case Err(reason): fail(reason)
+        expect(inner.hi).to_equal(6)
+        expect(inner.lo).to_equal(4)
+        expect(immutable_store_v1_root_head(root, "a").generation.value).to_equal(1)
+        expect(immutable_store_v1_root_head(root, "a.f1").generation.value).to_equal(7)
+        _store_cleanup(root)
+
+    it "keeps head keys reachable across a GC compaction and fails closed on a corrupt floor":
+        val root = _store_root("rc-gc")
+        val keys = _two_keys(root)
+        val spare = immutable_store_v1_ingest(root, "unrooted spare".bytes(), HASH_POLICY_V1_XXH3_128).object_key
+        _roots_create(root, "main", keys, 2)
+        _roots_advance(root, "main", keys, 1, 7, 2)
+        _roots_write_claim(root, "main", 2, keys)
+        val dry = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(dry.status).to_equal("ok")
+        expect(dry.unreachable.contains(keys[1])).to_equal(false)
+        expect(dry.unreachable.contains(keys[0])).to_equal(true)
+        expect(dry.unreachable.contains(spare)).to_equal(true)
+        expect(file_exists(_isv1_root_claim_path(root, "main", 2))).to_equal(true)
+        val real = immutable_store_v1_collect(root, StoreFlagV1(false))
+        expect(real.status).to_equal("ok")
+        expect(file_exists(_isv1_root_claim_path(root, "main", 2))).to_equal(false)
+        expect(immutable_store_v1_open(root, keys[1]).status).to_equal("ok")
+        val head = immutable_store_v1_root_head(root, "main")
+        expect(head.generation.value).to_equal(7)
+        expect(head.keys).to_equal([keys[1]])
+        _roots_write_floor(root, "main", 6, 5, keys)
+        val rejected = immutable_store_v1_collect(root, StoreFlagV1(true))
+        expect(rejected.status).to_equal("rejected")
+        expect(rejected.reason).to_start_with("root-floor-corrupt")
         _store_cleanup(root)

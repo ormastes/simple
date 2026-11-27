@@ -92,9 +92,9 @@ Open (P2, next increment):
 - Staging sweeper (done 2026-11-27): non-dry-run `collect` calls `immutable_store_v1_sweep_staging`, removing `staging/{pinrel,ingest,publish}-*` dirs whose directory mtime is >= 3600 s old (conservative; no pid/nonce marker exists, so liveness is unprovable; a single payload write stalling an hour would be lost). Unknown mtime keeps the entry. `init` does not sweep.
 - RESOLVED (2026-11-27): `open` keeps `ok` meaning "present under objects/". On a miss for a currently reachable key (`_isv1_reachable`, GC's own restore condition) it restores the digest-verified quarantine copy no-replace and reads from `objects/`; an unreachable collected key stays `missing`. Publish retries the no-replace publish from the still-existing stage (bounded, pinned or not) before reporting `publish-winner-unreadable`. Quarantine scan: 4096 day dirs, contiguous `_n` slots.
 - Staged publishes now `file_sync` the staged file before the no-replace rename (both `_isv1_publish` and `_isv1_publish_text_noreplace`; failure rejects). Done: `rt_dir_sync(path) -> bool` (Rust interpreter + C runtime + codegen registration) is exported as SOSIX `dir_sync`; `_isv1_publish` and `_isv1_publish_text_noreplace` call it on the destination directory after a successful publish, fail-open by design (the object is already visible, so rejecting would misreport).
-- Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot.
+- Root claims accumulate (one file per generation, never deleted); compaction needs a design that cannot reopen a claimed slot. Designed, not implemented: see "Root claim compaction design (2026-11-27)".
 - DONE (2026-11-27): `substring` is byte-indexed in the interpreter and native (`rt_slice_text_bytes`); an end past the length clamps (no panic), and a bound inside a multi-byte char yields U+FFFD (lossy, not an error), so `substring(n, byte_len())` is safe by itself but `_isv1_unquote`'s one-byte slices silently mangled non-ASCII (a root doc with `name: "ma\u{e9}n"` decoded as ok). `_isv1_doc_decode` now rejects any byte >= 128 up front (`non-ascii`); spec: "rejects a root doc carrying non-ASCII bytes" in `immutable_store_v1_spec.spl` (30 -> 31). Other increment-1 decoders have no `substring(.., byte_len())` on disk/peer input.
-- Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`).
+- Pointer-cache write failures are ignored; an unrefreshable pointer bricks a root after 4096 generations (`root-claim-chain-too-long`). Designed, not implemented: same section.
 - Drop the `.value` condition reads on the new bool units once the seed bool-unit bug is fixed.
 - Specs: no gxhash known-answer vector through the policy; lost-race publish path not exercised.
 - SCV adapter generation race: concurrent `scv gc` runs can release each other's fresh `scv-gc-<g>-<n>` pins; the next import/pin run heals it (re-import is idempotent).
@@ -108,3 +108,67 @@ Status 2026-11-27 (storage view hardening, Lane B open items): fixed in `storage
 - `rt_dir_walk` fail-open: the upper scan now walks with `dir_list_optional` (nil = refuse, `upper-unreadable`) and rejects a non-real subdirectory (`upper-entry-not-real-dir`). Residual: `rt_dir_list` still drops per-entry errors and non-UTF-8 names inside a readable directory.
 - Stale handle: write/read/add_volume/save/clone re-check that the view root and view dir are real dirs and the journal is present and not destroyed (`view-destroyed`) before touching volume dirs.
 - Create crash window (fixed 2026-11-27): a create that crashed after claiming the view dir leaves a dir with a missing or unparseable journal. `storage_view_v1_destroy` now recovers it (the id can then be re-created): it removes the dir only when the journal is missing/unreadable/invalid AND the dir holds just journal.sdn, view.sdn (plain files) and an empty real upper/; any other entry or a non-empty upper is refused untouched, and a valid-journal view still goes through the normal journaled destroy. Specs: 3 added to `storage_view_v1_spec.spl` (18/18), plus 4 recovery specs (22/22).
+
+## Root claim compaction design (2026-11-27)
+
+Design only; nothing here is implemented. Scope: `immutable_store_v1.spl` root publish, head and GC root read. Lockless: immutable files, no-replace publish, plain unlink of dead files. No directory rename is needed.
+
+File layout (`roots/`, flat, as today plus one new kind):
+- `<name>.sdn`: root marker and pointer cache (mutable hint, `atomic_write_bytes`). Never deleted. Its absence still means `root-missing`.
+- `<name>.g<N>.claim`: generation N, published no-replace (unchanged).
+- `<name>.f<N>.floor` (new): a byte copy of the generation-N root doc, published no-replace via `_isv1_publish_text_noreplace`. Not `.sdn`, so the GC root enumeration skips it.
+- Parsing is exact: an entry belongs to `name` only if it equals `name + ".f" + canonical decimal + ".floor"` (same rule for claims). Root names may contain `.`, so no prefix matching. Other entries are skipped.
+
+Terms: `hi` = highest floor of the root, `lo` = second highest (0 when fewer than two floors). `K` = `_ISV1_ROOT_FLOOR_INTERVAL` = 256.
+
+Invariants:
+1. A floor at F holds exactly the doc that claim F held. Floors are only written from a stable head (below), so they are always true.
+2. Claims at or below `lo` and floors below the third-highest floor are dead: no reader opens them, and any process may unlink them. Claims above `lo` are never deleted. `lo` is the compaction point and only grows.
+3. A claim for g+1 is published only when a floor F with g - F < K exists (F = 0 means genesis). So the chain above `hi` is at most K long, independent of the pointer.
+4. The pointer is trusted only as a start hint, only when its generation is above `hi`, and is written only after a successful stable check. A lost or failed pointer write changes nothing.
+5. A publisher reports success for generation g only if a listing taken after its claim shows `lo` < g.
+
+Stable head (`_isv1_root_head_stable`, the one helper for `root_head`, publish and `_isv1_collect_root_keys`):
+1. List `roots/` fail-closed; compute `hi`, `lo`; read the `hi` floor doc (its generation must equal `hi`, else `root-floor-corrupt`; a floor that vanished means retry).
+2. Read the pointer. Start doc = pointer doc if its generation > `hi`, else the `hi` floor doc.
+3. Walk claims forward from the start doc as today (the 4096 bound stays as a hostile-store guard).
+4. List again. If the new `lo` > start generation, a claim on the walked range may have been deleted: retry from 1 (3 tries, then `root-head-contended`). Otherwise return (`hi` from this second listing, head doc).
+
+Publish with expected generation g >= 1:
+1. Stable head gives (`hi`, head h). If h != g: `root-generation-mismatch`.
+2. If h - `hi` >= K: publish floor `<name>.f<h>.floor` with the head doc. Result 1 or 0 (already there) continues; anything else returns `root-floor-failed` and no claim is made.
+3. Publish claim g+1 no-replace. 0 means `root-generation-mismatch`.
+4. List again. If `lo` >= g+1: unlink the own claim (it is dead by invariant 2) and return `root-claim-below-floor`. If the listing fails: `root-claim-unverified`.
+5. Success: refresh the pointer best-effort; if step 2 published a floor, run compact best-effort.
+
+A stale writer aiming at a slot in (`lo`, `hi`] loses in step 3, because that claim file still exists. One aiming at or below `lo` loses in step 4.
+
+Compact (`_isv1_root_compact(root, name)`; called from publish step 5 and from non-dry-run GC `collect` per root):
+1. List fail-closed; compute the three highest floors. Fewer than two floors: return. Decode the two highest; a generation mismatch returns `root-floor-corrupt` and deletes nothing.
+2. `dir_sync(roots/)` must return true, else delete nothing. The floors must be durable before the claims they replace are unlinked.
+3. `file_delete` every claim with N <= `lo`, then every floor below the third highest. Errors are ignored and retried by the next compact.
+
+File bound per root: about 2K claims, 3 floors and the pointer, plus dead files awaiting a sweep.
+
+Failure cases:
+- Crash after the floor, before or during deletes: extra dead files; the next compact finishes. Deletion is idempotent.
+- Crash between claim and step 4: a legitimate claim stands and is rolled forward by the walk, as today. A claim at or below `lo` is dead and swept.
+- Two compactors: each deletes only at or below the `lo` it saw, which is at or below the true `lo`. Two publishers writing the same floor: identical bytes, the loser gets 0.
+- Windows: `file_delete` of a claim a reader holds open fails; it is skipped and retried. Floors and claims use `file_publish_noreplace`; `rename_path` is not used here.
+- Unknown outcome: `root-claim-below-floor` and `root-claim-unverified` do not say whether the claim committed. A legitimate claim gets the first only if two floors at or above it were published between its steps 3 and 4. The caller must re-read the head.
+- `root-floor-failed` means the store cannot create files, so a claim would fail too. The root stays readable and resumes when writes work. This replaces the 4096 brick.
+- A directory listing is not a snapshot. Keeping three floors means a wrong pass in publish step 4 or stable-head step 4 needs two floor publications inside one listing. This residual is accepted, not closed.
+- Not healed: a legacy root whose pointer is already more than 4096 behind its head with no floor. Mixed old and new binaries on one store are unsupported once a claim has been deleted (old code reads a stale head and can reopen a slot).
+
+Specs a worker must implement (`immutable_store_v1_spec.spl`; drive internals with a small interval through `_isv1_publish_root_inner(.., interval)`, and split publish into prepare (steps 1-2) and commit (steps 3-5) so races are staged without threads):
+1. Publishing past the interval creates a floor at the head; past two intervals, claims at or below `lo` are gone and the head and keys are unchanged.
+2. The file count for one root stays under the bound over many generations.
+3. A stale publisher that prepared before two floors and a compact gets `root-claim-below-floor`; its claim file is removed and the head is unchanged.
+4. A stale publisher aiming at a slot in (`lo`, `hi`] gets `root-generation-mismatch`.
+5. With pointer writes dropped (pointer held at generation 1), a root advances past 4096 generations and `root_head` stays `ok`.
+6. A pointer regressed below `hi` is ignored; a pointer above `hi` is used as the start.
+7. Head lookup retries when `lo` passes its start between the two listings, and returns the true head.
+8. Compact run twice, and compact after a simulated partial delete, leave the same files; `<name>.sdn` is never deleted.
+9. A floor whose doc generation differs from its file name gives `root-floor-corrupt`; compact deletes nothing.
+10. Names with dots: floors of root `a.f1` are not counted for root `a`.
+11. GC `collect` keeps the head's keys reachable across a compaction and fails closed on a corrupt floor.
