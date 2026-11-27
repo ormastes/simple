@@ -2794,9 +2794,12 @@ fn run_native_build_worker_inner(raw_args: [text], lease: NativeCacheLease) -> i
     # A compiled bootstrap capsule can route the two internal `run` targets
     # itself. Do not label that native subprocess lane as interpreted: doing so
     # clamps parse warming to one child before the memory-aware clamp is even
-    # consulted. Source-run wrappers retain the established interpreter marker.
+    # consulted. Source-run wrappers run their children under the JIT: the
+    # 2026-07-30 "JIT hang" was stdout buffering (not a hang), and forced
+    # interpretation left parse shards at ~400 B/s (measured 2026-11-27: the
+    # same 6 parse shards finish in seconds under JIT).
     if (mode == nil or mode == "") and not compiled_bootstrap_route:
-        env_set("SIMPLE_EXECUTION_MODE", "interpret")
+        env_set("SIMPLE_EXECUTION_MODE", "jit")
     for arg in forwarded_args:
         # Preserve every public argument byte and its order. Only the worker
         # removes the one internal handoff argument before cli_native_build.
@@ -3266,8 +3269,8 @@ fn native_build_has_help(args: [text]) -> bool:
 # doc/08_tracking/bug/native_build_scoping_and_bootstrap_readthrough_2026-07-30.md):
 # the worker's own entry-point check (compile_targets.spl `cli_native_build`,
 # `if entry_point == "": ... return 1`) is logically immediate, but the
-# source-run worker normally runs under a forced tree-walking interpreter
-# (`run_native_build_worker` sets `SIMPLE_EXECUTION_MODE=interpret` when unset
+# source-run worker normally runs under the JIT
+# (`run_native_build_worker` sets `SIMPLE_EXECUTION_MODE=jit` when unset
 # outside the compiled bootstrap route) and must first interpret its large `compiler.driver`-
 # touching module graph before that check's first line ever executes. So an
 # invocation that is DESTINED to fail this check still pays the full,
