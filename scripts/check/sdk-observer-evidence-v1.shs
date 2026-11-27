@@ -165,17 +165,18 @@ do_bind() {
         print "W\t" name "\t" p[5]
       }
     }' "$manifest") || die "cannot read manifest"
-  case $witnesses in
-    FAIL*) die "${witnesses#FAIL	}" ;;
-  esac
+  # a FAIL row can follow W rows, so look at every line, not just the first
+  failrow=$(printf '%s\n' "$witnesses" | grep '^FAIL' | head -n 1) || true
+  [ -z "$failrow" ] || die "${failrow#FAIL	}"
   nseen=0
-  wtmp=${TMPDIR:-/tmp}/sdk-observer-bind.$$
+  wtmp=$(mktemp "${TMPDIR:-/tmp}/sdk-observer-bind.XXXXXX") || die "cannot create temp file"
+  trap 'rm -f "$wtmp"' EXIT
   printf '%s\n' "$witnesses" > "$wtmp"
   tab=$(printf '\t')
   while IFS=$tab read -r _tag _name _want; do
     [ "$_tag" = W ] || continue
-    [ -f "$control_root/$_name" ] || { rm -f "$wtmp"; die "selected source missing: $_name"; }
-    [ "$(digest "$control_root/$_name")" = "$_want" ] || { rm -f "$wtmp"; die "selected source witness mismatch: $_name"; }
+    [ -f "$control_root/$_name" ] || die "selected source missing: $_name"
+    [ "$(digest "$control_root/$_name")" = "$_want" ] || die "selected source witness mismatch: $_name"
     nseen=$((nseen + 1))
   done < "$wtmp"
   rm -f "$wtmp"
@@ -277,6 +278,7 @@ function jstr(v,   n, i, c, e, out, cp, lo) {
       out = out utf8(cp)
     } else return ""
   }
+  if (match(out, "[\001-\037\177]")) return ""
   JOK = 1
   return out
 }

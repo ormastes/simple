@@ -152,6 +152,17 @@ expect_rc "bind CRLF hello stdout accepted" 0 bind
 printf 'status=fail\n' >> "$b/diagnostics/evidence/seed-preflight.env"
 expect_rc "bind duplicate preflight field" 1 bind
 
+# Review findings: a FAIL row after valid W rows must still be fatal, and a
+# JSON-escaped newline must not split normalized_importer into two rows.
+sp=$b/diagnostics/evidence/seed-preflight-bindings/source-inputs.txt
+sed -n 1p "$sp" >> "$sp"
+printf 'schema=simple-bootstrap-preflight-v1\nstatus=pass\ngit_head=%s\nseed_sha256=%s\nsource_snapshot_sha256=%s\ngit_state_sha256=%s\n' \
+  "$src_commit" "$seed_sha" "$(sha "$sp")" \
+  "$(sha "$b/diagnostics/evidence/seed-preflight-bindings/git-state.env")" > "$b/diagnostics/evidence/seed-preflight.env"
+expect_rc "bind duplicate selected witness row" 1 bind
+sed 's|^normalized_importer: .*|normalized_importer: "src/lib/nogc_sync_mut/io/path_identity.spl\nsrc/lib/nogc_sync_mut/io/path_identity.spl"|' "$work/esc.log" > "$work/nl.log"
+expect_rc "escaped newline in normalized_importer" 1 $EVID records --kind sdk --data-root "$work/data" --log "$work/nl.log" --output "$work/o.sdn"
+
 if [ "$fails" -ne 0 ]; then
   printf 'FAIL: %s of %s cases failed\n' "$fails" "$cases"
   exit 1
