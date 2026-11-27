@@ -6013,3 +6013,57 @@ pins the border-box form, the default-UA gap is unfiled.
     `ui_showcase/hosts/host_2d_vulkan`), not the web catalog. The web
     opaque-box qualifier already refused base's dashes (clipped overlay rects
     without the required paint keys), so nothing changes there.
+
+## 2026-11-28 — "svg 3 device rows high at 4x" is the block cursor dropping an authored height's fraction
+
+- **The svg is not the cause, and the catalog `animation` svg was never off.** On
+  base `d40623d3f59` its rect is 76800 px at x 678..1157, y 1179..1338 in both
+  frames (1x: 169..288 / 295..334) and nothing in the box differs by more than 3.
+  A whole-px svg on the baseline, with or without text, and with
+  `vertical-align: top/bottom`, matches Chrome, as do canvas and inline-block
+  twins (each case in its own block, k=4).
+- **Cause:** a block that follows a sibling with an authored fractional `height`
+  started at the sibling's whole-px height. `height: 10.25 / 10.5 / 10.75px` put
+  the next block, its line and any svg on it 1 / 2 / 3 device rows high at k=4,
+  and one CSS px high at k=1 from .5 up. A text-only block moved the same way.
+  The block's return said "an authored height ends at start + h exactly" and
+  handed back the start fraction, while paint already extended the box's own
+  bottom by the fraction (`authored_height_frac_milli`), so only the box itself
+  was right.
+- **Fix (layout_engine block return + block cursor):** the end residual of an
+  authored-height box is start + its sub-pixel part. The parent cursor takes the
+  whole px once the residual reaches half a px. At k=1 the box itself takes the
+  snapped px (10.5px from a whole-px top is 11 rows in Chrome), so no seam row
+  opens above the next block. `authored_height_frac_milli` and
+  `layout_root_font_px` moved from paint_layout to layout_foundation; one copy.
+- Spec: `test/01_unit/browser_engine/block_after_fractional_height_chrome159_spec.spl`
+  (1/6 -> 8/8; k=4 and k=1, Chrome values in its header).
+- **Clamp trap (review catch):** `height:10.75px; max-height:10px` is 10px in
+  Chrome. `h == explicit_h` does not see that clamp (max 10 is not below the
+  whole-px 10), so the fraction is dropped when `max_height_px <= height_px`,
+  in layout and in paint's `_html_box_device_extra_h` (it used `<`). AC-8.
+- **Floats still drop the fraction** (on base too): a 10.75px float paints
+  1400..1439 at k=4, Chrome ..1442, and a `clear:both` sibling starts at 1440,
+  Chrome 1443. Bug: `doc/08_tracking/bug/web_render_float_fractional_height_dropped_2026-11-28.md`.
+- **Not covered, measured in the same sweep (k=4, unowned):**
+  - a flex container or form control with an authored fractional height (other
+    return paths);
+  - fractional `padding` (`padding-top: 2.5px` is 2 px: 2 device rows short);
+  - `height: 0.65em` at 16px paints 36 device rows, Chrome 42;
+  - svg-specific, red handoff spec
+    `svg_fractional_size_and_middle_4x_chrome159_spec` (in-development, 1/5):
+    a viewBox-derived height is rounded to whole px (`width=49`, 4:1 is 12 px,
+    Chrome 12.25; `width=50`, 3:1 is 17 px, Chrome 16.667; at most 2 device
+    rows); `width="40.5" height="20.3"` is 160 x 80 device px, Chrome 162 x 81;
+    `vertical-align: middle` is 1 device row high.
+- **Separate regression found on the way (not fixed here):** 4x `animation` raw
+  mismatch went 15997 -> 18267 px (0.14 -> 0.16) between `17351eb0855` and
+  `589d7493a0c` (13 first-parent commits; #12215, W5-5 layout fixes, is the only
+  one touching render paths). First-parent bisect on raw `mismatch_px`; frames
+  at `17351eb0855` and `95ed8f463d6` are byte-identical. The two Simple frames
+  differ in 2985 px on three feature-list text rows (device y 1984..2052,
+  2304..2367, 2736..2783); ink boxes are unchanged, so it is a pen sub-pixel
+  phase change in those lines, not a row shift.
+- Method: give every case its own fixed-height block and a unique background
+  and fill, then read first..last device row per colour in both frames. One
+  page with stacked cases hides which case moved, because the error accumulates.
