@@ -37,6 +37,12 @@ pub fn machine_fresh_workload_inspect_v2(record: MachineFreshWorkloadRecordV2,
 # genuine retained-owner operation. CPU wrapper still uses its original42 guard.
 fn workload_inspect_value_v3(request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2,
         native_id: text, value: JsonValue, expected_fields: i64) -> Result<MachineFreshWorkloadInspectV2, text>:
+    val identified = workload_inspect_identity_v3(request, scope, native_id, value, expected_fields, "running")?
+    workload_inspect_subject_v3(value)
+
+# Identity and security of one inspect sample at exactly `status`; no placement is decoded here.
+fn workload_inspect_identity_v3(request: ContainerExecutionRequestV2, scope: ContainerHostScopeV2,
+        native_id: text, value: JsonValue, expected_fields: i64, status: text) -> Result<(), text>:
     val p = request.plan
     if (json_value_keys(value).len() != expected_fields or workload_inspect_text_v2(value, "id")? != native_id or
             workload_inspect_text_v2(value, "pod_uid")? != p.workload_uid or
@@ -44,7 +50,7 @@ fn workload_inspect_value_v3(request: ContainerExecutionRequestV2, scope: Contai
             workload_inspect_text_v2(value, "operation_id")? != p.operation_id or
             workload_inspect_text_v2(value, "provider_generation")? != str(p.provider_generation) or
             workload_inspect_text_v2(value, "node_boot_id")? != container_scope_fence_id_v2(scope)? or
-            workload_inspect_text_v2(value, "status")? != "running" or
+            workload_inspect_text_v2(value, "status")? != status or
             workload_inspect_text_v2(value, "manager")? != "cgroupfs" or
             workload_inspect_text_v2(value, "cgroup_mode")? != "private" or
             workload_inspect_text_v2(value, "pid_mode")? != "private"):
@@ -55,13 +61,62 @@ fn workload_inspect_value_v3(request: ContainerExecutionRequestV2, scope: Contai
         if workload_inspect_field_v2(value, key)? != JsonValue.Bool(true): return Err("machine-fresh-workload-inspect-security")
     for key in ["effective_caps", "bounding_caps"]:
         if workload_inspect_field_v2(value, key)? != JsonValue.Int(0): return Err("machine-fresh-workload-inspect-security")
-    val pid = match workload_inspect_field_v2(value, "pid")?:
-        case JsonValue.Int(found): found
-        case _: return Err("machine-fresh-workload-inspect-pid")
+    Ok(())
+
+fn workload_inspect_pid_v3(value: JsonValue) -> Result<i64, text>:
+    match workload_inspect_field_v2(value, "pid")?:
+        case JsonValue.Int(found): Ok(found)
+        case _: Err("machine-fresh-workload-inspect-pid")
+
+fn workload_inspect_subject_v3(value: JsonValue) -> Result<MachineFreshWorkloadInspectV2, text>:
+    val pid = workload_inspect_pid_v3(value)?
     val cgroup = workload_inspect_text_v2(value, "cgroup")?
     if pid <= 0 or pid > 2147483647 or not cgroup.starts_with("/") or cgroup == "/" or cgroup.byte_len() > 4095:
         return Err("machine-fresh-workload-inspect-subject")
     Ok(MachineFreshWorkloadInspectV2(pid, cgroup))
+
+# What the owner's own post-Start inspect proves about the Start it already ran (CPU V2 records only).
+pub enum MachineFreshWorkloadStartEvidenceV3:
+    Running(subject: MachineFreshWorkloadInspectV2)
+    Exited
+    NeverStarted
+
+# Podman reaches `stopped` (payload exited, engine cleanup pending) and `exited` only from `running`, so
+# either one with no process and no cgroup, on the owner's own identity-matched container, proves that
+# the Start ran. `created` is the pre-Start state. Every other status, and a terminal status that still
+# names a process or cgroup, is ambiguous and refused. The exit code is not read here: the 42-field
+# projection has none, and `wait` owns it. This never yields a native subject for an exited container.
+# @allow(primitive_api) reason: native_id is the transfer's retained full id and output the raw helper stdout, both re-validated against the record
+pub fn machine_fresh_workload_start_evidence_v3(record: MachineFreshWorkloadRecordV2,
+        native_id: text, output: text) -> Result<MachineFreshWorkloadStartEvidenceV3, text>:
+    if not builder_digest_valid_v1(native_id): return Err("machine-fresh-workload-full-native-id")
+    val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Inspect, native_id)?
+    val value = linux_fresh_workload_inspect_identity_v2(command, output)?
+    val status = workload_inspect_text_v2(value, "status")?
+    if not ["running", "exited", "stopped", "created"].contains(status):
+        return Err("machine-fresh-workload-start-evidence-ambiguous")
+    val identified = workload_inspect_identity_v3(record.request, record.scope, native_id, value,
+        linux_fresh_workload_inspect_field_names_v2().len(), status)?
+    if status == "running": return Ok(MachineFreshWorkloadStartEvidenceV3.Running(workload_inspect_subject_v3(value)?))
+    if workload_inspect_pid_v3(value)? != 0 or workload_inspect_text_v2(value, "cgroup")? != "":
+        return Err("machine-fresh-workload-start-evidence-ambiguous")
+    if status == "created": return Ok(MachineFreshWorkloadStartEvidenceV3.NeverStarted)
+    Ok(MachineFreshWorkloadStartEvidenceV3.Exited)
+
+# An exited start is proven only when the post-Start sample and its confirmation both say so.
+# @allow(primitive_api) reason: predicate over two typed evidence values; bool is the predicate result
+pub fn machine_fresh_workload_exited_start_confirmed_v3(first: MachineFreshWorkloadStartEvidenceV3,
+        confirmed: MachineFreshWorkloadStartEvidenceV3) -> bool:
+    first == MachineFreshWorkloadStartEvidenceV3.Exited and confirmed == MachineFreshWorkloadStartEvidenceV3.Exited
+
+# Workspace records keep their running-only decoder: their exit is the typed pre-Stop read.
+# @allow(primitive_api) reason: native_id is the transfer's retained full id and output the raw helper stdout, both re-validated against the record
+pub fn machine_fresh_record_start_evidence_v3(record: MachineFreshWorkloadRecordDispatchV3,
+        native_id: text, output: text) -> Result<MachineFreshWorkloadStartEvidenceV3, text>:
+    match record:
+        case MachineFreshWorkloadRecordDispatchV3.CpuV2(value): machine_fresh_workload_start_evidence_v3(value, native_id, output)
+        case MachineFreshWorkloadRecordDispatchV3.WorkspaceV3(_):
+            Ok(MachineFreshWorkloadStartEvidenceV3.Running(machine_fresh_record_inspect_v3(record, native_id, output)?))
 
 pub fn machine_fresh_workload_absence_v2(exit_code: i64, output: text) -> bool:
     native_inspect_definitively_not_found("podman", exit_code, output)

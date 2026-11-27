@@ -229,3 +229,18 @@ Traps hit while doing it:
   (`machine_fresh_workload_action_initial_v2`), the `prior` table in
   `action_begin_v2`, and the bind/validate branch in
   `machine_fresh_workload_begin_v3`. The workspace record keeps its own list.
+- A fast-exit workload is already terminal at the first post-Start inspect.
+  Measured on this host (podman 4.9.3 rootless, `busybox sh -c 'echo hi; exit 7'`):
+  `created`/pid 0 before start; `stopped`/pid 0/empty `CgroupPath` right after
+  `start` returned 0; `exited` one second later. So a "did it start" check must
+  accept both `stopped` and `exited`, and two samples can differ in status.
+  `podman stop` on an exited container exits 0. The fresh route classifies this
+  with `machine_fresh_workload_start_evidence_v3` (never the running-subject
+  decoder, which stays the association gate) and replies `start` with phase
+  `exited`.
+- An exited start is never associated, so it has no native subject and its
+  charge cannot be settled: `destroy` refuses with
+  `machine-fresh-workload-exited-start-settlement-unproven`
+  (`doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md`).
+  Any association failure other than "gone at both samples" still latches
+  `outcome_unknown`, which refuses `wait`/`logs`.

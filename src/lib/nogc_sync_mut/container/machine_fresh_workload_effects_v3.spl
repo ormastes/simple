@@ -203,6 +203,17 @@ pub(package) fn machine_fresh_workload_associate_v3(storage: MachineStorageOwner
         custody_generation: i64) -> Result<(), text>:
     val record = state.record_v3()?
     val id = state.native_id_v2()?
+    # A workload that already exited has no process to capture, so it is never associated. Its start is
+    # proven only by this sample and one confirmation agreeing; the caller derives that from the retained
+    # outputs (exited_start_v3). A disagreeing confirmation latches like every other association failure.
+    val evidence_before = machine_fresh_record_start_evidence_v3(record, id, state.output_v2("inspect")?)?
+    if evidence_before == MachineFreshWorkloadStartEvidenceV3.NeverStarted: return Err("machine-fresh-workload-running-unproven")
+    if evidence_before == MachineFreshWorkloadStartEvidenceV3.Exited:
+        val again = machine_fresh_workload_run_v3(storage, custody, state, custody_generation, LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", None)?
+        val evidence_after = machine_fresh_record_start_evidence_v3(record, id, again.output)?
+        if not machine_fresh_workload_exited_start_confirmed_v3(evidence_before, evidence_after):
+            return Err("machine-fresh-workload-start-evidence-changed")
+        return Ok(())
     val before = machine_fresh_record_inspect_v3(record, id, state.output_v2("inspect")?)?
     val binding = sha256_text(machine_fresh_record_id_v3(record)? + "\n" + id + "\n" + state.output_v2("inspect")?)
     val captured = state.capture_subject_v2(before, binding)?
@@ -219,6 +230,9 @@ pub(package) fn machine_fresh_workload_settle_cpu_v3(storage: MachineStorageOwne
     if state.settled_v2()?: return Ok(())
     val record = state.record_v3()?
     val cpu_only = machine_fresh_record_cpu_v3(record)?
+    # No native subject was ever captured for an exited start, so there is no kernel-side closure to
+    # match. Engine text alone does not release the charge.
+    if state.exited_start_v3()?: return Err("machine-fresh-workload-exited-start-settlement-unproven")
     val absence = state.action_state_v2("absence")?
     if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
     val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Absence, state.native_id_v2()?)?
