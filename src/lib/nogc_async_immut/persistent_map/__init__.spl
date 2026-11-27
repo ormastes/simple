@@ -22,7 +22,7 @@
 #   print m0.len()         # 0 (original unchanged)
 #   print m2.len()         # 2
 
-use std.persistent_map.hamt_node.{hamt_empty, hamt_get, hamt_set, hamt_remove, hamt_node_entries, hamt_node_count}
+use std.persistent_map.hamt_node.{HamtNode, hamt_empty, hamt_get, hamt_set, hamt_remove, hamt_node_entries, hamt_node_count, hamt_branch_bitmap}
 use std.io_runtime.{hash_text}
 
 # ============================================================================
@@ -32,7 +32,7 @@ use std.io_runtime.{hash_text}
 # Compute a 64-bit hash for any key.
 # Text keys use the runtime hash function directly.
 # Non-text keys are converted to text via string interpolation, then hashed.
-fn persistent_map_hash(key) -> i64:
+fn persistent_map_hash<K>(key: K) -> i64:
     val key_text = "{key}"
     hash_text(key_text) & 9223372036854775807
 
@@ -41,7 +41,7 @@ fn persistent_map_hash(key) -> i64:
 # ============================================================================
 
 class PersistentMap<K, V>:
-    root       # HAMT root node (nil = empty)
+    root: HamtNode<K, V>?   # HAMT root node (None = empty)
     size: i64
 
     # ------------------------------------------------------------------
@@ -49,28 +49,28 @@ class PersistentMap<K, V>:
     # ------------------------------------------------------------------
 
     # Get the value associated with `key`, or nil if not present.
-    fn get(key):
+    fn get(key: K) -> V?:
         val hash = persistent_map_hash(key)
         hamt_get(self.root, key, hash, 0)
 
     # Get the value associated with `key`, or `default_val` if not present.
     fn get_or(key: K, default_val: V) -> V:
         val result = self.get(key)
-        if result != nil:
+        if result != None:
             return result
         default_val
 
     # Check whether `key` exists in the map.
-    fn contains(key) -> bool:
+    fn contains(key: K) -> bool:
         val result = self.get(key)
-        result != nil
+        result != None
 
     # ------------------------------------------------------------------
     # Mutation (returns new map)
     # ------------------------------------------------------------------
 
     # Insert or update `key` with `value`. Returns a NEW map.
-    fn set(key, value) -> PersistentMap<K, V>:
+    fn set(key: K, value: V) -> PersistentMap<K, V>:
         val hash = persistent_map_hash(key)
         val new_root = hamt_set(self.root, key, value, hash, 0)
         if new_root == self.root:
@@ -78,14 +78,14 @@ class PersistentMap<K, V>:
         # Determine new size: if the key was already present, size stays the same
         val old_val = hamt_get(self.root, key, hash, 0)
         var new_size = self.size
-        if old_val == nil:
+        if old_val == None:
             new_size = self.size + 1
         PersistentMap(root: new_root, size: new_size)
 
     # Remove `key` from the map. Returns a NEW map.
     # If the key is not present, returns this map unchanged.
-    fn remove(key) -> PersistentMap<K, V>:
-        if self.get(key) == nil:
+    fn remove(key: K) -> PersistentMap<K, V>:
+        if self.get(key) == None:
             return self
         # Rebuild through the public set path so native facades avoid low-level
         # HAMT branch-collapse paths that still need direct backend coverage.
@@ -134,7 +134,7 @@ class PersistentMap<K, V>:
         result
 
     # Return a new map containing only entries where `pred(key, value)` is true.
-    fn filter(pred: fn()) -> PersistentMap<K, V>:
+    fn filter(pred: fn(K, V) -> bool) -> PersistentMap<K, V>:
         var result = PersistentMap.empty()
         val all_entries = self.entries()
         var i = 0
@@ -147,7 +147,7 @@ class PersistentMap<K, V>:
         result
 
     # Return a new map with all values transformed by `f(value)`.
-    fn map_values(f: fn()) -> PersistentMap<K, V>:
+    fn map_values(f: fn(V) -> V) -> PersistentMap<K, V>:
         var result = PersistentMap.empty()
         val all_entries = self.entries()
         var i = 0
@@ -160,7 +160,7 @@ class PersistentMap<K, V>:
 
     # Fold (reduce) over all entries.
     # `f(accumulator, key, value)` is called for each entry.
-    fn fold(init, f: fn()):
+    fn fold<A>(init: A, f: fn(A, K, V) -> A) -> A:
         var acc = init
         val all_entries = self.entries()
         var i = 0
@@ -181,9 +181,9 @@ class PersistentMap<K, V>:
     # ------------------------------------------------------------------
 
     # Return an array of all keys.
-    fn keys():
+    fn keys() -> [K]:
         val all_entries = self.entries()
-        var result = []
+        var result: [K] = []
         var i = 0
         val n = len(all_entries)
         while i < n:
@@ -192,9 +192,9 @@ class PersistentMap<K, V>:
         result
 
     # Return an array of all values.
-    fn values():
+    fn values() -> [V]:
         val all_entries = self.entries()
-        var result = []
+        var result: [V] = []
         var i = 0
         val n = len(all_entries)
         while i < n:
@@ -203,12 +203,12 @@ class PersistentMap<K, V>:
         result
 
     # Return an array of [key, value] pairs.
-    fn entries():
+    fn entries() -> [(K, V)]:
         hamt_node_entries(self.root)
 
     # Convert to a mutable dict (built-in hash map).
-    fn to_dict():
-        var result = {}
+    fn to_dict() -> Dict<K, V>:
+        var result: Dict<K, V> = {}
         val all_entries = self.entries()
         var i = 0
         val n = len(all_entries)
@@ -229,7 +229,7 @@ class PersistentMap<K, V>:
             result = result.set(k, d[k])
         result
 
-    static fn from_entries(entries: []) -> PersistentMap<K, V>:
+    static fn from_entries(entries: [(K, V)]) -> PersistentMap<K, V>:
         var result = PersistentMap.empty()
         var i = 0
         val n = len(entries)
@@ -240,7 +240,7 @@ class PersistentMap<K, V>:
         result
 
     static fn empty() -> PersistentMap<K, V>:
-        PersistentMap(root: nil, size: 0)
+        PersistentMap(root: None, size: 0)
 
 # ============================================================================
 # Factory Functions
@@ -258,7 +258,8 @@ export HAMT_LEAF, HAMT_BRANCH, HAMT_COLLISION
 export HAMT_BITS, HAMT_WIDTH, HAMT_MASK_VAL, HAMT_MAX_DEPTH
 export hamt_popcount, hamt_mask, hamt_bit_pos, hamt_index
 export hamt_empty, hamt_leaf, hamt_branch, hamt_collision
-export hamt_node_tag
+export hamt_node_tag, hamt_branch_bitmap
+export HamtNode
 export hamt_get, hamt_set, hamt_remove
 export hamt_node_entries, hamt_node_count
 export hamt_array_insert, hamt_array_replace, hamt_array_remove

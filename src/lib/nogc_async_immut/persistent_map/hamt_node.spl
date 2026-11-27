@@ -1,25 +1,21 @@
 # HAMT Node Operations
 #
-# Hash Array Mapped Trie (HAMT) — a persistent, immutable hash map structure
+# Hash Array Mapped Trie (HAMT) - a persistent, immutable hash map structure
 # using 32-way branching with bitmap compression. Based on Bagwell (2001)
 # and Clojure's PersistentHashMap.
 #
-# Compact node representation (tag-packed flat arrays for minimal heap overhead):
-#   EMPTY     = nil
-#   LEAF      = [1, hash, key, value]
-#   BRANCH    = [(bitmap << 3) | 2, child_0, ..., child_{k-1}]
-#   COLLISION = [3, hash, k_0, v_0, k_1, v_1, ...]
-#
-# Packing the 32-bit bitmap and 3-bit tag into the header word of a single flat
-# branch array cuts branch heap allocations by 50% and removes one pointer
-# indirection on every lookup, insert, and remove. Flattening collision nodes
-# eliminates N + 1 inner pair arrays.
+# Node representation (HamtNode<K, V> enum):
+#   EMPTY     = None
+#   Leaf      = (hash, key, value)
+#   Branch    = (bitmap, children)  - children are the occupied slots only,
+#                                     ordered by bit position
+#   Collision = (hash, entries)     - [(key, value)] pairs sharing one hash
 #
 # All operations return NEW nodes (structural sharing). The original tree
 # is never modified.
 
 # ============================================================================
-# Constants — Node type tags
+# Constants - Node type tags
 # ============================================================================
 
 pub val HAMT_LEAF = 1
@@ -34,11 +30,17 @@ pub val HAMT_MASK_VAL = 31
 # Maximum trie depth for 64-bit hashes: ceil(64 / 5) = 13
 pub val HAMT_MAX_DEPTH = 13
 
-# Internal bit masks for packed header word:
-#   bits 0..2: node tag (0=empty, 1=leaf, 2=branch, 3=collision)
-#   bits 3..34: 32-bit branch child occupancy bitmap (unsigned within signed i64)
-val HAMT_TAG_MASK = 7
+# Bit mask for the 32-bit branch child occupancy bitmap (unsigned within signed i64)
 val HAMT_BITMAP_MASK = 0xFFFFFFFF
+
+# ============================================================================
+# Node Type
+# ============================================================================
+
+pub enum HamtNode<K, V>:
+    Leaf(hash: i64, key: K, value: V)
+    Branch(bitmap: i64, children: [HamtNode<K, V>])
+    Collision(hash: i64, entries: [(K, V)])
 
 # ============================================================================
 # Bit Manipulation Helpers
@@ -74,325 +76,197 @@ pub fn hamt_index(bitmap: i64, bit: i64) -> i64:
     val clean_bit = bit & HAMT_BITMAP_MASK
     hamt_popcount(clean_bitmap & (clean_bit - 1))
 
-fn hamt_pack_branch_header(bitmap: i64) -> i64:
-    ((bitmap & HAMT_BITMAP_MASK) << 3) | HAMT_BRANCH
-
-fn hamt_unpack_branch_bitmap(header: i64) -> i64:
-    (header >> 3) & HAMT_BITMAP_MASK
-
 # ============================================================================
 # Node Constructors
 # ============================================================================
 
-# Return an empty HAMT node (represented as nil).
-pub fn hamt_empty():
-    nil
+# Return an empty HAMT node.
+pub fn hamt_empty<K, V>() -> HamtNode<K, V>?:
+    None
 
-# Create a leaf node: [HAMT_LEAF, hash, key, value].
-pub fn hamt_leaf(hash: i64, key, value) -> []:
-    [HAMT_LEAF, hash, key, value]
+# Create a leaf node.
+pub fn hamt_leaf<K, V>(hash: i64, key: K, value: V) -> HamtNode<K, V>:
+    HamtNode.Leaf(hash: hash, key: key, value: value)
 
-# Create a flat branch node: [(bitmap << 3) | HAMT_BRANCH, child_0, ...].
-pub fn hamt_branch(bitmap: i64, children) -> []:
-    var node = [hamt_pack_branch_header(bitmap)]
-    for child in children:
-        node.push(child)
-    node
+# Create a branch node from an occupancy bitmap and its occupied children.
+pub fn hamt_branch<K, V>(bitmap: i64, children: [HamtNode<K, V>]) -> HamtNode<K, V>:
+    HamtNode.Branch(bitmap: bitmap & HAMT_BITMAP_MASK, children: children)
 
-# Create a flat collision node: [HAMT_COLLISION, hash, k_0, v_0, k_1, v_1, ...].
-# Accepts `entries` as [[k, v], ...] pairs for API compatibility and flattens them.
-pub fn hamt_collision(hash: i64, entries) -> []:
-    var node = [HAMT_COLLISION, hash]
-    for pair in entries:
-        node.push(pair[0])
-        node.push(pair[1])
-    node
+# Create a collision node from (key, value) pairs sharing one hash.
+pub fn hamt_collision<K, V>(hash: i64, entries: [(K, V)]) -> HamtNode<K, V>:
+    HamtNode.Collision(hash: hash, entries: entries)
 
 # ============================================================================
 # Node Type Inspection
 # ============================================================================
 
-# Get the tag of a node. Returns 0 for nil (empty).
-pub fn hamt_node_tag(node: []?) -> i64:
-    if node == nil:
+# Get the tag of a node. Returns 0 for None (empty).
+pub fn hamt_node_tag<K, V>(node: HamtNode<K, V>?) -> i64:
+    if node == None:
         return 0
-    node[0] & HAMT_TAG_MASK
+    match node:
+        case Leaf(h, k, v): HAMT_LEAF
+        case Branch(b, c): HAMT_BRANCH
+        case Collision(h, e): HAMT_COLLISION
 
-# Extract the 32-bit child bitmap from a packed branch node.
-fn hamt_branch_bitmap(node: []) -> i64:
-    hamt_unpack_branch_bitmap(node[0])
+# Extract the 32-bit child bitmap from a branch node (0 for other nodes).
+pub fn hamt_branch_bitmap<K, V>(node: HamtNode<K, V>?) -> i64:
+    if node == None:
+        return 0
+    match node:
+        case Branch(b, c): b
+        case Leaf(h, k, v): 0
+        case Collision(h, e): 0
 
 # ============================================================================
 # Core Operations
 # ============================================================================
 
 # Look up a key in the HAMT.
-# Returns the associated value, or nil if the key is not present.
-pub fn hamt_get<K, V>(node: [], key: K, hash: i64, shift: i64) -> V?:
-    if node == nil:
-        return nil
-
-    val header = node[0]
-    val tag = header & HAMT_TAG_MASK
-
-    if tag == HAMT_LEAF:
-        if node[2] == key:
-            return node[3]
-        return nil
-
-    if tag == HAMT_BRANCH:
-        val bitmap = (header >> 3) & HAMT_BITMAP_MASK
-        val bit = hamt_bit_pos(hash, shift)
-        if (bitmap & bit) == 0:
-            return nil
-        val idx = hamt_index(bitmap, bit)
-        return hamt_get(node[1 + idx], key, hash, shift + HAMT_BITS)
-
-    if tag == HAMT_COLLISION:
-        val n = hamt_array_len(node)
-        var i = 2
-        while i < n:
-            if node[i] == key:
-                return node[i + 1]
-            i = i + 2
-        return nil
-
-    nil
+# Returns the associated value, or None if the key is not present.
+pub fn hamt_get<K, V>(node: HamtNode<K, V>?, key: K, hash: i64, shift: i64) -> V?:
+    if node == None:
+        return None
+    match node:
+        case Leaf(h, k, v):
+            if k == key:
+                return v
+            return None
+        case Branch(bitmap, children):
+            val bit = hamt_bit_pos(hash, shift)
+            if (bitmap & bit) == 0:
+                return None
+            val idx = hamt_index(bitmap, bit)
+            return hamt_get(children[idx], key, hash, shift + HAMT_BITS)
+        case Collision(h, entries):
+            for pair in entries:
+                if pair.0 == key:
+                    return pair.1
+            return None
 
 # Insert or update a key-value pair in the HAMT.
 # Returns a NEW node (structural sharing with the original).
 @allow(primitive_api)  # shift is a raw HAMT bit offset, like hamt_mask
-pub fn hamt_set(node: []?, key, value, hash, shift: i64) -> []:
-    if node == nil:
+pub fn hamt_set<K, V>(node: HamtNode<K, V>?, key: K, value: V, hash: i64, shift: i64) -> HamtNode<K, V>:
+    if node == None:
         return hamt_leaf(hash, key, value)
-
-    val header = node[0]
-    val tag = header & HAMT_TAG_MASK
-
-    if tag == HAMT_LEAF:
-        val existing_hash = node[1]
-        val existing_key = node[2]
-        val existing_value = node[3]
-
-        if existing_key == key:
-            if existing_value == value:
+    match node:
+        case Leaf(existing_hash, existing_key, existing_value):
+            if existing_key == key:
+                if existing_value == value:
+                    return node
+                return hamt_leaf(hash, key, value)
+            if existing_hash == hash:
+                return HamtNode.Collision(hash: hash, entries: [(existing_key, existing_value), (key, value)])
+            return hamt_create_branch(existing_key, existing_value, existing_hash, key, value, hash, shift)
+        case Branch(bitmap, children):
+            val bit = hamt_bit_pos(hash, shift)
+            val idx = hamt_index(bitmap, bit)
+            if (bitmap & bit) == 0:
+                val new_leaf = hamt_leaf(hash, key, value)
+                val new_bitmap = (bitmap | bit) & HAMT_BITMAP_MASK
+                return HamtNode.Branch(bitmap: new_bitmap, children: hamt_array_insert(children, idx, new_leaf))
+            val child = children[idx]
+            val new_child = hamt_set(child, key, value, hash, shift + HAMT_BITS)
+            if new_child == child:
                 return node
-            return hamt_leaf(hash, key, value)
-
-        if existing_hash == hash:
-            return [HAMT_COLLISION, hash, existing_key, existing_value, key, value]
-
-        return hamt_create_branch(existing_key, existing_value, existing_hash, key, value, hash, shift)
-
-    if tag == HAMT_BRANCH:
-        val bitmap = (header >> 3) & HAMT_BITMAP_MASK
-        val bit = hamt_bit_pos(hash, shift)
-        val idx = hamt_index(bitmap, bit)
-
-        if (bitmap & bit) == 0:
-            val new_leaf = hamt_leaf(hash, key, value)
-            val new_bitmap = (bitmap | bit) & HAMT_BITMAP_MASK
-            return hamt_branch_insert(node, new_bitmap, idx, new_leaf)
-
-        val child = node[1 + idx]
-        val new_child = hamt_set(child, key, value, hash, shift + HAMT_BITS)
-        if new_child == child:
-            return node
-        return hamt_branch_replace(node, bitmap, idx, new_child)
-
-    if tag == HAMT_COLLISION:
-        val col_hash = node[1]
-        if col_hash == hash:
-            return hamt_collision_flat_set(node, hash, key, value)
-
-        val new_branch = hamt_promote_collision(node, shift)
-        return hamt_set(new_branch, key, value, hash, shift)
-
-    hamt_leaf(hash, key, value)
+            return HamtNode.Branch(bitmap: bitmap, children: hamt_array_replace(children, idx, new_child))
+        case Collision(col_hash, entries):
+            if col_hash == hash:
+                return hamt_collision_set(col_hash, entries, key, value, node)
+            val new_branch = hamt_promote_collision(node, col_hash, shift)
+            return hamt_set(new_branch, key, value, hash, shift)
 
 # Remove a key from the HAMT.
 # Returns Some(new_node) with the key removed, or None if the tree becomes empty.
-pub fn hamt_remove(node, key, hash, shift) -> []?:
+pub fn hamt_remove<K, V>(node: HamtNode<K, V>?, key: K, hash: i64, shift: i64) -> HamtNode<K, V>?:
     val updated = _hamt_remove_raw(node, key, hash, shift)
-    if updated == hamt_empty():
+    if updated == None:
         return None
     Some(updated)
 
-fn _hamt_remove_raw(node: []?, key, hash, shift: i64):
-    if node == hamt_empty():
-        return hamt_empty()
-
-    val header = node[0]
-    val tag = header & HAMT_TAG_MASK
-
-    if tag == HAMT_LEAF:
-        if node[2] == key:
-            return hamt_empty()
-        return node
-
-    if tag == HAMT_BRANCH:
-        val bitmap = (header >> 3) & HAMT_BITMAP_MASK
-        val bit = hamt_bit_pos(hash, shift)
-
-        if (bitmap & bit) == 0:
+fn _hamt_remove_raw<K, V>(node: HamtNode<K, V>?, key: K, hash: i64, shift: i64) -> HamtNode<K, V>?:
+    if node == None:
+        return None
+    match node:
+        case Leaf(h, k, v):
+            if k == key:
+                return None
             return node
-
-        val idx = hamt_index(bitmap, bit)
-        val child = node[1 + idx]
-        val new_child = _hamt_remove_raw(child, key, hash, shift + HAMT_BITS)
-
-        if new_child == child:
-            return node
-
-        if new_child == hamt_empty():
-            val new_bitmap = (bitmap ^ bit) & HAMT_BITMAP_MASK
-            if new_bitmap == 0:
-                return hamt_empty()
-            val old_child_count = hamt_array_len(node) - 1
-            if old_child_count == 2:
-                val sole = if idx == 0: node[2] else: node[1]
-                val sole_tag = hamt_node_tag(sole)
-                if sole_tag == HAMT_LEAF:
-                    return sole
-                if sole_tag == HAMT_COLLISION:
-                    return sole
-            return hamt_branch_remove(node, new_bitmap, idx)
-
-        if (hamt_array_len(node) - 1) == 1:
-            val child_tag = hamt_node_tag(new_child)
-            if child_tag == HAMT_LEAF:
-                return new_child
-            if child_tag == HAMT_COLLISION:
-                return new_child
-
-        return hamt_branch_replace(node, bitmap, idx, new_child)
-
-    if tag == HAMT_COLLISION:
-        match hamt_collision_flat_remove(node, key):
-            case Some(col_next): return col_next
-            case None: return hamt_empty()
-
-    node
+        case Branch(bitmap, children):
+            val bit = hamt_bit_pos(hash, shift)
+            if (bitmap & bit) == 0:
+                return node
+            val idx = hamt_index(bitmap, bit)
+            val child = children[idx]
+            val new_child = _hamt_remove_raw(child, key, hash, shift + HAMT_BITS)
+            if new_child == child:
+                return node
+            if new_child == None:
+                val new_bitmap = (bitmap ^ bit) & HAMT_BITMAP_MASK
+                if new_bitmap == 0:
+                    return None
+                if children.len() == 2:
+                    val sole = if idx == 0: children[1] else: children[0]
+                    val sole_tag = hamt_node_tag(sole)
+                    if sole_tag == HAMT_LEAF:
+                        return sole
+                    if sole_tag == HAMT_COLLISION:
+                        return sole
+                return HamtNode.Branch(bitmap: new_bitmap, children: hamt_array_remove(children, idx))
+            if children.len() == 1:
+                val child_tag = hamt_node_tag(new_child)
+                if child_tag == HAMT_LEAF:
+                    return new_child
+                if child_tag == HAMT_COLLISION:
+                    return new_child
+            return HamtNode.Branch(bitmap: bitmap, children: hamt_array_replace(children, idx, new_child))
+        case Collision(col_hash, entries):
+            return hamt_collision_remove(col_hash, entries, key, node)
 
 # ============================================================================
 # Internal Helpers
 # ============================================================================
 
-# Insert or replace a key-value pair directly inside a flat collision node
-# [HAMT_COLLISION, hash, k_0, v_0, ...].
-fn hamt_collision_flat_set(node: [], hash: i64, key, value) -> []:
-    val n = hamt_array_len(node)
-    var i = 2
-    while i < n:
-        if node[i] == key:
-            if node[i + 1] == value:
+# Insert or replace a key-value pair inside a collision node's entries.
+fn hamt_collision_set<K, V>(col_hash: i64, entries: [(K, V)], key: K, value: V, node: HamtNode<K, V>) -> HamtNode<K, V>:
+    var updated: [(K, V)] = []
+    var found = false
+    for pair in entries:
+        if pair.0 == key:
+            if pair.1 == value:
                 return node
-            var updated = [HAMT_COLLISION, hash]
-            var j = 2
-            while j < n:
-                if j == i:
-                    updated.push(key)
-                    updated.push(value)
-                else:
-                    updated.push(node[j])
-                    updated.push(node[j + 1])
-                j = j + 2
-            return updated
-        i = i + 2
-
-    var appended = [HAMT_COLLISION, hash]
-    var k = 2
-    while k < n:
-        appended.push(node[k])
-        k = k + 1
-    appended.push(key)
-    appended.push(value)
-    appended
-
-# Remove a key from a flat collision node, collapsing to a leaf when 1 entry remains.
-fn hamt_collision_flat_remove(node: [], key) -> []?:
-    val n = hamt_array_len(node)
-    var found_idx = -1
-    var i = 2
-    while i < n:
-        if node[i] == key:
-            found_idx = i
-            break
-        i = i + 2
-
-    if found_idx < 0:
-        return Some(node)
-
-    val pair_count = (n - 2) / 2
-    val new_pair_count = pair_count - 1
-    if new_pair_count <= 0:
-        return None
-
-    val col_hash = node[1]
-    if new_pair_count == 1:
-        val rem_idx = if found_idx == 2: 4 else: 2
-        return Some(hamt_leaf(col_hash, node[rem_idx], node[rem_idx + 1]))
-
-    var result = [HAMT_COLLISION, col_hash]
-    var j = 2
-    while j < n:
-        if j != found_idx:
-            result.push(node[j])
-            result.push(node[j + 1])
-        j = j + 2
-    Some(result)
-
-# Create a flat branch node with `value` inserted at child position `idx`.
-fn hamt_branch_insert(node: [], new_bitmap: i64, idx: i64, value) -> []:
-    var result = [hamt_pack_branch_header(new_bitmap)]
-    val n = hamt_array_len(node)
-    var child_i = 0
-    var inserted = false
-    var pos = 1
-    while pos < n:
-        if child_i == idx:
-            result.push(value)
-            inserted = true
-        result.push(node[pos])
-        child_i = child_i + 1
-        pos = pos + 1
-    if not inserted:
-        result.push(value)
-    result
-
-# Create a flat branch node with child position `idx` replaced by `value`.
-fn hamt_branch_replace(node: [], bitmap: i64, idx: i64, value) -> []:
-    var result = [hamt_pack_branch_header(bitmap)]
-    val n = hamt_array_len(node)
-    var child_i = 0
-    var pos = 1
-    while pos < n:
-        if child_i == idx:
-            result.push(value)
+            updated.push((key, value))
+            found = true
         else:
-            result.push(node[pos])
-        child_i = child_i + 1
-        pos = pos + 1
-    result
+            updated.push(pair)
+    if not found:
+        updated.push((key, value))
+    HamtNode.Collision(hash: col_hash, entries: updated)
 
-# Create a flat branch node with child position `idx` removed.
-fn hamt_branch_remove(node: [], new_bitmap: i64, idx: i64) -> []:
-    var result = [hamt_pack_branch_header(new_bitmap)]
-    val n = hamt_array_len(node)
-    var child_i = 0
-    var pos = 1
-    while pos < n:
-        if child_i != idx:
-            result.push(node[pos])
-        child_i = child_i + 1
-        pos = pos + 1
-    result
+# Remove a key from a collision node, collapsing to a leaf when 1 entry remains.
+# Returns None when the node becomes empty.
+fn hamt_collision_remove<K, V>(col_hash: i64, entries: [(K, V)], key: K, node: HamtNode<K, V>) -> HamtNode<K, V>?:
+    var kept: [(K, V)] = []
+    var found = false
+    for pair in entries:
+        if pair.0 == key:
+            found = true
+        else:
+            kept.push(pair)
+    if not found:
+        return node
+    if kept.len() == 0:
+        return None
+    if kept.len() == 1:
+        return hamt_leaf(col_hash, kept[0].0, kept[0].1)
+    HamtNode.Collision(hash: col_hash, entries: kept)
 
 # Create a branch node from two leaf entries that have different hashes.
 # Recursively descends if both entries map to the same 5-bit slot.
-fn hamt_create_branch(key1, value1, hash1, key2, value2, hash2, shift: i64) -> []:
+fn hamt_create_branch<K, V>(key1: K, value1: V, hash1: i64, key2: K, value2: V, hash2: i64, shift: i64) -> HamtNode<K, V>:
     if shift >= (HAMT_MAX_DEPTH * HAMT_BITS):
-        return [HAMT_COLLISION, hash1, key1, value1, key2, value2]
+        return HamtNode.Collision(hash: hash1, entries: [(key1, value1), (key2, value2)])
 
     val mask1 = hamt_mask(hash1, shift)
     val mask2 = hamt_mask(hash2, shift)
@@ -400,7 +274,7 @@ fn hamt_create_branch(key1, value1, hash1, key2, value2, hash2, shift: i64) -> [
     if mask1 == mask2:
         val child = hamt_create_branch(key1, value1, hash1, key2, value2, hash2, shift + HAMT_BITS)
         val bit = (1 << mask1) & HAMT_BITMAP_MASK
-        return [hamt_pack_branch_header(bit), child]
+        return HamtNode.Branch(bitmap: bit, children: [child])
 
     val bit1 = (1 << mask1) & HAMT_BITMAP_MASK
     val bit2 = (1 << mask2) & HAMT_BITMAP_MASK
@@ -409,25 +283,17 @@ fn hamt_create_branch(key1, value1, hash1, key2, value2, hash2, shift: i64) -> [
     val leaf2 = hamt_leaf(hash2, key2, value2)
 
     if mask1 < mask2:
-        return [hamt_pack_branch_header(bitmap), leaf1, leaf2]
-    return [hamt_pack_branch_header(bitmap), leaf2, leaf1]
+        return HamtNode.Branch(bitmap: bitmap, children: [leaf1, leaf2])
+    HamtNode.Branch(bitmap: bitmap, children: [leaf2, leaf1])
 
 # Promote a collision node into a branch node at the given shift level.
-fn hamt_promote_collision(collision_node: [], shift: i64) -> []:
-    val col_hash = collision_node[1]
+fn hamt_promote_collision<K, V>(collision_node: HamtNode<K, V>, col_hash: i64, shift: i64) -> HamtNode<K, V>:
     val bit = hamt_bit_pos(col_hash, shift)
-    [hamt_pack_branch_header(bit), collision_node]
+    HamtNode.Branch(bitmap: bit, children: [collision_node])
 
-# Count array entries without using facade-sensitive `.len()` dispatch.
-fn hamt_array_len(arr) -> i64:
-    var count = 0
-    for item in arr:
-        count = count + 1
-    count
-
-# Insert a value into an array at the given index, returning a new array.
-fn hamt_array_insert(arr, idx: i64, value) -> []:
-    var result = []
+# Insert a node into a children array at the given index, returning a new array.
+fn hamt_array_insert<K, V>(arr: [HamtNode<K, V>], idx: i64, value: HamtNode<K, V>) -> [HamtNode<K, V>]:
+    var result: [HamtNode<K, V>] = []
     var i = 0
     var inserted = false
     for item in arr:
@@ -440,9 +306,9 @@ fn hamt_array_insert(arr, idx: i64, value) -> []:
         result.push(value)
     result
 
-# Replace a value in an array at the given index, returning a new array.
-fn hamt_array_replace(arr, idx: i64, value) -> []:
-    var result = []
+# Replace a node in a children array at the given index, returning a new array.
+fn hamt_array_replace<K, V>(arr: [HamtNode<K, V>], idx: i64, value: HamtNode<K, V>) -> [HamtNode<K, V>]:
+    var result: [HamtNode<K, V>] = []
     var i = 0
     for item in arr:
         if i == idx:
@@ -452,9 +318,9 @@ fn hamt_array_replace(arr, idx: i64, value) -> []:
         i = i + 1
     result
 
-# Remove an element from an array at the given index, returning a new array.
-fn hamt_array_remove(arr, idx: i64) -> []:
-    var result = []
+# Remove a node from a children array at the given index, returning a new array.
+fn hamt_array_remove<K, V>(arr: [HamtNode<K, V>], idx: i64) -> [HamtNode<K, V>]:
+    var result: [HamtNode<K, V>] = []
     var i = 0
     for item in arr:
         if i != idx:
@@ -466,67 +332,39 @@ fn hamt_array_remove(arr, idx: i64) -> []:
 # Traversal
 # ============================================================================
 
-# Collect all [key, value] pairs from the HAMT into a flat array.
-# Returns an array of [key, value] arrays.
-pub fn hamt_node_entries(node) -> []:
-    hamt_collect_entries(node)
+# Collect all (key, value) pairs from the HAMT into a flat array.
+pub fn hamt_node_entries<K, V>(node: HamtNode<K, V>?) -> [(K, V)]:
+    var empty: [(K, V)] = []
+    hamt_collect_entries_into(node, empty)
 
-# Internal entry collector using a single mutable accumulator across the whole tree.
-fn hamt_collect_entries(node) -> []:
-    var acc = []
-    hamt_collect_entries_into(node, acc)
-
-fn hamt_collect_entries_into(node: []?, acc_in) -> []:
+fn hamt_collect_entries_into<K, V>(node: HamtNode<K, V>?, acc_in: [(K, V)]) -> [(K, V)]:
     var acc = acc_in
-    if node == nil:
+    if node == None:
         return acc
-
-    val header = node[0]
-    val tag = header & HAMT_TAG_MASK
-
-    if tag == HAMT_LEAF:
-        acc.push([node[2], node[3]])
-        return acc
-
-    if tag == HAMT_BRANCH:
-        val n = hamt_array_len(node)
-        var i = 1
-        while i < n:
-            acc = hamt_collect_entries_into(node[i], acc)
-            i = i + 1
-        return acc
-
-    if tag == HAMT_COLLISION:
-        val n = hamt_array_len(node)
-        var i = 2
-        while i < n:
-            acc.push([node[i], node[i + 1]])
-            i = i + 2
-        return acc
-
-    acc
+    match node:
+        case Leaf(h, k, v):
+            acc.push((k, v))
+            return acc
+        case Branch(bitmap, children):
+            for child in children:
+                acc = hamt_collect_entries_into(child, acc)
+            return acc
+        case Collision(h, entries):
+            for pair in entries:
+                acc.push(pair)
+            return acc
 
 # Count the total number of entries in the HAMT.
-pub fn hamt_node_count(node: []?) -> i64:
-    if node == nil:
+pub fn hamt_node_count<K, V>(node: HamtNode<K, V>?) -> i64:
+    if node == None:
         return 0
-
-    val header = node[0]
-    val tag = header & HAMT_TAG_MASK
-
-    if tag == HAMT_LEAF:
-        return 1
-
-    if tag == HAMT_BRANCH:
-        val n = hamt_array_len(node)
-        var total = 0
-        var i = 1
-        while i < n:
-            total = total + hamt_node_count(node[i])
-            i = i + 1
-        return total
-
-    if tag == HAMT_COLLISION:
-        return (hamt_array_len(node) - 2) / 2
-
-    0
+    match node:
+        case Leaf(h, k, v):
+            return 1
+        case Branch(bitmap, children):
+            var total = 0
+            for child in children:
+                total = total + hamt_node_count(child)
+            return total
+        case Collision(h, entries):
+            return entries.len()

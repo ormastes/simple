@@ -4,7 +4,7 @@ use std.nogc_async_immut.persistent_map.{
     HAMT_LEAF, HAMT_BRANCH, HAMT_COLLISION,
     hamt_empty, hamt_leaf, hamt_branch, hamt_collision,
     hamt_node_tag, hamt_get, hamt_set, hamt_remove,
-    hamt_node_entries, hamt_node_count, hamt_index, hamt_bit_pos
+    hamt_node_entries, hamt_node_count, hamt_branch_bitmap, hamt_index, hamt_bit_pos
 }
 use std.nogc_sync_mut.src.map.Map
 use std.nogc_sync_mut.src.collections.hashmap.HashMap
@@ -25,17 +25,14 @@ describe "Compact HAMT tag packing and SoA collections":
             val leaf1 = hamt_leaf(1, "k1", 10)
             val leaf2 = hamt_leaf(2, "k2", 20)
             expect(hamt_node_tag(leaf1)).to_equal(HAMT_LEAF)
-            expect(leaf1.len()).to_equal(4)
+            expect(hamt_node_count(leaf1)).to_equal(1)
 
             val branch = hamt_branch(3, [leaf1, leaf2])
             expect(hamt_node_tag(branch)).to_equal(HAMT_BRANCH)
-            # Single flat array: [packed_header, leaf1, leaf2]
-            expect(branch.len()).to_equal(3)
+            expect(hamt_node_count(branch)).to_equal(2)
 
-            val col = hamt_collision(99, [["a", 1], ["b", 2], ["c", 3]])
+            val col = hamt_collision(99, [("a", 1), ("b", 2), ("c", 3)])
             expect(hamt_node_tag(col)).to_equal(HAMT_COLLISION)
-            # Single flat array: [HAMT_COLLISION, hash, k1, v1, k2, v2, k3, v3]
-            expect(col.len()).to_equal(8)
             expect(hamt_node_count(col)).to_equal(3)
 
         it "preserves 32-bit high-bit 0x80000000 bitmaps in signed i64 shifts":
@@ -53,8 +50,8 @@ describe "Compact HAMT tag packing and SoA collections":
             root = hamt_set(root, "slot0", 100, 0, 0)
             root = hamt_set(root, "slot31", 3100, 31, 0)
             expect(hamt_node_tag(root)).to_equal(HAMT_BRANCH)
-            expect(root.len()).to_equal(3)
-            expect(((root[0] >> 3) & 0xFFFFFFFF)).to_equal(low_and_high)
+            expect(hamt_node_count(root)).to_equal(2)
+            expect(hamt_branch_bitmap(root)).to_equal(low_and_high)
             expect(hamt_get(root, "slot0", 0, 0)).to_equal(100)
             expect(hamt_get(root, "slot31", 31, 0)).to_equal(3100)
 
@@ -67,8 +64,7 @@ describe "Compact HAMT tag packing and SoA collections":
                 slot = slot + 1
 
             expect(hamt_node_tag(full_root)).to_equal(HAMT_BRANCH)
-            expect(full_root.len()).to_equal(33)
-            expect(((full_root[0] >> 3) & 0xFFFFFFFF)).to_equal(all_32_bits)
+            expect(hamt_branch_bitmap(full_root)).to_equal(all_32_bits)
             expect(hamt_node_count(full_root)).to_equal(32)
             expect(hamt_get(full_root, "s_0", 0, 0)).to_equal(0)
             expect(hamt_get(full_root, "s_31", -1, 0)).to_equal(217)
@@ -82,7 +78,7 @@ describe "Compact HAMT tag packing and SoA collections":
             # Sign-extended 32-bit negative bitmap input (-2147483648 == 0xFFFFFFFF80000000) masks cleanly to 0x80000000
             val neg_bitmap_branch = hamt_branch(-2147483648, [hamt_leaf(31, "neg31", 99)])
             expect(hamt_node_tag(neg_bitmap_branch)).to_equal(HAMT_BRANCH)
-            expect(((neg_bitmap_branch[0] >> 3) & 0xFFFFFFFF)).to_equal(high_bit)
+            expect(hamt_branch_bitmap(neg_bitmap_branch)).to_equal(high_bit)
             expect(hamt_get(neg_bitmap_branch, "neg31", 31, 0)).to_equal(99)
 
             # Deep multi-level branch insert + recursive hamt_remove (same low 15 bits, split at shift=15)
@@ -105,10 +101,10 @@ describe "Compact HAMT tag packing and SoA collections":
             node = hamt_set(node, "c1", "one", shared_hash, 0)
             node = hamt_set(node, "c2", "two", shared_hash, 0)
             expect(hamt_node_tag(node)).to_equal(HAMT_COLLISION)
-            expect(node.len()).to_equal(6)
+            expect(hamt_node_count(node)).to_equal(2)
 
             node = hamt_set(node, "c3", "three", shared_hash, 0)
-            expect(node.len()).to_equal(8)
+            expect(hamt_node_count(node)).to_equal(3)
             expect(hamt_get(node, "c1", shared_hash, 0)).to_equal("one")
             expect(hamt_get(node, "c2", shared_hash, 0)).to_equal("two")
             expect(hamt_get(node, "c3", shared_hash, 0)).to_equal("three")
@@ -116,7 +112,7 @@ describe "Compact HAMT tag packing and SoA collections":
 
             # Overwrite existing key in flat collision node
             node = hamt_set(node, "c2", "TWO", shared_hash, 0)
-            expect(node.len()).to_equal(8)
+            expect(hamt_node_count(node)).to_equal(3)
             expect(hamt_get(node, "c2", shared_hash, 0)).to_equal("TWO")
 
             # Promote collision node into branch when a distinct hash arrives
@@ -132,7 +128,7 @@ describe "Compact HAMT tag packing and SoA collections":
             # Remove down to 1 collision entry -> collapses back to leaf
             val after_r1 = hamt_remove(node, "c1", shared_hash, 0).unwrap()
             expect(hamt_node_tag(after_r1)).to_equal(HAMT_COLLISION)
-            expect(after_r1.len()).to_equal(6)
+            expect(hamt_node_count(after_r1)).to_equal(2)
 
             val after_r2 = hamt_remove(after_r1, "c3", shared_hash, 0).unwrap()
             expect(hamt_node_tag(after_r2)).to_equal(HAMT_LEAF)
