@@ -1,6 +1,6 @@
 # Native codegen leaves escapes unprocessed after a `{` in a text literal
 
-**Status:** OPEN (source fix on work/bug-native-brace-escape-20261126; native green needs a rebuilt Stage 2). **Found:** 2026-11-26 (work/bug-cuda-module-get-function-abi-20261126). **Severity:** P2.
+**Status:** fix-implemented-verification-pending (CoreLexer source fixes landed, including W4-1 `la_is_quote` parity fix; waiting-for: Stage-2 native binary rebuild + `src/app/test/brace_escape_probe.spl` native run printing `LEN=15`). **Found:** 2026-11-26 (work/bug-cuda-module-get-function-abi-20261126). **Severity:** P2.
 **Component:** self-hosted CoreLexer (`src/compiler/10.frontend/core/lexer_struct.spl`); first seen as native output. Observed on the integ25 Stage 2 compiler
 (`pinned-c1a10190b978`, stage2-admitted sha256 `ef46f0d2ab4274c4`); not re-checked on current source.
 
@@ -95,3 +95,18 @@ the follow-up commit:
   doubled now. `virtual_summary_protocol.spl:42,64,77` are correct in both:
   the final `}` after a hole stays its own segment in MIR
   `split_interpolation_segments`.
+
+## W4-1 Follow-up & Verification (2026-11-27, work/w4-1-compiler-lexer-mir-20261127)
+
+- **Seed parity gap closed (`la_is_quote`):** In `CoreLexer.scan_string` (`src/compiler/10.frontend/core/lexer_struct.spl:1147`), `la_literal_brace` handled `{` followed by `{` or `\`, leaving `{` followed by `"` or `'` (`la_is_quote`) unescaped. Thus `"{'a'} {42}"` and `"{'a'}\n"` interpolated `'a'` as a character/string hole instead of matching the Rust seed (`src/compiler_rust/parser/src/lexer/strings.rs:330,339`), which emits literal `{'a'}`. Adding `or la_is_quote` to `la_literal_brace` (gated on `not self.cur_no_interp`) restores seed parity for `{"..."}` / `{'...'}` literals while keeping single-quoted (`cur_no_interp`) strings untouched.
+- **Note on duplicate reference:** `native_string_backslash_brace_escape_kept_2026-11-26` is not present in `doc/08_tracking/bug/` on `origin/release/1.0.0`.
+- **Sequential Windows interpreter verification (seed `simple.exe --mode=interpreter`):**
+  - `test/01_unit/compiler/lexer/lexer_brace_escape_literal_value_spec.spl`: `12 total, 12 passed, 0 failed` (`outcome=OK`), covering backslash escapes after `{`, `\t`/`\x41`/`\u0042`/`\"`, doubled braces, `\{`/`\}`, single-quoted negative control, `{` + quote seed parity, and end-to-end `core_interpret` execution.
+  - `test/01_unit/compiler/frontend/string_interp_brace_escape_spec.spl`: `6 total, 6 passed, 0 failed` (`outcome=OK`).
+  - `test/01_unit/compiler/frontend/interp_brace_literal_collision_spec.spl`: `11 total, 11 passed, 0 failed` (`outcome=OK`).
+  - `test/01_unit/compiler/lexer/lexer_spec.spl`: `4 total, 4 passed, 0 failed` (`outcome=OK`).
+  - `test/01_unit/compiler/lexer/lexer_comprehensive_spec.spl`: `3 total, 3 passed, 0 failed` (`outcome=OK`).
+  - `test/01_unit/lib/editor/services/lsp_transport_json_builders_spec.spl`: `2 total, 2 passed, 0 failed` (`outcome=OK`).
+  - `test/01_unit/compiler/lexer/fstring_brace_concat_spec.spl`: `2 total, 2 passed, 0 failed` (`outcome=OK`).
+  - `test/01_unit/compiler/lexer/string_escaped_backslash_spec.spl`: `5 total, 5 passed, 0 failed` (`outcome=OK`).
+- **Remaining verification (`waiting-for:`):** Native Stage-2 compiler rebuild from current source + native execution of `src/app/test/brace_escape_probe.spl` confirming `LEN=15` (and PTX native load where applicable).
