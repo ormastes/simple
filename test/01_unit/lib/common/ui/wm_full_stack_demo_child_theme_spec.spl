@@ -1,0 +1,87 @@
+# @cover examples/06_io/ui/wm_full_stack_demo.spl 40%
+use std.spec.*
+use app.io.mod.{file_read}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.layout.{compute_layout, find_rect}
+use common.ui.pixel_surface_content_frame.{pixel_surface_content_frame}
+use common.ui.wm_chrome_theme.{
+    active_wm_theme_id,
+    apply_theme_render_snapshot_to_wm_chrome,
+    reset_wm_chrome_theme
+}
+use common.ui.wm_full_stack_demo.{
+    WM_FULL_STACK_DEMO_APP_ID,
+    wm_full_stack_demo_tree
+}
+use common.window_protocol.geometry.{Size}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.compositor.simple_web_window_renderer.{simple_web_child_content_frame_cached}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache}
+
+fn _resolved_child_theme_id() -> text:
+    val active = active_wm_theme_id()
+    if active != "":
+        return active
+    default_theme_id()
+
+describe "wm_full_stack_demo child frame theme resolution":
+    it "resolves active WM theme for demo-2d and demo-web child frames when installed":
+        reset_wm_chrome_theme()
+        expect(_resolved_child_theme_id()).to_equal(default_theme_id())
+
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        expect(_resolved_child_theme_id()).to_equal(snapshot.id)
+        expect(snapshot.id == default_theme_id()).to_be(false)
+
+        val tree = wm_full_stack_demo_tree("Ready", "Play sound", "")
+        var compositor = HostCompositor.new_headless(Size.wh(640, 600))
+        compositor.apply_bridge_request(
+            1, 10, COMP_CREATE_WINDOW.to_i64(), 0,
+            "Full Stack WM Demo", 20, 20, 488, 516, "",
+            99, WM_FULL_STACK_DEMO_APP_ID
+        )
+        val rects = compute_layout(tree.root_node(), 0, 0, 480, 480)
+        val child_theme_id = _resolved_child_theme_id()
+        if val rect_2d = find_rect(rects, "demo-surface-2d"):
+            val pixels = [0xff15304au32; rect_2d.w * rect_2d.h]
+            val frame_2d = pixel_surface_content_frame(
+                "demo-2d", "1", rect_2d.x, rect_2d.y,
+                rect_2d.w, rect_2d.h, pixels, 1, 1, child_theme_id
+            )
+            expect(compositor.set_external_child_frame(frame_2d)).to_be(true)
+        else:
+            expect(false).to_be(true)
+
+        if val rect_web = find_rect(rects, "demo-surface-web"):
+            var cache = web_render_pixel_artifact_cache(
+                rect_web.w, rect_web.h, "software"
+            )
+            val web_frame = simple_web_child_content_frame_cached(
+                cache, "demo-web", "1", rect_web.x, rect_web.y,
+                1, 1, child_theme_id, "Embedded Web",
+                "<p>Simple Web panel</p>", rect_web.w, rect_web.h, 0
+            )
+            expect(compositor.set_external_child_frame(web_frame)).to_be(true)
+        else:
+            expect(false).to_be(true)
+
+        expect(compositor.external_child_frames.len()).to_equal(2)
+        expect(compositor.external_child_frames[0].theme_id).to_equal(snapshot.id)
+        expect(compositor.external_child_frames[1].theme_id).to_equal(snapshot.id)
+
+        reset_wm_chrome_theme()
+        expect(_resolved_child_theme_id()).to_equal(default_theme_id())
+
+    it "stops hardcoding default_theme_id() on child frames in demo and system spec sources":
+        val demo_src = file_read("examples/06_io/ui/wm_full_stack_demo.spl")
+        expect(demo_src).to_contain("active_wm_theme_id()")
+        expect(demo_src).to_contain("_resolved_child_theme_id()")
+        expect(demo_src.contains("default_theme_id(), \"Embedded Web\"")).to_be(false)
+
+        val spec_src = file_read("test/03_system/wm/wm_full_stack_demo_spec.spl")
+        expect(spec_src).to_contain("active_wm_theme_id()")
+        expect(spec_src).to_contain("_resolved_child_theme_id()")
+        expect(spec_src.contains("default_theme_id(), \"Embedded Web\"")).to_be(false)
