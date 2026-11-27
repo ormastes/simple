@@ -28,9 +28,25 @@ pub struct MachineFreshWorkloadRecordV2:
     helper_memory_bytes: i64
     remaining_cpu_millis: i64
     remaining_memory_bytes: i64
+    # Audit: the installed-profile admission this workload used. Defaults mean
+    # the first profile (no build roots, no TTY) and keep historical bytes.
+    admitted_build_root_prefix: text = ""
+    admitted_terminal_mode: text = "none"
 
+# Default projection: the first profile only. Build roots and a TTY are refused.
 pub fn machine_fresh_workload_request_v2(scope: ContainerHostScopeV2,
         request: ContainerExecutionRequestV2) -> Result<LinuxOciRequestV1, text>:
+    machine_fresh_workload_request_admitted_v2(scope, request, linux_fresh_workload_admission_refused_v2())
+
+# The record's own retained admission; never wider than what it was reserved with.
+pub fn machine_fresh_workload_record_request_v2(record: MachineFreshWorkloadRecordV2) -> Result<LinuxOciRequestV1, text>:
+    machine_fresh_workload_request_admitted_v2(record.scope, record.request, LinuxFreshWorkloadAdmissionV2(
+        build_root_prefix: record.admitted_build_root_prefix, terminal_mode: record.admitted_terminal_mode))
+
+# Explicit-admission projection. `admission` is DATA from the installed
+# fresh-epoch profile; the installed owner re-derives it before every launch.
+pub fn machine_fresh_workload_request_admitted_v2(scope: ContainerHostScopeV2,
+        request: ContainerExecutionRequestV2, admission: LinuxFreshWorkloadAdmissionV2) -> Result<LinuxOciRequestV1, text>:
     if request.request_bytes.byte_len() > 65536: return Err("machine-fresh-workload-request-bound")
     val plan = request.plan
     val encoded = container_execution_request_encode_v2(request)?
@@ -44,14 +60,21 @@ pub fn machine_fresh_workload_request_v2(scope: ContainerHostScopeV2,
             linux_oci_request_digest_v1(decoded)? != plan.request_digest or decoded.pod_uid != plan.workload_uid or
             decoded.attempt != plan.attempt or decoded.operation_id != plan.operation_id):
         return Err("machine-fresh-workload-request-binding")
-    # Finite first profile: explicit command, no host objects, selected users,
-    # terminal or environment. These are deliberate unsupported requests.
-    if (decoded.mounts.len() != 0 or decoded.bundle_path != "" or decoded.build_input_root != "" or
-            decoded.build_output_root != "" or decoded.environment.len() != 0 or decoded.working_directory != "" or
-            decoded.terminal_mode != "none" or linux_oci_user_selection_v3(decoded) or
+    # Finite first profile: explicit command, no generic mounts, selected users
+    # or environment. These are deliberate unsupported requests.
+    if (decoded.mounts.len() != 0 or decoded.bundle_path != "" or decoded.environment.len() != 0 or
+            decoded.working_directory != "" or linux_oci_user_selection_v3(decoded) or
             not decoded.replace_entrypoint or decoded.command.len() < 1 or decoded.command.len() > 32 or
             decoded.args.len() > 32 or decoded.network_policy != "none" or decoded.filesystem_policy != "read-only"):
         return Err("machine-fresh-workload-profile-unsupported")
+    # Build roots and a workload TTY exist only under the installed admission.
+    # A feature the profile does not admit keeps the historical reason.
+    match linux_fresh_workload_features_v2(admission, decoded.build_input_root, decoded.build_output_root, decoded.terminal_mode):
+        case Ok(_): pass
+        case Err(reason):
+            if reason == "fresh-workload-build-root-not-admitted" or reason == "fresh-workload-terminal-not-admitted":
+                return Err("machine-fresh-workload-profile-unsupported")
+            return Err(reason)
     if (decoded.cpu_limit_millis < 1 or decoded.cpu_limit_millis > 64000 or decoded.memory_limit_bytes < 1 or
             decoded.memory_limit_bytes > 1125899906842624 or decoded.pid_limit < 1 or decoded.pid_limit > 4096 or
             decoded.timeout_ms < 1 or decoded.timeout_ms > 30000):
@@ -67,8 +90,18 @@ pub fn machine_fresh_workload_request_v2(scope: ContainerHostScopeV2,
 pub fn machine_fresh_workload_record_v2(epoch: MachineFreshEpochRecordV1, initial: text,
         scope: ContainerHostScopeV2, request: ContainerExecutionRequestV2, principal_id: text,
         principal_digest: text, helper_cpu: i64, helper_memory: i64) -> Result<MachineFreshWorkloadRecordV2, text>:
+    machine_fresh_workload_record_admitted_v2(epoch, initial, scope, request, principal_id, principal_digest,
+        helper_cpu, helper_memory, linux_fresh_workload_admission_refused_v2())
+
+# @allow(primitive_api) reason: helper_cpu/helper_memory are the same millis/bytes budget counts as machine_fresh_workload_record_v2, which this extends
+pub fn machine_fresh_workload_record_admitted_v2(epoch: MachineFreshEpochRecordV1, initial: text,
+        scope: ContainerHostScopeV2, request: ContainerExecutionRequestV2, principal_id: text,
+        principal_digest: text, helper_cpu: i64, helper_memory: i64,
+        admission: LinuxFreshWorkloadAdmissionV2) -> Result<MachineFreshWorkloadRecordV2, text>:
     val checked = machine_fresh_epoch_record_validate_v1(epoch)?
-    val decoded = machine_fresh_workload_request_v2(scope, request)?
+    val decoded = machine_fresh_workload_request_admitted_v2(scope, request, admission)?
+    val used = linux_fresh_workload_used_admission_v2(admission, decoded.build_input_root, decoded.build_output_root,
+        decoded.terminal_mode)?
     if (not builder_digest_valid_v1(initial) or not builder_digest_valid_v1(principal_digest) or
             principal_id != epoch.principal_id or scope.physical_host_id != epoch.physical_host_id or
             scope.native_machine_id != epoch.native_machine_id or scope.provider_generation <= 0 or
@@ -84,7 +117,8 @@ pub fn machine_fresh_workload_record_v2(epoch: MachineFreshEpochRecordV1, initia
         cpu_millis: decoded.cpu_limit_millis, memory_bytes: decoded.memory_limit_bytes,
         helper_cpu_millis: helper_cpu, helper_memory_bytes: helper_memory,
         remaining_cpu_millis: epoch.usable_cpu_millis - helper_cpu - decoded.cpu_limit_millis,
-        remaining_memory_bytes: epoch.usable_memory_bytes - helper_memory - decoded.memory_limit_bytes))
+        remaining_memory_bytes: epoch.usable_memory_bytes - helper_memory - decoded.memory_limit_bytes,
+        admitted_build_root_prefix: used.build_root_prefix, admitted_terminal_mode: used.terminal_mode))
 
 pub fn machine_fresh_workload_record_validate_v2(record: MachineFreshWorkloadRecordV2) -> Result<(), text>:
     if (not builder_digest_valid_v1(record.epoch_digest) or not builder_digest_valid_v1(record.initial_commit) or
@@ -97,9 +131,13 @@ pub fn machine_fresh_workload_record_validate_v2(record: MachineFreshWorkloadRec
     if (record.cpu_millis + record.helper_cpu_millis > 64000 - record.remaining_cpu_millis or
             record.memory_bytes + record.helper_memory_bytes > 1125899906842624 - record.remaining_memory_bytes):
         return Err("machine-fresh-workload-record-overflow")
-    val request = machine_fresh_workload_request_v2(record.scope, record.request)?
+    val request = machine_fresh_workload_record_request_v2(record)?
     if request.cpu_limit_millis != record.cpu_millis or request.memory_limit_bytes != record.memory_bytes:
         return Err("machine-fresh-workload-record-request-budget")
+    # The audit fields are exactly the admission the request used, never wider.
+    if ((record.admitted_build_root_prefix != "") != (request.build_input_root != "") or
+            record.admitted_terminal_mode != request.terminal_mode):
+        return Err("machine-fresh-workload-record-admission")
     Ok(())
 
 pub fn machine_fresh_workload_bytes_v2(record: MachineFreshWorkloadRecordV2) -> Result<text, text>:
@@ -112,7 +150,13 @@ pub fn machine_fresh_workload_bytes_v2(record: MachineFreshWorkloadRecordV2) -> 
         "cpuMillis": SdnValue.Int(record.cpu_millis), "memoryBytes": SdnValue.Int(record.memory_bytes),
         "helperCpuMillis": SdnValue.Int(record.helper_cpu_millis), "helperMemoryBytes": SdnValue.Int(record.helper_memory_bytes),
         "remainingCpuMillis": SdnValue.Int(record.remaining_cpu_millis), "remainingMemoryBytes": SdnValue.Int(record.remaining_memory_bytes)}
-    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+    # Explicit audit fields, present only when an installed admission was used,
+    # so every first-profile record keeps its historical bytes and identity.
+    var audited = fields
+    if record.admitted_build_root_prefix != "" or record.admitted_terminal_mode != "none":
+        audited["admittedBuildRootPrefix"] = SdnValue.String(record.admitted_build_root_prefix)
+        audited["admittedTerminalMode"] = SdnValue.String(record.admitted_terminal_mode)
+    Ok(sdn_encode_canonical(SdnValue.Dict(audited)))
 
 pub fn machine_fresh_workload_id_v2(record: MachineFreshWorkloadRecordV2) -> Result<text, text>:
     Ok(sha256_text(machine_fresh_workload_bytes_v2(record)?))
@@ -184,11 +228,12 @@ pub fn machine_fresh_workload_rows_equal_v2(actual: [WalEntry], expected: [WalEn
 
 pub fn machine_fresh_workload_command_v2(record: MachineFreshWorkloadRecordV2,
         action: LinuxFreshWorkloadActionV2, native_id: text, observed_image_id: text = "") -> Result<LinuxFreshWorkloadCommandV2, text>:
-    val decoded = machine_fresh_workload_request_v2(record.scope, record.request)?
+    val decoded = machine_fresh_workload_record_request_v2(record)?
     val command = LinuxFreshWorkloadCommandV2(request: record.request, scope: record.scope, action: action, native_id: native_id,
         image: decoded.image, entrypoint: decoded.command, args: decoded.args, cpu_millis: record.cpu_millis,
         memory_bytes: record.memory_bytes, pid_limit: decoded.pid_limit, timeout_ms: decoded.timeout_ms,
-        helper_cpu_millis: record.helper_cpu_millis, helper_memory_bytes: record.helper_memory_bytes, observed_image_id: observed_image_id)
+        helper_cpu_millis: record.helper_cpu_millis, helper_memory_bytes: record.helper_memory_bytes, observed_image_id: observed_image_id,
+        build_input_root: decoded.build_input_root, build_output_root: decoded.build_output_root, terminal_mode: decoded.terminal_mode)
     val valid = linux_fresh_workload_command_validate_v2(command)?
     Ok(command)
 

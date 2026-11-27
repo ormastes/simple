@@ -90,7 +90,14 @@ pub fn linux_fresh_epoch_provider_matches_v1(profile: LinuxFreshEpochProfileV1, 
 
 pub fn linux_fresh_epoch_profile_validate_v1(profile: LinuxFreshEpochProfileV1) -> Result<(), text>:
     val keys = epoch_profile_keys_v1()
-    if profile.fields.len() != keys.len(): return Err("fresh-epoch-profile-fields")
+    # Optional installed workload admission: both keys or neither. A profile
+    # without them is the historical 34-key form and admits nothing.
+    val admission = (profile.fields.contains_key("workloadBuildRootPrefix") or
+        profile.fields.contains_key("workloadTerminalMode"))
+    if admission:
+        if (profile.fields.len() != keys.len() + 2 or not profile.fields.contains_key("workloadBuildRootPrefix") or
+                not profile.fields.contains_key("workloadTerminalMode")): return Err("fresh-epoch-profile-fields")
+    elif profile.fields.len() != keys.len(): return Err("fresh-epoch-profile-fields")
     for key in keys:
         if not profile.fields.contains_key(key): return Err("fresh-epoch-profile-fields")
     if profile.text_v1("kind")? != "linux-fresh-provider-epoch" or profile.number_v1("version")? != 1:
@@ -149,7 +156,40 @@ pub fn linux_fresh_epoch_profile_validate_v1(profile: LinuxFreshEpochProfileV1) 
             reserved_cpu < 1 or reserved_cpu >= cpu or reserved_memory < 1 or reserved_memory >= memory or
             outside_cpu < 1 or outside_cpu > 64000 or outside_memory < 1 or outside_memory > 1125899906842624):
         return Err("fresh-epoch-profile-capacity")
+    if admission:
+        val terminal = linux_fresh_epoch_workload_terminal_mode_v1(profile)?
+        val prefix = linux_fresh_epoch_workload_build_root_prefix_v1(profile)?
+        if prefix != "":
+            for protected in ["/etc", "/proc", "/sys", "/dev", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/root",
+                    "/var/lib/simple/container", graph, run, profile.text_v1("providerExecutable")?, profile.text_v1("brokerExecutable")?]:
+                if linux_fresh_epoch_overlap_v1(prefix, protected): return Err("fresh-epoch-profile-workload-build-root-protected")
     Ok(())
+
+# One admitted host build-root path: canonical absolute, [A-Za-z0-9._-] components
+# only, so it can never carry a `--mount` option separator (`,` `=` `:`) or a space.
+# @allow(primitive_api) validity predicate over one host path; bool is the predicate result
+pub fn linux_fresh_epoch_build_root_path_v1(path: text) -> bool:
+    if not linux_fresh_epoch_path_v1(path) or path.byte_len() > 1024: return false
+    for at in 0..path.byte_len():
+        val byte = path.byte_at(at) as i64
+        if (not ((byte >= 97 and byte <= 122) or (byte >= 65 and byte <= 90) or (byte >= 48 and byte <= 57) or
+                byte == 45 or byte == 46 or byte == 47 or byte == 95)): return false
+    true
+
+# Installed admission DATA. Absent key = refused. The prefix needs at least two
+# components so a whole top-level tree is never admitted by one short value.
+pub fn linux_fresh_epoch_workload_build_root_prefix_v1(profile: LinuxFreshEpochProfileV1) -> Result<text, text>:
+    if not profile.fields.contains_key("workloadBuildRootPrefix"): return Ok("")
+    val prefix = profile.text_v1("workloadBuildRootPrefix")?
+    if prefix != "" and (not linux_fresh_epoch_build_root_path_v1(prefix) or prefix.split("/").len() < 3):
+        return Err("fresh-epoch-profile-workload-build-root-prefix")
+    Ok(prefix)
+
+pub fn linux_fresh_epoch_workload_terminal_mode_v1(profile: LinuxFreshEpochProfileV1) -> Result<text, text>:
+    if not profile.fields.contains_key("workloadTerminalMode"): return Ok("none")
+    val mode = profile.text_v1("workloadTerminalMode")?
+    if mode != "none" and mode != "tty": return Err("fresh-epoch-profile-workload-terminal-mode")
+    Ok(mode)
 
 pub fn linux_fresh_epoch_profile_decode_v1(source: text) -> Result<LinuxFreshEpochProfileV1, text>:
     val document = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 16384,

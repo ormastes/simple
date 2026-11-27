@@ -1,0 +1,304 @@
+# @platform: linux
+# Pure DATA checks for the fresh route's installed workspace/TTY admission:
+# profile keys -> admission -> request projection -> record audit fields ->
+# command -> argv -> created-config correspondence. No native effect.
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.{MachineFreshEpochRecordV1}
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workload_inspect_v2.*
+use std.common.contracts.container.linux_fresh_epoch_v1.*
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.linux_fresh_workload_argv_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.json.value.*
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn admission_profile_fields_v2() -> Dict<text, SdnValue>:
+    {"kind": SdnValue.String("linux-fresh-provider-epoch"), "version": SdnValue.Int(1),
+        "epochId": SdnValue.String("installed_epoch_1"), "machinePolicyDigest": SdnValue.String("a".repeat(64)),
+        "serviceName": SdnValue.String("simple-host"), "serviceUid": SdnValue.Int(20001), "serviceGid": SdnValue.Int(20001),
+        "subuidStart": SdnValue.Int(200000), "subuidCount": SdnValue.Int(65536),
+        "subgidStart": SdnValue.Int(200000), "subgidCount": SdnValue.Int(65536),
+        "hostUnit": SdnValue.String("simple-host.service"), "providerUnit": SdnValue.String("simple-podman.service"),
+        "providerSocketUnit": SdnValue.String("simple-podman.socket"),
+        "partitionCgroup": SdnValue.String("/simple.slice"), "delegatedCgroup": SdnValue.String("/simple.slice/epoch"),
+        "supervisorCgroup": SdnValue.String("/simple.slice/epoch/supervisor"),
+        "partitionCpuMillis": SdnValue.Int(6000), "partitionMemoryBytes": SdnValue.Int(6442450944),
+        "reservedCpuMillis": SdnValue.Int(1000), "reservedMemoryBytes": SdnValue.Int(1073741824),
+        "outsideCpuMillis": SdnValue.Int(1000), "outsideMemoryBytes": SdnValue.Int(1073741824),
+        "providerExecutable": SdnValue.String("/usr/bin/podman"), "providerExecutableSha256": SdnValue.String("b".repeat(64)),
+        "providerPolicyDigest": SdnValue.String("c".repeat(64)),
+        "graphRoot": SdnValue.String("/var/lib/simple-host/podman/graph"), "runRoot": SdnValue.String("/run/simple-host/podman"),
+        "staticRoot": SdnValue.String("/var/lib/simple-host/podman/graph/libpod"),
+        "endpointPath": SdnValue.String("/run/simple-host/podman/podman.sock"),
+        "storageDriver": SdnValue.String("vfs"), "cgroupManager": SdnValue.String("cgroupfs"),
+        "brokerExecutable": SdnValue.String("/opt/simple/bin/simple"), "brokerExecutableSha256": SdnValue.String("d".repeat(64))}
+
+fn admission_profile_v2(prefix: text, terminal: text) -> LinuxFreshEpochProfileV1:
+    var fields = admission_profile_fields_v2()
+    fields["workloadBuildRootPrefix"] = SdnValue.String(prefix)
+    fields["workloadTerminalMode"] = SdnValue.String(terminal)
+    LinuxFreshEpochProfileV1(fields: fields)
+
+fn admission_epoch_v2() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192,
+        observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512,
+        outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+fn admission_scope_v2() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "service_1",
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+
+fn admission_leaf_v2(input: text, output: text, terminal: text) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/sh", "-c", "true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1024,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only",
+        build_input_root: input, build_output_root: output, replace_entrypoint: true, terminal_mode: terminal)
+
+fn admission_request_v2(native: LinuxOciRequestV1) -> ContainerExecutionRequestV2:
+    val scope = admission_scope_v2()
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    ContainerExecutionRequestV2(plan: plan, request_bytes: linux_oci_retained_request_encode_v1(native).unwrap())
+
+fn admission_record_v2(native: LinuxOciRequestV1, admission: LinuxFreshWorkloadAdmissionV2) -> Result<MachineFreshWorkloadRecordV2, text>:
+    machine_fresh_workload_record_admitted_v2(admission_epoch_v2(), "9".repeat(64), admission_scope_v2(),
+        admission_request_v2(native), "linux:uid:20001", "8".repeat(64), 500, 512, admission)
+
+fn admission_mount_v2(source: text, destination: text, writable: bool) -> JsonValue:
+    json_value_object_from([("Type", JsonValue.Str("bind")), ("Source", JsonValue.Str(source)),
+        ("Destination", JsonValue.Str(destination)), ("Driver", JsonValue.Str("")), ("Mode", JsonValue.Str("")),
+        ("Options", json_value_str_array(["nosuid", "nodev", "rbind"])), ("RW", JsonValue.Bool(writable)),
+        ("Propagation", JsonValue.Str("rprivate"))])
+
+fn admission_created_v2(command: LinuxFreshWorkloadCommandV2) -> JsonValue:
+    var value = JsonValue.Object([], [])
+    for key in linux_fresh_workload_inspect_field_names_v2(): value = json_value_object_set(value, key, JsonValue.Null)
+    val p = command.request.plan
+    for pair in [("id", command.native_id), ("pod_uid", p.workload_uid), ("attempt", str(p.attempt)),
+            ("node_boot_id", container_scope_fence_id_v2(command.scope).unwrap()), ("provider_generation", str(command.scope.provider_generation)),
+            ("operation_id", p.operation_id), ("cgroup", ""), ("status", "created"), ("runtime", "crun"), ("manager", "cgroupfs"),
+            ("cgroup_mode", "private"), ("pid_mode", "private"), ("cgroups", "default"), ("network_mode", "none"),
+            ("image_digest", "sha256:" + "2".repeat(64)), ("image_name", command.image), ("path", "/bin/sh"),
+            ("workdir", "/"), ("cgroup_parent", "/simple.slice/epoch"), ("configured_user", "")]:
+        value = json_value_object_set(value, pair.0, JsonValue.Str(pair.1))
+    for pair in [("pid", 0), ("effective_caps", 0), ("bounding_caps", 0), ("cpu_period", 100000),
+            ("cpu_quota", 100000), ("memory_bytes", 1024), ("memory_swap", 1024), ("pids_limit", 64)]:
+        value = json_value_object_set(value, pair.0, JsonValue.Int(pair.1))
+    value = json_value_object_set(value, "privileged", JsonValue.Bool(false))
+    value = json_value_object_set(value, "readonly_rootfs", JsonValue.Bool(true))
+    value = json_value_object_set(value, "no_new_privileges", JsonValue.Bool(true))
+    value = json_value_object_set(value, "args", json_value_str_array(["-c", "true"]))
+    value = json_value_object_set(value, "environment", json_value_str_array(["PATH=/usr/bin"]))
+    value = json_value_object_set(value, "security_options", json_value_str_array(["no-new-privileges"]))
+    value = json_value_object_set(value, "create_command", json_value_str_array(["/usr/bin/podman", "create"]))
+    value
+
+describe "fresh route workspace and TTY admission (installed profile gated)":
+    it "refuses both features for a profile without the admission keys":
+        step("A historical 34-key profile still validates and admits nothing")
+        val plain = LinuxFreshEpochProfileV1(fields: admission_profile_fields_v2())
+        expect(linux_fresh_epoch_profile_validate_v1(plain).is_ok()).to_equal(true)
+        val admission = linux_fresh_workload_admission_v2(plain).unwrap()
+        expect(admission.build_root_prefix).to_equal("")
+        expect(admission.terminal_mode).to_equal("none")
+        expect(linux_fresh_workload_features_v2(admission, "", "", "none").is_ok()).to_equal(true)
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/run/input", "/var/tmp/run/output", "none").unwrap_err()).to_equal("fresh-workload-build-root-not-admitted")
+        expect(linux_fresh_workload_features_v2(admission, "", "", "tty").unwrap_err()).to_equal("fresh-workload-terminal-not-admitted")
+        val refused = linux_fresh_workload_admission_refused_v2()
+        expect(refused.build_root_prefix).to_equal("")
+        expect(refused.terminal_mode).to_equal("none")
+
+    it "admits only what the installed profile names and validates the admitted prefix":
+        step("An explicit empty prefix and none mode is a valid refusal")
+        val closed = admission_profile_v2("", "none")
+        expect(linux_fresh_epoch_profile_validate_v1(closed).is_ok()).to_equal(true)
+        expect(linux_fresh_workload_admission_v2(closed).unwrap().build_root_prefix).to_equal("")
+        step("An admitting profile yields the exact prefix and mode")
+        val open = admission_profile_v2("/var/tmp/simple-live", "tty")
+        expect(linux_fresh_epoch_profile_validate_v1(open).is_ok()).to_equal(true)
+        val admission = linux_fresh_workload_admission_v2(open).unwrap()
+        expect(admission.build_root_prefix).to_equal("/var/tmp/simple-live")
+        expect(admission.terminal_mode).to_equal("tty")
+        step("The installed decoder (strict parse + canonical bytes) accepts the 36-key form and the 34-key form")
+        val open_source = sdn_encode_canonical(SdnValue.Dict(open.fields)) + "\n"
+        val decoded = linux_fresh_epoch_profile_decode_v1(open_source).unwrap()
+        expect(linux_fresh_workload_admission_v2(decoded).unwrap().build_root_prefix).to_equal("/var/tmp/simple-live")
+        expect(linux_fresh_workload_admission_v2(decoded).unwrap().terminal_mode).to_equal("tty")
+        val plain_source = sdn_encode_canonical(SdnValue.Dict(admission_profile_fields_v2())) + "\n"
+        expect(linux_fresh_workload_admission_v2(linux_fresh_epoch_profile_decode_v1(plain_source).unwrap()).unwrap().terminal_mode).to_equal("none")
+        var lone = admission_profile_fields_v2()
+        lone["workloadBuildRootPrefix"] = SdnValue.String("/var/tmp/simple-live")
+        expect(linux_fresh_epoch_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(lone)) + "\n").unwrap_err()).to_equal("fresh-epoch-profile-fields")
+        expect(linux_fresh_epoch_profile_decode_v1(sdn_encode_canonical(SdnValue.Dict(admission_profile_v2("/etc/simple", "tty").fields)) + "\n").unwrap_err()).to_equal("fresh-epoch-profile-workload-build-root-protected")
+        step("One key alone, a stdin mode, protected or option-bearing prefixes are refused")
+        var single = admission_profile_fields_v2()
+        single["workloadTerminalMode"] = SdnValue.String("tty")
+        expect(linux_fresh_epoch_profile_validate_v1(LinuxFreshEpochProfileV1(fields: single)).is_err()).to_equal(true)
+        expect(linux_fresh_epoch_profile_validate_v1(admission_profile_v2("/var/tmp/simple-live", "stdin")).is_err()).to_equal(true)
+        for prefix in ["/", "/tmp", "/etc/simple", "/proc/1", "/sys/fs", "/dev/shm", "/usr/local", "/root/work",
+                "/var/lib/simple/container/x", "/var/lib/simple-host/podman/graph/x", "/run/simple-host/podman/x",
+                "/var/tmp/a,ro", "/var/tmp/a=b", "/var/tmp/a:b", "/var/tmp/../etc", "/var/tmp/a b", "relative/root"]:
+            expect(linux_fresh_epoch_profile_validate_v1(admission_profile_v2(prefix, "none")).is_err()).to_equal(true)
+
+    it "admits build roots only as a complete disjoint pair beneath the admitted prefix":
+        val admission = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "/var/tmp/simple-live", terminal_mode: "none")
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/simple-live/run/input", "/var/tmp/simple-live/run/output", "none").is_ok()).to_equal(true)
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/simple-live/run/input", "", "none").unwrap_err()).to_equal("fresh-workload-build-root-incomplete")
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/other/input", "/var/tmp/simple-live/run/output", "none").unwrap_err()).to_equal("fresh-workload-build-root-outside-admitted-prefix")
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/simple-live", "/var/tmp/simple-live/run/output", "none").unwrap_err()).to_equal("fresh-workload-build-root-outside-admitted-prefix")
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/simple-live-evil/input", "/var/tmp/simple-live/run/output", "none").unwrap_err()).to_equal("fresh-workload-build-root-outside-admitted-prefix")
+        expect(linux_fresh_workload_features_v2(admission, "/var/tmp/simple-live/run", "/var/tmp/simple-live/run/output", "none").unwrap_err()).to_equal("fresh-workload-build-root-overlap")
+        for shaped in ["/var/tmp/simple-live/a,ro", "/var/tmp/simple-live/../x", "/var/tmp/simple-live/a b", "/var/tmp/simple-live/a/"]:
+            expect(linux_fresh_workload_features_v2(admission, shaped, "/var/tmp/simple-live/run/output", "none").unwrap_err()).to_equal("fresh-workload-build-root-shape")
+        expect(linux_fresh_workload_features_v2(admission, "", "", "tty").unwrap_err()).to_equal("fresh-workload-terminal-not-admitted")
+        val terminal = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "", terminal_mode: "tty")
+        expect(linux_fresh_workload_features_v2(terminal, "", "", "tty").is_ok()).to_equal(true)
+        expect(linux_fresh_workload_features_v2(terminal, "", "", "stdin").unwrap_err()).to_equal("fresh-workload-terminal-not-admitted")
+
+    it "projects the request only under an explicit admission and keeps the default refusal":
+        val scope = admission_scope_v2()
+        val workspace = admission_request_v2(admission_leaf_v2("/var/tmp/simple-live/run/input", "/var/tmp/simple-live/run/output", "none"))
+        val terminal = admission_request_v2(admission_leaf_v2("", "", "tty"))
+        step("Default projection and a refusing admission keep the historical reason")
+        expect(machine_fresh_workload_request_v2(scope, workspace).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        expect(machine_fresh_workload_request_v2(scope, terminal).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        val refused = linux_fresh_workload_admission_refused_v2()
+        expect(machine_fresh_workload_request_admitted_v2(scope, workspace, refused).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        expect(machine_fresh_workload_request_admitted_v2(scope, terminal, refused).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        step("An admitting profile projects exactly the requested roots and mode")
+        val admission = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "/var/tmp/simple-live", terminal_mode: "tty")
+        val decoded = machine_fresh_workload_request_admitted_v2(scope, workspace, admission).unwrap()
+        expect(decoded.build_input_root).to_equal("/var/tmp/simple-live/run/input")
+        expect(decoded.build_output_root).to_equal("/var/tmp/simple-live/run/output")
+        expect(machine_fresh_workload_request_admitted_v2(scope, terminal, admission).unwrap().terminal_mode).to_equal("tty")
+        step("Admission of one feature never admits the other, stdin, or a root outside the prefix")
+        val only_terminal = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "", terminal_mode: "tty")
+        expect(machine_fresh_workload_request_admitted_v2(scope, workspace, only_terminal).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        val stdin = admission_request_v2(admission_leaf_v2("", "", "stdin"))
+        expect(machine_fresh_workload_request_admitted_v2(scope, stdin, admission).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        val outside = admission_request_v2(admission_leaf_v2("/srv/other/input", "/srv/other/output", "none"))
+        expect(machine_fresh_workload_request_admitted_v2(scope, outside, admission).unwrap_err()).to_equal("fresh-workload-build-root-outside-admitted-prefix")
+
+    it "records the used admission as audit fields and keeps plain records byte-stable":
+        val admission = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "/var/tmp/simple-live", terminal_mode: "tty")
+        step("A plain workload under an admitting profile records no admission and unchanged bytes")
+        val plain = admission_record_v2(admission_leaf_v2("", "", "none"), admission).unwrap()
+        val historical = machine_fresh_workload_record_v2(admission_epoch_v2(), "9".repeat(64), admission_scope_v2(),
+            admission_request_v2(admission_leaf_v2("", "", "none")), "linux:uid:20001", "8".repeat(64), 500, 512).unwrap()
+        expect(plain.admitted_build_root_prefix).to_equal("")
+        expect(plain.admitted_terminal_mode).to_equal("none")
+        expect(machine_fresh_workload_bytes_v2(plain).unwrap()).to_equal(machine_fresh_workload_bytes_v2(historical).unwrap())
+        expect(machine_fresh_workload_bytes_v2(plain).unwrap().contains("admitted")).to_equal(false)
+        step("A workspace TTY workload records exactly the admission it used")
+        val used = admission_record_v2(admission_leaf_v2("/var/tmp/simple-live/run/input", "/var/tmp/simple-live/run/output", "tty"), admission).unwrap()
+        expect(used.admitted_build_root_prefix).to_equal("/var/tmp/simple-live")
+        expect(used.admitted_terminal_mode).to_equal("tty")
+        val bytes = machine_fresh_workload_bytes_v2(used).unwrap()
+        expect(bytes.contains("admittedBuildRootPrefix")).to_equal(true)
+        expect(bytes.contains("admittedTerminalMode")).to_equal(true)
+        step("Default record construction refuses; a record whose audit fields were altered no longer validates")
+        expect(machine_fresh_workload_record_v2(admission_epoch_v2(), "9".repeat(64), admission_scope_v2(),
+            admission_request_v2(admission_leaf_v2("", "", "tty")), "linux:uid:20001", "8".repeat(64), 500, 512).unwrap_err()).to_equal("machine-fresh-workload-profile-unsupported")
+        var forged = used
+        forged.admitted_terminal_mode = "none"
+        expect(machine_fresh_workload_record_validate_v2(forged).is_err()).to_equal(true)
+        forged = used
+        forged.admitted_build_root_prefix = "/var/tmp/elsewhere"
+        expect(machine_fresh_workload_record_validate_v2(forged).is_err()).to_equal(true)
+        forged = plain
+        forged.admitted_terminal_mode = "tty"
+        expect(machine_fresh_workload_record_validate_v2(forged).is_err()).to_equal(true)
+
+    it "projects tty and two fixed binds into argv only when the installed profile admits them":
+        val admission = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "/var/tmp/simple-live", terminal_mode: "tty")
+        val record = admission_record_v2(admission_leaf_v2("/var/tmp/simple-live/run/input", "/var/tmp/simple-live/run/output", "tty"), admission).unwrap()
+        val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Create, "").unwrap()
+        expect(command.build_input_root).to_equal("/var/tmp/simple-live/run/input")
+        expect(command.build_output_root).to_equal("/var/tmp/simple-live/run/output")
+        expect(command.terminal_mode).to_equal("tty")
+        step("The admitting installed profile yields --tty and exactly two nosuid/nodev private binds")
+        val argv = linux_fresh_workload_argv_v2(admission_profile_v2("/var/tmp/simple-live", "tty"), command).unwrap()
+        expect(argv.contains("--tty")).to_equal(true)
+        expect(argv.contains("--interactive")).to_equal(false)
+        expect(argv.contains("type=bind,src=/var/tmp/simple-live/run/input,dst=/simple-build/inputs,ro,nosuid,nodev,bind-propagation=rprivate")).to_equal(true)
+        expect(argv.contains("type=bind,src=/var/tmp/simple-live/run/output,dst=/simple-build/outputs,rw,nosuid,nodev,bind-propagation=rprivate")).to_equal(true)
+        var mounts = 0
+        for item in argv:
+            if item == "--mount": mounts = mounts + 1
+        expect(mounts).to_equal(2)
+        expect(argv.contains("--read-only")).to_equal(true)
+        expect(argv.contains("--cap-drop=ALL")).to_equal(true)
+        expect(argv[argv.len() - 4]).to_equal("--")
+        step("The same command is refused by a profile that does not admit it")
+        expect(linux_fresh_workload_argv_v2(LinuxFreshEpochProfileV1(fields: admission_profile_fields_v2()), command).unwrap_err()).to_equal("fresh-workload-terminal-not-admitted")
+        expect(linux_fresh_workload_argv_v2(admission_profile_v2("", "tty"), command).unwrap_err()).to_equal("fresh-workload-build-root-not-admitted")
+        expect(linux_fresh_workload_argv_v2(admission_profile_v2("/var/tmp/simple-live", "none"), command).unwrap_err()).to_equal("fresh-workload-terminal-not-admitted")
+        for action in [LinuxFreshWorkloadActionV2.PullImage, LinuxFreshWorkloadActionV2.Start, LinuxFreshWorkloadActionV2.Inspect]:
+            var other = machine_fresh_workload_command_v2(record, action, if action == LinuxFreshWorkloadActionV2.PullImage: "" else: "3".repeat(64)).unwrap()
+            expect(linux_fresh_workload_argv_v2(admission_profile_v2("", "none"), other).is_err()).to_equal(true)
+        expect(linux_fresh_workload_argv_v2(admission_profile_v2("/var/tmp/elsewhere", "tty"), command).unwrap_err()).to_equal("fresh-workload-build-root-outside-admitted-prefix")
+        step("A command whose DTO roots or mode differ from the retained request is refused")
+        var drifted = command
+        drifted.build_input_root = "/var/tmp/simple-live/run/other"
+        expect(linux_fresh_workload_command_validate_v2(drifted).is_err()).to_equal(true)
+        drifted = command
+        drifted.terminal_mode = "none"
+        expect(linux_fresh_workload_command_validate_v2(drifted).is_err()).to_equal(true)
+        step("A plain command gains no mount or tty argument under an admitting profile")
+        val plain = machine_fresh_workload_command_v2(admission_record_v2(admission_leaf_v2("", "", "none"), admission).unwrap(),
+            LinuxFreshWorkloadActionV2.Create, "").unwrap()
+        val plain_argv = linux_fresh_workload_argv_v2(admission_profile_v2("/var/tmp/simple-live", "tty"), plain).unwrap()
+        expect(plain_argv.contains("--tty")).to_equal(false)
+        expect(plain_argv.contains("--mount")).to_equal(false)
+
+    it "requires the created container to carry exactly the two requested binds":
+        val admission = LinuxFreshWorkloadAdmissionV2(build_root_prefix: "/var/tmp/simple-live", terminal_mode: "none")
+        val record = admission_record_v2(admission_leaf_v2("/var/tmp/simple-live/run/input", "/var/tmp/simple-live/run/output", "none"), admission).unwrap()
+        val command = machine_fresh_workload_command_v2(record, LinuxFreshWorkloadActionV2.Inspect, "3".repeat(64)).unwrap()
+        val input = admission_mount_v2("/var/tmp/simple-live/run/input", "/simple-build/inputs", false)
+        val output = admission_mount_v2("/var/tmp/simple-live/run/output", "/simple-build/outputs", true)
+        val binds = json_value_str_array(["/var/tmp/simple-live/run/input:/simple-build/inputs:ro,rprivate,nosuid,nodev,rbind",
+            "/var/tmp/simple-live/run/output:/simple-build/outputs:rw,rprivate,nosuid,nodev,rbind"])
+        var created = json_value_object_set(admission_created_v2(command), "mounts", JsonValue.Array([output, input]))
+        created = json_value_object_set(created, "binds", binds)
+        expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(created)).is_ok()).to_equal(true)
+        step("Missing, extra, writable-input, read-only-output, foreign-source and suid mounts are refused")
+        val writable_input = admission_mount_v2("/var/tmp/simple-live/run/input", "/simple-build/inputs", true)
+        val readonly_output = admission_mount_v2("/var/tmp/simple-live/run/output", "/simple-build/outputs", false)
+        val foreign = admission_mount_v2("/etc", "/simple-build/inputs", false)
+        val extra = admission_mount_v2("/var/tmp/simple-live/run/extra", "/extra", false)
+        val suid = json_value_object_set(input, "Options", json_value_str_array(["nodev", "rbind"]))
+        for mounts in [[output], [output, input, extra], [output, writable_input], [readonly_output, input], [output, foreign],
+                [output, suid], [input, input]]:
+            val changed = json_value_object_set(created, "mounts", JsonValue.Array(mounts))
+            expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(changed)).is_err()).to_equal(true)
+        val no_binds = json_value_object_set(created, "binds", JsonValue.Null)
+        expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(no_binds)).is_err()).to_equal(true)
+        val foreign_bind = json_value_object_set(created, "binds", json_value_str_array([
+            "/etc:/simple-build/inputs:ro,rprivate,nosuid,nodev,rbind",
+            "/var/tmp/simple-live/run/output:/simple-build/outputs:rw,rprivate,nosuid,nodev,rbind"]))
+        expect(linux_fresh_workload_created_config_validate_v2(command, json_value_serialize(foreign_bind)).is_err()).to_equal(true)
+        step("A plain command still refuses any mount")
+        val plain_record = admission_record_v2(admission_leaf_v2("", "", "none"), admission).unwrap()
+        val plain = machine_fresh_workload_command_v2(plain_record, LinuxFreshWorkloadActionV2.Inspect, "3".repeat(64)).unwrap()
+        expect(linux_fresh_workload_created_config_validate_v2(plain, json_value_serialize(admission_created_v2(plain))).is_ok()).to_equal(true)
+        val unrequested = json_value_object_set(admission_created_v2(plain), "mounts", JsonValue.Array([input]))
+        expect(linux_fresh_workload_created_config_validate_v2(plain, json_value_serialize(unrequested)).unwrap_err()).to_equal("fresh-workload-unrequested-mount-configuration")

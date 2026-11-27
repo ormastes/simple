@@ -37,20 +37,32 @@
 # Run (inside the provisioned guest VM, as root, self-hosted binary):
 #   bin/simple test test/03_system/app/container/feature/podman_shared_api_live_spec.spl
 #
-# Known API gaps (named, not papered over; record: doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md). The installed fresh route's first
-# profile (`machine_fresh_workload_request_v2`) refuses build roots, mounts,
-# terminal modes, environment, cwd, non-`none` network and timeout > 30000 ms
-# with `machine-fresh-workload-profile-unsupported` / `-bounds`. Therefore:
-#   - the WORKSPACE case attempts the build bind (`build_input_root` ro at
-#     /simple-build/inputs, `build_output_root` rw at /simple-build/outputs) and
-#     is EXPECTED TO FAIL at prepare until a workspace is reachable through the
-#     shared API without an admin-signed manifest (today it needs
-#     `simple_container_open_lent_v4` + `simple_container_enable_workspace_v3`);
-#   - the TTY case attempts `terminal_mode: "tty"` and is EXPECTED TO FAIL the
-#     same way; a secondary exec with a TTY is refused by `engine_exec_codec_v3`
-#     (`tty` must be false) and `simple_container_exec_begin_v3` needs an issued
-#     `ContainerExecInstalledV3` + `ContainerExecAdmissionV3`, which this spec
-#     does not fabricate. "Exec" here is the workload's own process;
+# Workspace and TTY admission (fixed 2026-11-27; record:
+# doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md).
+# The fresh route still refuses build roots and terminal modes BY DEFAULT with
+# `machine-fresh-workload-profile-unsupported`. They are projected only when the
+# root-installed fresh-epoch profile admits them:
+#   workloadBuildRootPrefix: "<dir>"   both build roots must lie beneath it
+#   workloadTerminalMode: "tty"        a workload TTY (stdin stays closed)
+# So the WORKSPACE and TTY cases need a profile with both keys and
+# SIMPLE_PODMAN_LIVE_WORK_ROOT beneath the admitted prefix (the guest wrapper
+# provisions /var/lib/simple-host/live-work for both). Mounts, environment, cwd,
+# a selected user, `stdin` mode, non-`none` network and timeout > 30000 ms stay
+# refused under every profile.
+#
+# Known API gaps (named, not papered over):
+#   - OPEN, blocks every `live_run_v1` case: the fresh route has no `wait` or
+#     `logs` read (`LinuxFreshWorkloadOwnerV2.read_v2` answers only `inspect`
+#     and `configuration`, reason
+#     `linux-fresh-workload-read-action-unsupported:wait`). Record:
+#     doc/08_tracking/bug/container_fresh_route_wait_logs_unsupported_2026-11-27.md.
+#     The workspace, limits, exec/exit-code, TTY and cleanup cases stay real
+#     failures at `wait` until that lands; they are not skipped or pending;
+#   - a secondary exec with a TTY is admitted by `engine_exec_codec_v3` only
+#     under an installed policy with `execTerminalMode: tty`, and
+#     `simple_container_exec_begin_v3` needs an issued `ContainerExecInstalledV3`
+#     + `ContainerExecAdmissionV3`, which this spec does not fabricate. "Exec"
+#     here is the workload's own process;
 #   - the fresh adapter never calls `adapter.provider`, so "no podman effect" in
 #     the refusal case is proven by the independent label query, not a counter;
 #   - on the Rust seed `linux_machine_policy_open_v1()` fails with
@@ -303,7 +315,8 @@ describe "Linux Podman route through the shared Simple Container API (live)":
         val leftover = live_finish_v1()
         if leftover != "": print "LIVE after_each cleanup diagnostic: " + leftover
 
-    # known gap: doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md (fresh route refuses build roots; stays a real failure)
+    # needs the installed profile key workloadBuildRootPrefix (refused by default).
+    # known gap: doc/08_tracking/bug/container_fresh_route_wait_logs_unsupported_2026-11-27.md (fresh route has no wait/logs read; stays a real failure)
     it "binds the workspace into the container and enforces its read-only half":
         val blocked = live_gate_v1()
         if blocked != "":
@@ -374,7 +387,8 @@ describe "Linux Podman route through the shared Simple Container API (live)":
         expect(observed.0).to_equal(7)
         expect(observed.1.trim()).to_equal("exec-" + uid)
 
-    # known gap: doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md (fresh route refuses terminal modes; stays a real failure)
+    # needs the installed profile key workloadTerminalMode: "tty" (refused by default).
+    # known gap: doc/08_tracking/bug/container_fresh_route_wait_logs_unsupported_2026-11-27.md (fresh route has no wait/logs read; stays a real failure)
     it "allocates a TTY for the workload only when tty mode is requested":
         val blocked = live_gate_v1()
         if blocked != "":
