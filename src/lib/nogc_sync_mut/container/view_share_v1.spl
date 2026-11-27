@@ -1,0 +1,228 @@
+"""Per-container storage view with a sealed, hard-linked base (Increment 4 part A2).
+
+One StorageViewV1 per container, owned here as a standalone module the pure
+Windows owner can call: create (view + lower/ of store-object links, sealed
+read-only), stop (save upper/ as a per-container root), remove (dematerialize,
+destroy, delete the view dir, prove no residue). The base is shared with the
+store by hard link, so a lower file and its store object are ONE file: the proof
+is the same file id plus a refused write through either name.
+
+Windows cannot seal through `file_seal_readonly` (the runtime chmod is a no-op),
+so the seal falls back to one `attrib +R` over lower/ and is then re-verified
+through `file_seal_readonly`'s mode read-back. The read-only attribute is a
+property of the file, so it covers the store object too. ReFS / Dev Drive block
+clone is NOT implemented: no clone primitive exists (follow-up in
+doc/03_plan/platform/container/simple_container_remaining_work.md section 1).
+"""
+
+use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1, ViewFlagV1,
+    storage_view_v1_create, storage_view_v1_save, storage_view_v1_destroy, storage_view_v1_base_entries}
+use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head,
+    immutable_store_v1_list_owner_pins}
+use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_seal_readonly, file_write_bytes,
+    file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+
+pub unit ShareCountV1: i64
+export ShareCountV1
+
+val _PIN_OWNER = "pure-container"
+val _MAX_OBJECT_BYTES: i64 = 268435456
+
+pub struct ContainerViewCreateV1:
+    status: text           # "ok" | "rejected"
+    reason: text
+    view: StorageViewV1    # a view naming the container even when rejected
+    linked: ShareCountV1
+    copied: ShareCountV1
+
+pub struct ContainerViewOpV1:
+    status: text           # "ok" | "rejected"
+    reason: text
+
+pub struct ContainerViewStopV1:
+    status: text           # "ok" | "rejected"
+    reason: text
+    generation: StoreGenerationV1
+
+pub struct ContainerViewShareProofV1:
+    status: text           # "ok" | "rejected" | "unavailable"
+    reason: text
+    entries: ShareCountV1
+    same_file_id: ShareCountV1
+    read_only: ShareCountV1
+    write_refused: ShareCountV1
+
+fn _op(status: text, reason: text) -> ContainerViewOpV1:
+    ContainerViewOpV1(status: status, reason: reason)
+
+fn _proof_failed(status: text, reason: text, entries: i64) -> ContainerViewShareProofV1:
+    ContainerViewShareProofV1(status: status, reason: reason, entries: ShareCountV1(entries),
+        same_file_id: ShareCountV1(0), read_only: ShareCountV1(0), write_refused: ShareCountV1(0))
+
+fn _no_view(store: text, view_root: text, container_id: text) -> StorageViewV1:
+    StorageViewV1(store: store, view_root: view_root, view_id: container_id, base_root: "",
+        base_generation: StoreGenerationV1(0), base_manifest_key: "", quota: ViewBytesV1(0), volumes: [])
+
+fn _rejected(view: StorageViewV1, reason: text) -> ContainerViewCreateV1:
+    ContainerViewCreateV1(status: "rejected", reason: reason, view: view,
+        linked: ShareCountV1(0), copied: ShareCountV1(0))
+
+fn _lower_dir(view: StorageViewV1) -> text:
+    view.view_root + "/" + view.view_id + "/lower"
+
+fn _view_dir(view: StorageViewV1) -> text:
+    view.view_root + "/" + view.view_id
+
+fn _object_path(store: text, key: text) -> text:
+    store + "/objects/" + key.substring(0, 2) + "/" + key + ".obj"
+
+fn _native(path: text) -> text:
+    path.replace("/", "\\")
+
+# Windows file id of `path` ("" when it cannot be read). `fsutil file queryfileid`
+# prints `File ID is 0x<128-bit id>`; the id is unique per volume, so two names
+# with the same id are one file.
+pub fn container_file_id_v1(path: text) -> text:
+    val ran = process_run("fsutil", ["file", "queryfileid", _native(path)])
+    if ran.2 != 0:
+        return ""
+    val out = ran.0.trim()
+    val at = out.index_of("0x")
+    if at < 0:
+        return ""
+    out.substring(at, out.byte_len()).trim()
+
+# Seals every lower file read-only. `file_seal_readonly` (chmod + mode read-back)
+# is the verdict; when it cannot seal (Windows chmod is a no-op) one recursive
+# `attrib +R` sets the read-only attribute and the read-back is repeated.
+fn _seal_lower(view: StorageViewV1, paths: [text]) -> text:
+    val lower = _lower_dir(view)
+    var unsealed = false
+    for rel in paths:
+        if not file_seal_readonly(lower + "/" + rel):
+            unsealed = true
+    if not unsealed:
+        return ""
+    if not host_is_windows_host():
+        return "seal-failed"
+    val ran = process_run("attrib", ["+R", _native(lower) + "\\*", "/S"])
+    if ran.2 != 0:
+        return "attrib-failed"
+    for rel in paths:
+        if not file_seal_readonly(lower + "/" + rel):
+            return "seal-not-readonly: " + rel
+    ""
+
+# Residue of a removed container: view dir, lower dir and store pins it owned.
+# 0 = nothing left.
+pub fn container_view_residue_v1(view: StorageViewV1) -> ShareCountV1:
+    var n: i64 = 0
+    val vdir = _view_dir(view)
+    if is_dir(vdir) or file_exists(vdir):
+        n = n + 1
+    if is_dir(_lower_dir(view)):
+        n = n + 1
+    for pin in immutable_store_v1_list_owner_pins(view.store, _PIN_OWNER):
+        if pin.pin_id.contains(view.view_id):
+            n = n + 1
+    ShareCountV1(n)
+
+fn _abandon(view: StorageViewV1, reason: text) -> ContainerViewCreateV1:
+    val gone = container_view_remove_v1(view)
+    var why = reason
+    if gone.status != "ok":
+        why = reason + "; cleanup-failed: " + gone.reason
+    _rejected(view, why)
+
+# Create the container's one view over `base_root` (empty base when "") and link
+# its base read-only from the store. `copied` counts files that fell back to a
+# private copy (cross-volume or no hard-link support).
+pub fn container_view_create_v1(store: text, view_root: text, container_id: text, base_root: text,
+        quota: ViewBytesV1) -> ContainerViewCreateV1:
+    val absent = _no_view(store, view_root, container_id)
+    var generation = StoreGenerationV1(0)
+    if base_root != "":
+        val head = immutable_store_v1_root_head(store, base_root)
+        if head.status != "ok":
+            return _rejected(absent, "base-" + head.reason)
+        generation = head.generation
+    val created = storage_view_v1_create(store, view_root, container_id, base_root, generation, quota)
+    if created.status != "ok":
+        return _rejected(absent, "view-" + created.reason)
+    val view = created.view
+    val rootfs = rootfs_materialize_v1(view, ViewFlagV1(true))
+    if rootfs.status != "ok":
+        return _abandon(view, "rootfs-" + rootfs.reason)
+    val entries = storage_view_v1_base_entries(view)
+    if entries.status != "ok":
+        return _abandon(view, "entries-" + entries.reason)
+    val sealed = _seal_lower(view, entries.paths)
+    if sealed != "":
+        return _abandon(view, sealed)
+    ContainerViewCreateV1(status: "ok", reason: "", view: view,
+        linked: ShareCountV1(rootfs.linked.value), copied: ShareCountV1(rootfs.copied.value))
+
+# Stop: save upper/ (over the base) as the container's own root, named by its id.
+pub fn container_view_stop_v1(view: StorageViewV1) -> ContainerViewStopV1:
+    val head = immutable_store_v1_root_head(view.store, view.view_id)
+    var expected = StoreGenerationV1(0)
+    if head.status == "ok":
+        expected = head.generation
+    elif head.status != "missing":
+        return ContainerViewStopV1(status: "rejected", reason: "root-" + head.reason,
+            generation: StoreGenerationV1(0))
+    val saved = storage_view_v1_save(view, view.view_id, expected)
+    if saved.status != "ok":
+        return ContainerViewStopV1(status: "rejected", reason: saved.reason,
+            generation: StoreGenerationV1(0))
+    ContainerViewStopV1(status: "ok", reason: "", generation: saved.generation)
+
+# Remove: dematerialize (lower/ and the pin), destroy the view, delete the view
+# dir, then require zero residue.
+pub fn container_view_remove_v1(view: StorageViewV1) -> ContainerViewOpV1:
+    val demat = rootfs_dematerialize_v1(view)
+    if demat != "":
+        return _op("rejected", "dematerialize: " + demat)
+    val destroyed = storage_view_v1_destroy(view)
+    if destroyed.status != "ok":
+        return _op("rejected", "destroy: " + destroyed.reason)
+    val vdir = _view_dir(view)
+    if is_dir(vdir) and (not dir_remove_all(vdir) or is_dir(vdir)):
+        return _op("rejected", "view-dir-remove-failed")
+    if container_view_residue_v1(view).value != 0:
+        return _op("rejected", "residue-remains")
+    _op("ok", "")
+
+# Proves the sharing for every base entry: lower file and store object carry the
+# same file id, the lower file reads back read-only, and a write through the
+# lower name is refused with the object's bytes unchanged.
+pub fn container_view_verify_share_v1(view: StorageViewV1) -> ContainerViewShareProofV1:
+    val entries = storage_view_v1_base_entries(view)
+    if entries.status != "ok":
+        return _proof_failed("rejected", entries.reason, 0)
+    val count = entries.paths.len()
+    var same: i64 = 0
+    var ro: i64 = 0
+    var refused: i64 = 0
+    for i in 0..count:
+        val lower = _lower_dir(view) + "/" + entries.paths[i]
+        val obj = _object_path(view.store, entries.keys[i])
+        val lid = container_file_id_v1(lower)
+        val oid = container_file_id_v1(obj)
+        if lid == "" or oid == "":
+            return _proof_failed("unavailable", "file-id-unavailable", count)
+        if lid == oid:
+            same = same + 1
+        if file_seal_readonly(lower):
+            ro = ro + 1
+        val before = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
+        val wrote = file_write_bytes(lower, "overwrite-attempt".bytes())
+        val after = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
+        if not wrote and before == after:
+            refused = refused + 1
+    ContainerViewShareProofV1(status: "ok", reason: "", entries: ShareCountV1(count),
+        same_file_id: ShareCountV1(same), read_only: ShareCountV1(ro), write_refused: ShareCountV1(refused))

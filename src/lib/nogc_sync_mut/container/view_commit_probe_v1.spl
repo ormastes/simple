@@ -1,0 +1,67 @@
+"""Per-container commit-charge sample: shared base vs private base (A2 measurement).
+
+Each sample is one child process standing in for a container workload. It reads
+its own PrivateMemorySize64 (the process commit charge) and WorkingSet64 before
+and after taking the base file in one of two ways:
+
+  shared  - a read-only file-backed view of the hard-linked lower file and every
+            page touched. File-backed read-only pages are backed by the file
+            itself, so they are not commit charged and their physical pages are
+            the one page-cache copy every container sharing the file uses.
+  private - the base read into the process's own memory (the cost when there is
+            no shared base to map).
+
+The helper is PowerShell because no process-memory rt_* exists; the script has no
+braces so it needs no escaping. Windows only: elsewhere the sample is "unavailable".
+"""
+
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+
+pub unit SampleBytesV1: i64
+export SampleBytesV1
+
+pub struct CommitSampleV1:
+    status: text           # "ok" | "unavailable" | "failed"
+    reason: text
+    commit_delta: SampleBytesV1   # PrivateMemorySize64 growth
+    working_set_delta: SampleBytesV1
+
+fn _failed(status: text, reason: text) -> CommitSampleV1:
+    CommitSampleV1(status: status, reason: reason, commit_delta: SampleBytesV1(0),
+        working_set_delta: SampleBytesV1(0))
+
+fn _script(mode: text, path: text) -> text:
+    val head = "$p=[System.Diagnostics.Process]::GetCurrentProcess();$p.Refresh();$b=$p.PrivateMemorySize64;$w=$p.WorkingSet64;"
+    var take = ""
+    if mode == "shared":
+        take = "$m=[System.IO.MemoryMappedFiles.MemoryMappedFile]::CreateFromFile('" + path + "',[System.IO.FileMode]::Open,$null,0,[System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read);$s=$m.CreateViewStream(0,0,[System.IO.MemoryMappedFiles.MemoryMappedFileAccess]::Read);$s.CopyTo([System.IO.Stream]::Null);"
+    else:
+        take = "$a=[System.IO.File]::ReadAllBytes('" + path + "');$a[0]=$a[0];"
+    head + take + "$p.Refresh();Write-Output ('SAMPLE,'+($p.PrivateMemorySize64-$b)+','+($p.WorkingSet64-$w))"
+
+fn _sample(mode: text, path: text) -> CommitSampleV1:
+    if not host_is_windows_host():
+        return _failed("unavailable", "windows-only")
+    if path.contains("'"):
+        return _failed("failed", "path-quote")
+    val ran = process_run("powershell", ["-NoProfile", "-NonInteractive", "-Command", _script(mode, path.replace("/", "\\"))])
+    if ran.2 != 0:
+        return _failed("failed", "powershell-exit-" + ran.2.to_string() + ": " + ran.1.trim())
+    for line in ran.0.split("\n"):
+        val row = line.trim()
+        if row.starts_with("SAMPLE,"):
+            val cols = row.split(",")
+            if cols.len() == 3:
+                return CommitSampleV1(status: "ok", reason: "",
+                    commit_delta: SampleBytesV1(cols[1].to_int()),
+                    working_set_delta: SampleBytesV1(cols[2].to_int()))
+    _failed("failed", "no-sample-row")
+
+# `path` is a lower file (hard link of the store object): mapped, not copied.
+pub fn container_commit_sample_shared_v1(path: text) -> CommitSampleV1:
+    _sample("shared", path)
+
+# `path` is read into the sampling process's private memory.
+pub fn container_commit_sample_private_v1(path: text) -> CommitSampleV1:
+    _sample("private", path)

@@ -1,0 +1,140 @@
+# view_share_v1: one view per container, hard-linked sealed base, stop-save, remove-destroy.
+use std.spec.{describe, it, expect, only_on_windows}
+use std.nogc_sync_mut.storage.storage_view_v1.{ViewBytesV1, storage_view_v1_create, storage_view_v1_write,
+    storage_view_v1_save, storage_view_v1_load, storage_view_v1_read, storage_view_v1_base_entries}
+use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, immutable_store_v1_root_head,
+    immutable_store_v1_collect, StoreGenerationV1, StoreFlagV1}
+use std.nogc_sync_mut.container.view_share_v1.{container_view_create_v1, container_view_stop_v1,
+    container_view_remove_v1, container_view_verify_share_v1, container_view_residue_v1}
+use std.nogc_sync_mut.container.view_commit_probe_v1.{container_commit_sample_shared_v1,
+    container_commit_sample_private_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, is_dir}
+use app.io.file_ops.{path_absolute}
+
+fn _temp(tag: text) -> text:
+    dir_create_all("build/test-artifacts")
+    val owned = secure_temp_dir_raw("build/test-artifacts", "vs-" + tag + "-")
+    expect(owned == "").to_equal(false)
+    path_absolute(owned).replace("\\", "/")
+
+fn _cleanup(root: text):
+    val parent = path_absolute("build/test-artifacts").replace("\\", "/") + "/"
+    expect(root.starts_with(parent)).to_equal(true)
+    expect(dir_remove_all(root)).to_equal(true)
+
+# Base root "main" holding the given files; returns the store.
+fn _base(base: text, big: text) -> text:
+    val store = base + "/store"
+    expect(immutable_store_v1_init(store)).to_equal("")
+    val seed = storage_view_v1_create(store, base + "/seedviews", "seed", "", StoreGenerationV1(0), ViewBytesV1(100000000))
+    expect(seed.status).to_equal("ok")
+    expect(storage_view_v1_write(seed.view, "bin/tool.txt", "tool-bytes".bytes()).status).to_equal("ok")
+    expect(storage_view_v1_write(seed.view, "etc.txt", "etc-bytes".bytes()).status).to_equal("ok")
+    if big != "":
+        expect(storage_view_v1_write(seed.view, "big.bin", big.bytes()).status).to_equal("ok")
+    expect(storage_view_v1_save(seed.view, "main", StoreGenerationV1(0)).status).to_equal("ok")
+    store
+
+describe "view_share_v1":
+    it "create, stop-save and remove leave no residue in the view":
+        val base = _temp("life")
+        val store = _base(base, "")
+        val c = container_view_create_v1(store, base + "/views", "c1", "main", ViewBytesV1(100000))
+        expect(c.reason).to_equal("")
+        expect(c.status).to_equal("ok")
+        expect(c.linked.value).to_equal(2)
+        expect(c.copied.value).to_equal(0)
+        expect(is_dir(base + "/views/c1/lower")).to_equal(true)
+        expect(storage_view_v1_write(c.view, "work/out.txt", "result".bytes()).status).to_equal("ok")
+        val stop = container_view_stop_v1(c.view)
+        expect(stop.reason).to_equal("")
+        expect(stop.status).to_equal("ok")
+        expect(stop.generation.value).to_equal(1)
+        # The saved root carries the base plus the container's own file.
+        val head = immutable_store_v1_root_head(store, "c1")
+        expect(head.status).to_equal("ok")
+        val reloaded = storage_view_v1_load(store, base + "/reload", "c1r", "c1")
+        expect(reloaded.status).to_equal("ok")
+        expect(storage_view_v1_base_entries(reloaded.view).paths.len()).to_equal(3)
+        expect(storage_view_v1_read(reloaded.view, "work/out.txt").bytes.len()).to_equal(6)
+        # A second stop advances the generation.
+        expect(container_view_stop_v1(c.view).generation.value).to_equal(2)
+        val gone = container_view_remove_v1(c.view)
+        expect(gone.reason).to_equal("")
+        expect(gone.status).to_equal("ok")
+        expect(is_dir(base + "/views/c1")).to_equal(false)
+        expect(container_view_residue_v1(c.view).value).to_equal(0)
+        # The store base is untouched by the remove.
+        expect(immutable_store_v1_root_head(store, "main").status).to_equal("ok")
+        _cleanup(base)
+
+    it "remove of a view with an empty base is clean":
+        val base = _temp("empty")
+        val store = _base(base, "")
+        val c = container_view_create_v1(store, base + "/views", "c2", "", ViewBytesV1(1000))
+        expect(c.status).to_equal("ok")
+        expect(container_view_remove_v1(c.view).status).to_equal("ok")
+        expect(container_view_residue_v1(c.view).value).to_equal(0)
+        _cleanup(base)
+
+    it "rejects a missing base root and leaves nothing behind":
+        val base = _temp("nobase")
+        val store = _base(base, "")
+        val c = container_view_create_v1(store, base + "/views", "c3", "absent", ViewBytesV1(1000))
+        expect(c.status).to_equal("rejected")
+        expect(is_dir(base + "/views/c3")).to_equal(false)
+        _cleanup(base)
+
+    only_on_windows "lower is the store object: same file id, read-only, write refused":
+        val base = _temp("share")
+        val store = _base(base, "")
+        val c = container_view_create_v1(store, base + "/views", "c4", "main", ViewBytesV1(100000))
+        expect(c.status).to_equal("ok")
+        val proof = container_view_verify_share_v1(c.view)
+        expect(proof.reason).to_equal("")
+        expect(proof.status).to_equal("ok")
+        expect(proof.entries.value).to_equal(2)
+        expect(proof.same_file_id.value).to_equal(2)
+        expect(proof.read_only.value).to_equal(2)
+        expect(proof.write_refused.value).to_equal(2)
+        expect(container_view_remove_v1(c.view).status).to_equal("ok")
+        _cleanup(base)
+
+    only_on_windows "sealed store objects are still collectable and removable":
+        val base = _temp("gc")
+        val store = _base(base, "")
+        val c = container_view_create_v1(store, base + "/views", "c5", "main", ViewBytesV1(100000))
+        expect(c.status).to_equal("ok")
+        expect(container_view_remove_v1(c.view).status).to_equal("ok")
+        val gc = immutable_store_v1_collect(store, StoreFlagV1(false))
+        expect(gc.status).to_equal("ok")
+        expect(immutable_store_v1_root_head(store, "main").status).to_equal("ok")
+        _cleanup(base)
+
+    only_on_windows "commit charge: shared base vs private copy (numbers printed)":
+        val base = _temp("mem")
+        val big = "abcdefgh".repeat(1048576)
+        val store = _base(base, big)
+        val c = container_view_create_v1(store, base + "/views", "c6", "main", ViewBytesV1(100000000))
+        expect(c.status).to_equal("ok")
+        val lower_big = base + "/views/c6/lower/big.bin"
+        val shared = container_commit_sample_shared_v1(lower_big)
+        val private_copy = container_commit_sample_private_v1(lower_big)
+        # Control: the same sampler on a tiny linked file isolates the fixed cost of the
+        # sampling process itself (type loading, buffers) from the base-size cost.
+        val control = container_commit_sample_shared_v1(base + "/views/c6/lower/etc.txt")
+        val net_shared = shared.commit_delta.value - control.commit_delta.value
+        val net_private = private_copy.commit_delta.value - control.commit_delta.value
+        print "MEASURE base_bytes={big.byte_len()}"
+        print "MEASURE control_tiny_file commit_delta={control.commit_delta.value} working_set_delta={control.working_set_delta.value}"
+        print "MEASURE shared_base status={shared.status} reason={shared.reason} commit_delta={shared.commit_delta.value} working_set_delta={shared.working_set_delta.value} net_commit={net_shared}"
+        print "MEASURE private_copy status={private_copy.status} reason={private_copy.reason} commit_delta={private_copy.commit_delta.value} working_set_delta={private_copy.working_set_delta.value} net_commit={net_private}"
+        expect(shared.status).to_equal("ok")
+        expect(private_copy.status).to_equal("ok")
+        expect(control.status).to_equal("ok")
+        # The private copy is commit charged by about the base size; the file-backed share is not.
+        expect(net_private > big.byte_len() / 2).to_equal(true)
+        expect(net_shared < big.byte_len() / 4).to_equal(true)
+        expect(container_view_remove_v1(c.view).status).to_equal("ok")
+        _cleanup(base)
