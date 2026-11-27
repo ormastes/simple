@@ -1,0 +1,87 @@
+# Unit spec for jit_u8_repeat_literal_copy_push_leak_2026-11-27.
+#
+# Verifies `[0u8; n]` (and non-zero / large / boundary repeat-array literals)
+# followed by index stores, local copy (`var r: [u8] = a`), and `r.push(...)`
+# preserves exact length and element values without mutating the source buffer.
+# Kept strictly isolated from `pbkdf2.spl` (owned concurrently by `pbkdf1`).
+
+fn _cat_u8(a: [u8], b: [u8]) -> [u8]:
+    var r: [u8] = a
+    var i: i64 = 0
+    val n = b.len() as i64
+    while i < n:
+        r.push(b[i])
+        i = i + 1
+    r
+
+fn _pad_repeat(key: [u8], block_len: i64, pad: i64) -> [u8]:
+    var out: [u8] = [0u8; block_len]
+    val kl = key.len() as i64
+    var i: i64 = 0
+    while i < block_len:
+        val kb: i64 = if i < kl: key[i] as i64 else: 0
+        out[i] = ((kb ^ pad) & 0xff).to_u8()
+        i = i + 1
+    out
+
+fn _pad_push(key: [u8], block_len: i64, pad: i64) -> [u8]:
+    var out: [u8] = []
+    val kl = key.len() as i64
+    var i: i64 = 0
+    while i < block_len:
+        val kb: i64 = if i < kl: key[i] as i64 else: 0
+        out.push(((kb ^ pad) & 0xff).to_u8())
+        i = i + 1
+    out
+
+fn _bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    val n = a.len() as i64
+    while i < n:
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "u8 repeat literal copy-then-push":
+    it "matches push-built [u8] across dynamic block lengths and index stores":
+        val key: [u8] = [0x0bu8, 0x22u8, 0x33u8, 0x44u8]
+        val msg: [u8] = [0xaa, 0xbb, 0xcc, 0xdd]
+        val rep_pad = _pad_repeat(key, 64, 0x36)
+        val push_pad = _pad_push(key, 64, 0x36)
+
+        val rep_cat = _cat_u8(rep_pad, msg)
+        val push_cat = _cat_u8(push_pad, msg)
+
+        expect(rep_cat.len()).to_equal(68)
+        expect(push_cat.len()).to_equal(68)
+        expect(_bytes_equal(rep_cat, push_cat)).to_equal(true)
+        # Source pad must stay untouched (value semantics on `var r: [u8] = a`).
+        expect(rep_pad.len()).to_equal(64)
+
+    it "preserves non-zero fill, zero count, and large repeat counts":
+        val msg: [u8] = [1u8, 2u8, 3u8]
+        val nz: [u8] = [0x5cu8; 16]
+        var nz_mut = nz
+        nz_mut[0] = 0x11u8
+        val nz_cat = _cat_u8(nz_mut, msg)
+        expect(nz_cat.len()).to_equal(19)
+        expect(nz_cat[0]).to_equal(0x11u8)
+        expect(nz_cat[15]).to_equal(0x5cu8)
+        expect(nz_cat[16]).to_equal(1u8)
+        expect(nz[0]).to_equal(0x5cu8)
+
+        val empty0: [u8] = [0u8; 0]
+        expect(empty0.len()).to_equal(0)
+        val from_empty = _cat_u8(empty0, msg)
+        expect(from_empty.len()).to_equal(3)
+        expect(from_empty[2]).to_equal(3u8)
+
+        val large: [u8] = [0u8; 300]
+        val large_cat = _cat_u8(large, msg)
+        expect(large_cat.len()).to_equal(303)
+        expect(large_cat[0]).to_equal(0u8)
+        expect(large_cat[299]).to_equal(0u8)
+        expect(large_cat[300]).to_equal(1u8)

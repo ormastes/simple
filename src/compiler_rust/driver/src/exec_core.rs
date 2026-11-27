@@ -1340,12 +1340,23 @@ impl ExecCore {
             std::collections::HashMap::new()
         };
         let _ = hir::take_dropped_unsupported_exprs();
+        // Script mode is the file kind (owner decision 2026-11-27): `.shs` and
+        // `.sscript` entries are scripts, `.spl` (specs included) is compiled.
+        // A script's own functions keep dynamically typed value joins.
+        // A file-header source-mode attribute, `--source-mode` and `simple.sdn [source_mode]` are
+        // not read here yet (plan lanes S4-A / S4-B).
+        let entry_is_script = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("shs" | "sscript")
+        );
+        hir::set_entry_script_mode(entry_is_script);
         let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
             project_hint.as_deref(),
             duplicate_structs,
         );
+        hir::set_entry_script_mode(false);
         // References to a private fn of another directory found in the
         // lowered unit; judged below, once it is known the JIT will run it.
         let private_refs = hir::take_private_ref_violations();

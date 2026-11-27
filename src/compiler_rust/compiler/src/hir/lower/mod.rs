@@ -18,7 +18,7 @@ mod type_resolver;
 pub use deprecation_warning::{DeprecationWarning, DeprecationWarningCollector};
 pub use error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 pub use memory_warning::{MemoryWarning, MemoryWarningCode, MemoryWarningCollector, WarningSummary};
-pub use lowerer::{take_private_ref_violations, Lowerer, PrivateRefViolation};
+pub use lowerer::{set_entry_script_mode, take_private_ref_violations, Lowerer, PrivateRefViolation};
 pub use module_lowering::module_with_hoisted_defs;
 pub(crate) use module_lowering::dynamic_module_initializer_name;
 pub(crate) use module_lowering::block_uses_self;

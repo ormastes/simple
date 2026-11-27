@@ -1942,13 +1942,18 @@ impl Lowerer {
             .method_return_types
             .iter()
             .filter(|(name, _)| name.ends_with(&suffix) && owner_applies(name))
-            .min_by_key(|(name, _)| name.len())
+            // Shortest name, ties by name: `method_return_types` is a HashMap, and
+            // a length-only key picked `A.pos` or `B.pos` by hash order per run.
+            .min_by(|(a, _), (b, _)| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
         {
             // A guess borrowed from some same-named method (`xs.join(",")` on an
             // untyped `xs` typed as an imported `A.join() -> text?`): flag it so
             // the caller can give it a private type id the Option->scalar
             // return rule skips.
             self.last_method_return_guessed.set(true);
+            if matches!(ret_ty, TypeId::F32 | TypeId::F64) {
+                self.guessed_float_in_function.set(true);
+            }
             return ret_ty;
         }
         // Builtin string methods that return a RAW native i64 (a code point /

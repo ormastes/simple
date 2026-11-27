@@ -83,7 +83,18 @@ fn bug2_app_src() -> text:
         "    val tok = match slot:",
         "        case Some(value): value",
         "        case None: return Err(RingErr.Empty)",
-        "    Ok(tok.id)"
+        "    Ok(tok.id)",
+        "",
+        "fn check_text_opt(raw: text?) -> text:",
+        "    match raw:",
+        "        case Some(value): value",
+        "        case None: \"\"",
+        "",
+        "fn check_rows_opt(rows: [text]?) -> [text]?:",
+        "    match rows:",
+        "        case Some(items): Some(items)",
+        "        case None:",
+        "            return nil"
     ].join("\n") + "\n"
 
 fn bug3_app_src() -> text:
@@ -195,7 +206,7 @@ describe "WA Src Lane 1 workaround audit and retirement":
         val bug_doc = file_read("doc/08_tracking/bug/hir_generic_enum_self_match_2026-10-23.md")
         expect(bug_doc).to_contain("WA-S1 retirement 2026-11-26")
 
-    it "retires seed_case_nil_pattern_eq_2026-11-02 tag in bridge while keeping source-pinned incremental sites":
+    it "retires all remaining seed_case_nil_pattern_eq_2026-11-02 tags across 80.driver while keeping case None intact":
         val probe = probe_with_shared_ring(label: "bug2_case_none", app_src: bug2_app_src())
         expect(probe).to_equal("hir=0 mir=0 llvm=0 void=0")
 
@@ -204,14 +215,21 @@ describe "WA Src Lane 1 workaround audit and retirement":
         expect(bridge_src).to_contain("case None: return Err(FileFiberTldrBridgeErrorV1.Busy)")
 
         val inc_src = file_read("src/compiler/80.driver/driver_build/incremental.spl")
-        expect(inc_src).to_contain("# @workaround bug=seed_case_nil_pattern_eq_2026-11-02")
+        expect_not(inc_src.contains("seed_case_nil_pattern_eq_2026-11-02"))
+        expect(inc_src.split("case None: \"\"").len() - 1).to_equal(2)
+
+        val receipt_src = file_read("src/compiler/80.driver/driver_build/native_link_receipt_v1.spl")
+        expect_not(receipt_src.contains("seed_case_nil_pattern_eq_2026-11-02"))
+        expect(receipt_src).to_contain("case None:\n            return nil")
 
         val bindings = file_read("src/verification/cache_protocol/source_bindings.txt")
         expect(bindings).to_contain("incremental_digest_tag_v1")
         expect(bindings).to_contain("incremental_digest_untag_v1")
+        expect(bindings).to_contain("_toolchain_digests_v1")
 
         val bug_doc = file_read("doc/08_tracking/bug/seed_case_nil_pattern_eq_2026-11-02.md")
         expect(bug_doc).to_contain("WA-S1 partial retirement 2026-11-26")
+        expect(bug_doc).to_contain("W8-1 retirement 2026-11-27")
 
     it "keeps phase2_llvm_if_val_match_value_void_2026-11-16 guard for frozen Phase 2 bootstrap":
         val probe = probe_with_shared_ring(label: "bug3_if_val_match", app_src: bug3_app_src())

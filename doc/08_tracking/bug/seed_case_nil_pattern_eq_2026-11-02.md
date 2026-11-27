@@ -1,7 +1,7 @@
 # seed_case_nil_pattern_eq_2026-11-02
 
 **Severity:** P0 (stage2_next native-build worker crash, 0xC0000005)
-**Status:** fixed in the seed (PR #5882). The source workaround stays in place until phase 3 passes once on the old seed.
+**Status:** FIXED in seed (PR #5882); all 6 `80.driver` `@workaround` comment tags retired (`case None:` retained per safe-code `case nil:` ban).
 
 ## Symptom
 A stage2_next (seed-built from release f5b32bda67c) `native-build` of hello dies right after
@@ -30,3 +30,10 @@ Remove the tags after stage2 is rebuilt with a seed that contains #5882.
 - Retired stale `# @workaround bug=seed_case_nil_pattern_eq_2026-11-02` marker in `src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl` while keeping `case None:` intact (safe across frozen seeds and Stage 3).
 - Kept `src/compiler/80.driver/driver_build/incremental.spl` (`incremental_digest_tag_v1` and `incremental_digest_untag_v1`) unchanged (`DEFERRED-CROSS-LANE`) because both function bodies are SHA-256 pinned in `src/verification/cache_protocol/source_bindings.txt` and enforced by `scripts/check/check-cache-formal-source-binding.shs`.
 - Regression spec: `test/01_unit/compiler/80.driver/wa_src_lane1_workarounds_spec.spl`
+
+## W8-1 retirement 2026-11-27
+- Retired the remaining 3 stale `# @workaround bug=seed_case_nil_pattern_eq_2026-11-02` comment tags in `src/compiler/80.driver/driver_build/incremental.spl` (`incremental_digest_tag_v1` and `incremental_digest_untag_v1`) and `src/compiler/80.driver/driver_build/native_link_receipt_v1.spl` (`_toolchain_digests_v1`), while keeping `case None:` intact across all 6 `driver_build` sites (safe across pre-#5882/post-#5882 seeds and Stage 3, and compliant with S-11 safe-code `case nil:` policy).
+- Verified PR #5882 seed fix (`test_nil_literal_pattern_on_optional_text_uses_is_none` at `src/compiler_rust/compiler/src/hir/lower/tests/control_flow_tests.rs:1497`) is present at HEAD.
+- Re-pinned `incremental_digest_tag_v1`, `incremental_digest_untag_v1`, and `_toolchain_digests_v1` in `src/verification/cache_protocol/source_bindings.txt` with formal model review addendum in `src/verification/cache_protocol/seed_case_none_workaround_review_2026-11-02.txt`.
+- Tracking shard: `doc/08_tracking/bug/db/seed_case_nil_pattern_eq_2026-11-02.sdn` (`status=fixed`).
+- Verified specs (`--mode=interpreter`): `test/01_unit/compiler/80.driver/seed_case_nil_wa_retirement_spec.spl` (3/3), `test/01_unit/compiler/driver/build_cache_digest_tag_spec.spl` (3/3), `test/01_unit/compiler/driver/native_link_toolchain_key_spec.spl` (2/2), `test/01_unit/compiler/semantics/robust_nil_pattern_spec.spl` (4/4).

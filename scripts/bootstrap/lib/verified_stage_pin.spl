@@ -9,7 +9,8 @@
 # no pin, unreadable pin, malformed digest, not admitted, mismatch, or an
 # unhashable running image — fails closed. Shared by the Hello matrix twin and
 # the perf-runner twin; keep one implementation.
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get, host_os}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
 
 val VERIFIED_STAGE_PIN_ENV = "SIMPLE_VERIFIED_STAGE_PIN"
@@ -74,33 +75,70 @@ pub fn verified_stage_running_sha256(linux: bool, windows: bool) -> text:
 fn _norm(path: text) -> text:
     path.replace("\\", "/")
 
-# The pin may only be a bootstrap-owned stage3 record inside the source root:
-# <source_root>/.../stage3/<platform>/provenance.env, no ".." components. A
-# caller can still point at a different record under the tree, but not at an
-# arbitrary file outside the repository's bootstrap output.
-pub fn verified_stage_pin_location_ok(pin_path: text, source_root: text) -> bool:
+# Windows and macOS volumes are case-insensitive by default; Linux and FreeBSD
+# are case-sensitive, where "Stage3" and "stage3" are different directories.
+pub fn verified_stage_host_folds_case(windows: bool) -> bool:
+    windows or host_os() == "macos"
+
+fn _under(path: text, root: text, fold_case: bool) -> bool:
+    if fold_case: path.lower().starts_with(root.lower()) else: path.starts_with(root)
+
+# LEXICAL shape check (pure): the pin may only be a bootstrap-owned stage3
+# record inside the source root: <source_root>/.../stage3/<platform>/
+# provenance.env, no "." / ".." components. It does not resolve symlinks, so it
+# is never sufficient on its own; verified_stage_pin_resolve applies it again
+# to the resolved paths.
+pub fn verified_stage_pin_location_ok(pin_path: text, source_root: text, fold_case: bool) -> bool:
     val pin = _norm(pin_path)
     var root = _norm(source_root)
     if root == "" or pin == "": return false
     if not root.ends_with("/"): root = root + "/"
-    if not pin.lower().starts_with(root.lower()): return false
+    if not _under(pin, root, fold_case): return false
     val parts = pin.substring(root.len(), pin.len()).split("/")
     for part in parts:
         if part == ".." or part == ".": return false
     val n = parts.len()
-    n >= 3 and parts[n - 1] == "provenance.env" and parts[n - 3] == "stage3" and parts[n - 2] != ""
+    if n < 3 or parts[n - 2] == "": return false
+    val leaf = if fold_case: parts[n - 1].lower() else: parts[n - 1]
+    val stage = if fold_case: parts[n - 3].lower() else: parts[n - 3]
+    leaf == "provenance.env" and stage == "stage3"
+
+fn _resolved(path: text, what: text) -> Result<text, text>:
+    match path_final_existing(path):
+        case Ok(final): Ok(final.path)
+        case Err(code): Err("verified stage pin: cannot resolve " + what + " " + path + " (" + code + ")")
+
+# Authoritative location check: both paths are resolved through the host
+# final-path owner (realpath / GetFinalPathNameByHandle, symlinks and
+# junctions followed, must exist), then the lexical shape check is applied to
+# the RESOLVED pair. A provenance.env that is a symlink out of the tree, or
+# under a symlinked stage3/<platform> directory, resolves outside the root and
+# is refused. Returns the resolved pin path, which is the one to read: reading
+# the original spelling would reopen the symlink after the check. Residual: an
+# intermediate directory could still be swapped between this resolve and the
+# read (no dirfd/handle retention); the trust anchor is the running-image
+# digest compared against the record, so a swapped record cannot vouch for a
+# different binary.
+pub fn verified_stage_pin_resolve(pin_path: text, source_root: text, fold_case: bool) -> Result<text, text>:
+    if not verified_stage_pin_location_ok(pin_path, source_root, fold_case):
+        return Err("verified stage pin: pin record must be <source-root>/.../stage3/<platform>/provenance.env")
+    val real_pin = _resolved(pin_path, "pin record")?
+    val real_root = _resolved(source_root, "source root")?
+    if not verified_stage_pin_location_ok(real_pin, real_root, fold_case):
+        return Err("verified stage pin: pin record resolves outside <source-root>/.../stage3/<platform>/provenance.env (symlink?)")
+    Ok(real_pin)
 
 # Resolve the pin (explicit path, else SIMPLE_VERIFIED_STAGE_PIN) and check it.
-pub fn verified_stage_pin_check(pin_path: text, source_root: text, stage_binary: text, linux: bool, windows: bool) -> Result<VerifiedStagePin, text>:
+# The trust inputs are exactly: the pin record, the source root, and the digest
+# of the RUNNING image (never a caller-supplied binary path; --stage-binary is
+# not a trust input and is deliberately not a parameter here).
+pub fn verified_stage_pin_check(pin_path: text, source_root: text, linux: bool, windows: bool) -> Result<VerifiedStagePin, text>:
     val path = if pin_path != "": pin_path else: env_get(VERIFIED_STAGE_PIN_ENV)
     if path == "":
         return Err("verified stage pin: no pin (pass --stage-pin or set " + VERIFIED_STAGE_PIN_ENV + ")")
-    if not verified_stage_pin_location_ok(path, source_root):
-        return Err("verified stage pin: pin record must be <source-root>/.../stage3/<platform>/provenance.env")
-    if not file_exists(path):
-        return Err("verified stage pin: pin record " + path + " does not exist")
-    match verified_stage_pin_decide(file_read(path), verified_stage_running_sha256(linux, windows)):
-        case Ok(sha): Ok(VerifiedStagePin(path: path, sha256: sha))
+    val real = verified_stage_pin_resolve(path, source_root, verified_stage_host_folds_case(windows))?
+    match verified_stage_pin_decide(file_read(real), verified_stage_running_sha256(linux, windows)):
+        case Ok(sha): Ok(VerifiedStagePin(path: real, sha256: sha))
         case Err(e): Err(e)
 
 # Re-check after the work (the Python owners re-hash their producer at the end).

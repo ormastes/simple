@@ -1,6 +1,8 @@
 # Trust anchor + reproduction-archive admission of the phase-3 Hello matrix twin.
 use std.spec
-use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_decide, verified_stage_pin_location_ok}
+use std.nogc_sync_mut.io_runtime.{host_os, cwd, env_get, file_write, file_exists, dir_create_all, dir_remove_all, process_run}
+use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_decide, verified_stage_pin_location_ok, verified_stage_pin_resolve}
+use scripts.bootstrap.lib.hello_matrix_policy.{env_put, env_value}
 use scripts.bootstrap.lib.hello_matrix_tar.{tar_members, _safe}
 
 val GOOD = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -40,6 +42,38 @@ fn end_blocks() -> [u8]:
     for i in 0..1024: block.push(0u8)
     block
 
+fn _scratch(tag: text) -> text:
+    val t = env_get("TEMP")
+    val tmp = if t != "": t elif env_get("TMPDIR") != "": env_get("TMPDIR") else: "/tmp"
+    val dir = tmp.replace("\\", "/") + "/hsb2_" + tag
+    # A previous failed run may have left the junction/link behind: unlink it as
+    # a link first so dir_remove_all can never follow it.
+    _unlink_dir(dir + "/tree/build/stage3/linux", host_os() == "windows")
+    dir_remove_all(dir)
+    dir
+
+fn _link(link: text, target: text, windows: bool, junction: bool) -> bool:
+    if windows:
+        val flag = if junction: ["/J"] else: []
+        val (_, _, code) = process_run("cmd", ["/c", "mklink"] + flag + [link.replace("/", "\\"), target.replace("/", "\\")])
+        return code == 0
+    val (_, _, code) = process_run("ln", ["-s", target, link])
+    code == 0
+
+fn _link_dir(link: text, target: text, windows: bool) -> bool:
+    _link(link, target, windows, true)
+
+fn _link_file(link: text, target: text, windows: bool) -> bool:
+    _link(link, target, windows, false)
+
+# A junction must be removed as a link, never through dir_remove_all (which
+# could follow it into the target).
+fn _unlink_dir(link: text, windows: bool):
+    if windows:
+        process_run("cmd", ["/c", "rmdir", link.replace("/", "\\")])
+    else:
+        process_run("rm", ["-f", link])
+
 describe "verified stage pin":
     it "admits only an exact digest of an admitted pure-Simple stage":
         expect(decided(admitted(GOOD), GOOD)).to_equal(true)
@@ -53,12 +87,69 @@ describe "verified stage pin":
         expect(decided(admitted(GOOD.upper()), GOOD.upper())).to_equal(false)
 
     it "accepts a pin record only at <source-root>/.../stage3/<platform>/provenance.env":
-        expect(verified_stage_pin_location_ok("C:/r/build/bootstrap/stage3/x86_64-pc-windows-gnu/provenance.env", "C:/r")).to_equal(true)
-        expect(verified_stage_pin_location_ok("C:\r\build\stage3\linux\provenance.env", "C:\r")).to_equal(true)
-        expect(verified_stage_pin_location_ok("C:/tmp/stage3/linux/provenance.env", "C:/r")).to_equal(false)
-        expect(verified_stage_pin_location_ok("C:/r/build/../../tmp/stage3/linux/provenance.env", "C:/r")).to_equal(false)
-        expect(verified_stage_pin_location_ok("C:/r/build/stage3/linux/pin.env", "C:/r")).to_equal(false)
-        expect(verified_stage_pin_location_ok("C:/r/build/stage2/linux/provenance.env", "C:/r")).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/bootstrap/stage3/x86_64-pc-windows-gnu/provenance.env", "C:/r", false)).to_equal(true)
+        expect(verified_stage_pin_location_ok("C:\r\build\stage3\linux\provenance.env", "C:\r", false)).to_equal(true)
+        expect(verified_stage_pin_location_ok("C:/tmp/stage3/linux/provenance.env", "C:/r", false)).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/../../tmp/stage3/linux/provenance.env", "C:/r", false)).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/stage3/linux/pin.env", "C:/r", false)).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/stage2/linux/provenance.env", "C:/r", false)).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/R/build/Stage3/Linux/provenance.env", "C:/r", true)).to_equal(true)
+        expect(verified_stage_pin_location_ok("C:/R/build/stage3/linux/provenance.env", "C:/r", false)).to_equal(false)
+        expect(verified_stage_pin_location_ok("/r/build/Stage3/linux/provenance.env", "/r", false)).to_equal(false)
+
+    it "refuses a provenance.env that resolves outside the source root through a link":
+        val windows = host_os() == "windows"
+        val base = _scratch("pin_link")
+        val root = base + "/tree"
+        val outside = base + "/outside"
+        expect(dir_create_all(root + "/build/stage3")).to_equal(true)
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_write(outside + "/provenance.env", "schema=x\n")).to_equal(true)
+        # Honest record under the tree resolves and is returned resolved.
+        expect(dir_create_all(root + "/build/stage3/real")).to_equal(true)
+        expect(file_write(root + "/build/stage3/real/provenance.env", "schema=x\n")).to_equal(true)
+        match verified_stage_pin_resolve(root + "/build/stage3/real/provenance.env", root, windows):
+            case Ok(p): expect(p.replace("\\", "/").ends_with("/tree/build/stage3/real/provenance.env")).to_equal(true)
+            case Err(e): expect(e).to_equal("")
+        # Directory link stage3/linux -> outside (junction on Windows: no privilege).
+        val linked = _link_dir(root + "/build/stage3/linux", outside, windows)
+        expect(linked).to_equal(true)
+        match verified_stage_pin_resolve(root + "/build/stage3/linux/provenance.env", root, windows):
+            case Ok(_): expect("admitted").to_equal("refused")
+            case Err(e): expect(e.contains("resolves outside")).to_equal(true)
+        # Single-file link provenance.env -> outside file, where the host allows it.
+        expect(dir_create_all(root + "/build/stage3/filelink")).to_equal(true)
+        if _link_file(root + "/build/stage3/filelink/provenance.env", outside + "/provenance.env", windows):
+            match verified_stage_pin_resolve(root + "/build/stage3/filelink/provenance.env", root, windows):
+                case Ok(_): expect("admitted").to_equal("refused")
+                case Err(e): expect(e.contains("resolves outside")).to_equal(true)
+        # Missing record never resolves.
+        match verified_stage_pin_resolve(root + "/build/stage3/nope/provenance.env", root, windows):
+            case Ok(_): expect("admitted").to_equal("refused")
+            case Err(e): expect(e.contains("cannot resolve")).to_equal(true)
+        _unlink_dir(root + "/build/stage3/linux", windows)
+        dir_remove_all(base)
+
+describe "wrapper argument ownership":
+    it "keeps the last --stage-binary in the twin parser":
+        val once = env_put([], "--stage-binary", "user")
+        val twice = env_put(once, "--stage-binary", "wrapper")
+        expect(env_value(twice, "--stage-binary")).to_equal("wrapper")
+
+    it "refuses a caller-supplied --stage-binary before anything else":
+        val dir = cwd().replace("\\", "/") + "/scripts/bootstrap"
+        for form in [["--stage-binary", "evil"], ["--stage-binary=evil"]]:
+            val (_, err, code) = process_run("sh", [dir + "/hello-sanity-matrix.shs", "--phase", "3"] + form)
+            expect(code).to_equal(2)
+            expect(err.contains("owned by the wrapper")).to_equal(true)
+        if host_os() == "windows":
+            # Wildcards and quotes in earlier arguments must not hide it (for-loop bug).
+            val (_, err, code) = process_run("cmd", ["/c", dir.replace("/", "\\") + "\hello-sanity-matrix.cmd", "*", "?", "a b", "--phase", "3", "--stage-binary=evil"])
+            expect(code).to_equal(2)
+            expect(err.contains("owned by the wrapper")).to_equal(true)
+            val (_, err2, code2) = process_run("cmd", ["/c", dir.replace("/", "\\") + "\hello-sanity-matrix.cmd", "--stage-binary", "evil"])
+            expect(code2).to_equal(2)
+            expect(err2.contains("owned by the wrapper")).to_equal(true)
 
 describe "reproduction archive admission":
     it "admits regular files and directories and refuses other members or escapes":

@@ -1,0 +1,165 @@
+#!/bin/sh
+# qmp-send-virtio-input.shs: send the fixed virtio input sequence, or freeze the guest and
+# validate a screendump, over a QEMU QMP unix socket.
+#
+#   qmp-send-virtio-input.shs SOCKET
+#   qmp-send-virtio-input.shs SOCKET --capture-only CAPTURE.ppm WIDTH HEIGHT
+#
+# POSIX sh port of qmp-send-virtio-input.py. Needs `nc -U` (OpenBSD netcat, the Ubuntu
+# default; GNU netcat and BusyBox nc lack -U), mkfifo, awk, od, wc, tail, sed.
+# Exit 0 on success, 1 on any failure (usage, connection, QMP error, bad capture).
+#
+# Deliberate differences from the Python original:
+#   - every wait for a QMP reply has a 60 s limit (the original blocked forever);
+#   - the PPM pixel payload starts after exactly one whitespace byte following the
+#     maxval, as the format defines (the original split on a whitespace RUN and would
+#     drop a first pixel byte that happens to be whitespace-valued).
+set -u
+LC_ALL=C
+export LC_ALL
+
+die() {
+  printf 'qmp-send-virtio-input: %s\n' "$1" >&2
+  [ -z "${tmp:-}" ] || [ ! -s "$tmp/err" ] || cat "$tmp/err" >&2
+  exit 1
+}
+
+case $# in
+  1) mode=input ;;
+  5) mode=capture
+     [ "$2" = "--capture-only" ] || die "unknown mode"
+     capture=$3 want_w=$4 want_h=$5
+     case $want_w$want_h in *[!0-9]*|'') die "WIDTH and HEIGHT must be decimal integers" ;; esac
+     case $capture in *[!\ -~]*|'') die "capture path must be printable ASCII" ;; esac ;;
+  *) die "usage: qmp-send-virtio-input.shs SOCKET [--capture-only CAPTURE.ppm WIDTH HEIGHT]" ;;
+esac
+sock=$1
+command -v nc >/dev/null 2>&1 || die "nc with -U (OpenBSD netcat) is required"
+command -v mkfifo >/dev/null 2>&1 || die "mkfifo is required"
+
+# dec N: decimal value with leading zeros stripped (never read as octal)
+dec() { v=${1#"${1%%[!0]*}"}; printf '%s' "${v:-0}"; }
+
+validate_ppm_capture() {
+  # $1 path, $2 width, $3 height. Header tokens come from the first 64 bytes.
+  path=$1
+  [ -f "$path" ] && [ -r "$path" ] || die "cannot read capture $path"
+  hdr=$(head -c 64 "$path" | od -An -v -tu1 | awk '
+    { for (i = 1; i <= NF; i++) b[n++] = $i }
+    END {
+      pos = 0; ntok = 0
+      while (ntok < 4 && pos < n) {
+        while (pos < n && (b[pos] == 9 || b[pos] == 10 || b[pos] == 11 || b[pos] == 12 || b[pos] == 13 || b[pos] == 32)) pos++
+        tok = ""
+        while (pos < n && !(b[pos] == 9 || b[pos] == 10 || b[pos] == 11 || b[pos] == 12 || b[pos] == 13 || b[pos] == 32)) {
+          tok = tok sprintf("%c", b[pos]); pos++
+        }
+        t[ntok++] = tok
+      }
+      if (ntok < 4 || pos >= n) { print "BAD"; exit }
+      print t[0], t[1], t[2], t[3], pos + 1
+    }')
+  set -f
+  set -- $hdr "$2" "$3"
+  set +f
+  [ "$1" = "P6" ] || die "capture is not a binary PPM"
+  [ $# -eq 7 ] || die "capture is not a binary PPM"
+  case $2$3$4 in *[!0-9]*|'') die "capture is not a binary PPM" ;; esac
+  hw=$(dec "$2") hh=$(dec "$3") hmax=$(dec "$4") off=$5 ew=$(dec "$6") eh=$(dec "$7")
+  [ "$hw" -eq "$ew" ] && [ "$hh" -eq "$eh" ] && [ "$hmax" -eq 255 ] ||
+    die "capture geometry or channel depth mismatch"
+  total=$(wc -c < "$path" | tr -d ' ')
+  [ $((total - off)) -eq $((hw * hh * 3)) ] || die "capture pixel payload is incomplete"
+  differs=$(tail -c +$((off + 1)) "$path" 2>/dev/null | od -An -v -tu1 2>/dev/null | awk '
+    { for (i = 1; i <= NF; i++) {
+        r = n % 3
+        if (n < 3) first[r] = $i
+        else if ($i != first[r]) { print "yes"; exit }
+        n++
+      } }')
+  [ "$differs" = yes ] || die "capture is a uniform surface"
+}
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/qmp-send.XXXXXX") || die "cannot create temp dir"
+ncpid=
+cleanup() {
+  exec 3>&-
+  [ -z "$ncpid" ] || kill "$ncpid" 2>/dev/null
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+trap '' PIPE # a dead peer must surface as a failed write, not a silent SIGPIPE kill
+
+mkfifo "$tmp/in" || die "mkfifo failed"
+: > "$tmp/out"
+nc -U "$sock" < "$tmp/in" > "$tmp/out" 2> "$tmp/err" &
+ncpid=$!
+exec 3> "$tmp/in"
+cursor=0
+
+# await ERE: wait for the next reply line matching ERE after the cursor; sets reply.
+await() {
+  tries=0 dead=0
+  while :; do
+    hit=$(awk -v c="$cursor" -v pat="$1" 'NR > c && $0 ~ pat { print NR "\t" $0; exit }' "$tmp/out")
+    if [ -n "$hit" ]; then
+      cursor=${hit%%	*}
+      reply=${hit#*	}
+      return 0
+    fi
+    [ "$dead" = 1 ] && die "QMP connection closed"
+    kill -0 "$ncpid" 2>/dev/null || dead=1
+    tries=$((tries + 1))
+    [ "$tries" -le 1200 ] || die "timed out waiting for QMP"
+    sleep 0.05
+  done
+}
+
+json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+# qmp_execute COMMAND [ARGUMENTS_JSON]
+qmp_execute() {
+  if [ $# -gt 1 ]; then
+    # one JSON document per line: fold the multi-line argument text
+    printf '{"execute": "%s", "arguments": %s}\n' "$1" "$(printf '%s' "$2" | tr '\n' ' ')" >&3 || die "QMP connection closed"
+  else
+    printf '{"execute": "%s"}\n' "$1" >&3 || die "QMP connection closed"
+  fi
+  await '^[{] *"(return|error)" *:'
+  case $reply in
+    '{"error"'*|'{ "error"'*) die "QMP error: $reply" ;;
+  esac
+}
+
+await '^[{]'
+qmp_execute qmp_capabilities
+
+if [ "$mode" = capture ]; then
+  # Freeze the guest before screendump so the PPM is the exact ramfb state belonging to
+  # the final serial/device receipt; leaving it stopped keeps a newer animation frame from
+  # racing the wrapper's later receipt lookup and checksum correlation.
+  qmp_execute stop
+  qmp_execute screendump "{\"filename\": \"$(json_escape "$capture")\"}"
+  validate_ppm_capture "$capture" "$want_w" "$want_h"
+  exit 0
+fi
+
+qmp_execute input-send-event '{"events": [
+{"type": "rel", "data": {"axis": "x", "value": 7}},
+{"type": "rel", "data": {"axis": "y", "value": 5}},
+{"type": "btn", "data": {"down": true, "button": "left"}},
+{"type": "rel", "data": {"axis": "x", "value": 11}},
+{"type": "rel", "data": {"axis": "y", "value": 3}},
+{"type": "btn", "data": {"down": false, "button": "left"}},
+{"type": "btn", "data": {"down": true, "button": "wheel-up"}},
+{"type": "btn", "data": {"down": false, "button": "wheel-up"}},
+{"type": "key", "data": {"down": true, "key": {"type": "qcode", "data": "ctrl"}}},
+{"type": "key", "data": {"down": false, "key": {"type": "qcode", "data": "ctrl"}}},
+{"type": "key", "data": {"down": true, "key": {"type": "qcode", "data": "ctrl_r"}}},
+{"type": "key", "data": {"down": false, "key": {"type": "qcode", "data": "ctrl_r"}}},
+{"type": "key", "data": {"down": true, "key": {"type": "qcode", "data": "alt"}}},
+{"type": "key", "data": {"down": false, "key": {"type": "qcode", "data": "alt"}}},
+{"type": "key", "data": {"down": true, "key": {"type": "qcode", "data": "alt_r"}}},
+{"type": "key", "data": {"down": false, "key": {"type": "qcode", "data": "alt_r"}}}
+]}'

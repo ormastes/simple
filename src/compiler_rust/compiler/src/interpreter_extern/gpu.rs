@@ -2905,9 +2905,9 @@ pub fn rt_vk_kernel_launch_1d_fn(args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Int(result as i64))
 }
 
-/// WebGPU availability stub — always returns false (0) in interpreter mode.
+/// WebGPU availability stub — `rt_webgpu_is_available() -> bool`; always false in interpreter mode.
 pub fn rt_webgpu_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// WebGPU init/shutdown stubs — always return false (0) in interpreter mode.
@@ -2921,7 +2921,7 @@ pub fn rt_webgpu_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
 
 /// `rt_opencl_is_available() -> bool`
 pub fn rt_opencl_is_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(if opencl_dlopen::platform_count() > 0 { 1 } else { 0 }))
+    Ok(Value::Bool(opencl_dlopen::platform_count() > 0))
 }
 
 /// `rt_opencl_platform_count() -> i64`
