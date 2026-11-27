@@ -12,7 +12,7 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, St
     immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1,
     _isv1_publish_root_inner, _isv1_publish_root_prepare, _isv1_publish_root_commit, _isv1_root_compact,
     _isv1_root_head_begin, _isv1_root_head_finish, _isv1_root_scan, _isv1_root_floor_path,
-    _isv1_root_claim_path, _isv1_doc_encode}
+    _isv1_root_claim_path, _isv1_doc_encode, _isv1_collect_inner, _isv1_publish, _isv1_object_path}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -964,4 +964,51 @@ describe "immutable_store_v1 root claim compaction":
         val rejected = immutable_store_v1_collect(root, StoreFlagV1(true))
         expect(rejected.status).to_equal("rejected")
         expect(rejected.reason).to_start_with("root-floor-corrupt")
+        _store_cleanup(root)
+
+describe "immutable_store_v1 collect staging sweep":
+    it "removes a stale staging dir on a non-dry-run collect but not on a dry run":
+        val root = _store_root("collect-sweep")
+        val stored = immutable_store_v1_ingest(root, "collect sweep payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(stored.status).to_equal("ok")
+        dir_create_all(root + "/staging/ingest-stale")
+        dir_create_all(root + "/staging/other-keep")
+        # Age bound 0 makes every recognised staging dir stale; the dry run still keeps it.
+        expect(_isv1_collect_inner(root, StoreFlagV1(true), 0).status).to_equal("ok")
+        expect(is_dir(root + "/staging/ingest-stale")).to_equal(true)
+        # The public entry keeps the one-hour bound, so a fresh dir survives it.
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).status).to_equal("ok")
+        expect(is_dir(root + "/staging/ingest-stale")).to_equal(true)
+        expect(_isv1_collect_inner(root, StoreFlagV1(false), 0).status).to_equal("ok")
+        expect(is_dir(root + "/staging/ingest-stale")).to_equal(false)
+        expect(is_dir(root + "/staging/other-keep")).to_equal(true)
+        _store_cleanup(root)
+
+describe "immutable_store_v1 object publish lost race":
+    it "reuses a winner with identical bytes planted at the object path":
+        val root = _store_root("lost-race-same")
+        val bytes = "lost race same".bytes()
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, bytes)
+        val key = "xxh3-128_" + digest.hex
+        dir_create_all(root + "/objects/xx")
+        expect(file_write_bytes(_isv1_object_path(root, key), bytes)).to_equal(true)
+        val result = _isv1_publish(root, key, bytes, "xxh3-128", digest.hex, "", false, "", "")
+        expect(result.status).to_equal("ok")
+        expect(result.object_key).to_equal(key)
+        expect(result.reused.value).to_equal(true)
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        expect(immutable_store_v1_open(root, key).status).to_equal("ok")
+        _store_cleanup(root)
+
+    it "disambiguates when the winner at the object path holds different bytes":
+        val root = _store_root("lost-race-diff")
+        val bytes = "lost race mine".bytes()
+        val digest = hash_policy_v1_digest(HASH_POLICY_V1_XXH3_128, bytes)
+        val key = "xxh3-128_" + digest.hex
+        dir_create_all(root + "/objects/xx")
+        expect(file_write_bytes(_isv1_object_path(root, key), "someone else's bytes".bytes())).to_equal(true)
+        val result = _isv1_publish(root, key, bytes, "xxh3-128", digest.hex, "", false, "", "")
+        expect(result.status).to_equal("ok")
+        expect(result.object_key).to_equal(key + "_c1")
+        expect(dir_list(root + "/staging").len()).to_equal(0)
         _store_cleanup(root)
