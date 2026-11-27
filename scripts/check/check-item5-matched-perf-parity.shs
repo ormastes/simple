@@ -174,8 +174,9 @@ run_pair() {
 }
 
 compare_trees() {
-    case_name=$1
+    case_name=$1 need=${2:-optional}
     py="$work/py-$case_name" spl="$work/spl-$case_name"
+    if [ "$need" = required ] && { [ ! -d "$py" ] || [ ! -d "$spl" ]; }; then failures="$failures $case_name:output-missing"; return 0; fi
     if [ ! -d "$py" ] && [ ! -d "$spl" ]; then return 0; fi
     if [ ! -d "$py" ] || [ ! -d "$spl" ]; then failures="$failures $case_name:output-presence"; return 0; fi
     (cd "$py" && find . -type f | LC_ALL=C sort) > "$work/$case_name.py.files"
@@ -187,7 +188,8 @@ compare_trees() {
             ./host-before.json|./host-after.json|./tools.json)
                 for side in py spl; do
                     eval "dir=\$$side"
-                    grep -o '^  "[a-z_]*":' "$dir/$rel" > "$work/keys.$side"
+                    grep -o '^  "[^"]*":' "$dir/$rel" | sed 's|"/[^"]*"|"<path>"|' > "$work/keys.$side"
+                    [ -s "$work/keys.$side" ] || failures="$failures $case_name:$rel(empty-keys:$side)"
                 done
                 cmp -s "$work/keys.py" "$work/keys.spl" || failures="$failures $case_name:$rel(keys)" ;;
             ./terminal.json)
@@ -202,11 +204,12 @@ compare_trees() {
 }
 
 run_pair good "$fx/good.json"
-compare_trees good
+[ "$py_rc" = 0 ] && [ "$spl_rc" = 0 ] || failures="$failures good:nonzero($py_rc/$spl_rc)"
+compare_trees good required
 run_pair bad-schema "$fx/bad-schema.json"
 compare_trees bad-schema
 run_pair bad-sample "$fx/bad-sample.json"
-compare_trees bad-sample
+compare_trees bad-sample required
 
 # Trust anchor: the twin alone must refuse an unpinned or mismatched runner before any effect.
 (cd "$root" && "$simple_bin" run "$spl_runner" --manifest "$fx/good.json" --output "$work/out-unpinned") > /dev/null 2>&1
