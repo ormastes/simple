@@ -2,7 +2,8 @@
 # The default embedded renderer never imports this module. This is a strict
 # subset of the shared DrawIrComposition contract, not a second public IR.
 
-use common.ui.draw_ir.{DrawIrComposition, DrawIrAffine2D,
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition, DrawIrAffine2D, DrawIrRect,
+    DrawIrDashRun, DrawIrDashRunsResult, draw_ir_parse_dash_runs,
     DRAW_IR_BACKEND_GPU, DRAW_IR_SCHEMA_VERSION_V4,
     DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA,
     draw_ir_command_has_unsupported_v4_state}
@@ -90,6 +91,26 @@ fn _upstream_skia_exact_clip(clip_x: i64, clip_y: i64,
         _upstream_skia_exact_scalar(right.to_f64()) and
         _upstream_skia_exact_scalar(bottom.to_f64())
 
+fn _upstream_skia_dash_run_valid(run: DrawIrDashRun, clip_present: bool,
+    target_w: i32, target_h: i32) -> bool:
+    val rx = run.x.to_f64()
+    val ry = run.y.to_f64()
+    val rw = run.width.to_f64()
+    val rh = run.height.to_f64()
+    if (not _upstream_skia_exact_scalar(rx) or
+        not _upstream_skia_exact_scalar(ry) or
+        not _upstream_skia_exact_scalar(rw) or
+        not _upstream_skia_exact_scalar(rh)):
+        return false
+    if run.width <= 0 or run.height <= 0:
+        return false
+    if clip_present:
+        return (_upstream_skia_exact_scalar((run.x.to_i64() + run.width.to_i64()).to_f64()) and
+            _upstream_skia_exact_scalar((run.y.to_i64() + run.height.to_i64()).to_f64()))
+    (run.x >= 0 and run.y >= 0 and
+        run.x.to_i64() + run.width.to_i64() <= target_w.to_i64() and
+        run.y.to_i64() + run.height.to_i64() <= target_h.to_i64())
+
 fn _upstream_skia_rects_admitted(composition: DrawIrComposition,
     ir: UiIr) -> UpstreamSkiaGaneshAdmission:
     if not ir.accepted:
@@ -113,6 +134,7 @@ fn _upstream_skia_rects_admitted(composition: DrawIrComposition,
         return _upstream_skia_rejected("invalid rectangle count", 0, -1)
     var index = 0
     var has_clip = false
+    var total_rects: i64 = 0
     while index < ir.commands.len():
         val command = ir.commands[index]
         val source_command = composition.batches[0].commands[index]
@@ -128,7 +150,7 @@ fn _upstream_skia_rects_admitted(composition: DrawIrComposition,
             source_command.glyph_run.ys.len() != 0 or
             source_command.glyph_run.clusters.len() != 0:
             return _upstream_skia_rejected("rectangle carries unsupported payload", 0, index)
-        if command.computed_style.len() != 0 or command.parent_id != "" or
+        if command.parent_id != "" or
             command.border_rect.present or
             command.content_rect.present or command.hit_rect.present:
             return _upstream_skia_rejected("rectangle has unsupported style or state", 0, index)
@@ -153,19 +175,33 @@ fn _upstream_skia_rects_admitted(composition: DrawIrComposition,
                 command.x + command.width > embedding.width.to_f64() or
                 command.y + command.height > embedding.height.to_f64():
                 return _upstream_skia_rejected("rectangle is empty or outside target", 0, index)
-        if ((command.color >> 24) & 0xffu32) != 0xffu32:
-            return _upstream_skia_rejected("opaque rectangle required", 0, index)
-        if index == 0 and (source_command.fractional_geometry.is_some() or
-            command.clip_rect.present or
-            command.x != 0.0 or command.y != 0.0 or
-            command.width != embedding.width.to_f64() or
-            command.height != embedding.height.to_f64()):
-            return _upstream_skia_rejected("integer full-target clear required first", 0, index)
+        if command.computed_style.len() != 0:
+            if index == 0:
+                return _upstream_skia_rejected("rectangle has unsupported style or state", 0, index)
+            val dash = draw_ir_parse_dash_runs(source_command)
+            if not dash.valid:
+                return _upstream_skia_rejected("rectangle has unsupported style or state", 0, index)
+            for run in dash.runs:
+                if not _upstream_skia_dash_run_valid(run, command.clip_rect.present, embedding.width, embedding.height):
+                    return _upstream_skia_rejected("rectangle is empty or outside target", 0, index)
+            total_rects = total_rects + dash.runs.len().to_i64()
+        else:
+            if ((command.color >> 24) & 0xffu32) != 0xffu32:
+                return _upstream_skia_rejected("opaque rectangle required", 0, index)
+            if index == 0 and (source_command.fractional_geometry.is_some() or
+                command.clip_rect.present or
+                command.x != 0.0 or command.y != 0.0 or
+                command.width != embedding.width.to_f64() or
+                command.height != embedding.height.to_f64()):
+                return _upstream_skia_rejected("integer full-target clear required first", 0, index)
+            total_rects = total_rects + 1
         index = index + 1
+    if total_rects == 0 or total_rects > 65536:
+        return _upstream_skia_rejected("invalid rectangle count", 0, -1)
     UpstreamSkiaGaneshAdmission(accepted: true, reason: "",
         batch_index: -1, command_index: -1,
         width: embedding.width, height: embedding.height,
-        rect_count: ir.commands.len(),
+        rect_count: total_rects as i32,
         draw_format: if has_clip: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2 else:
             UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V1,
         draw_magic: if has_clip: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V2 else:
@@ -285,6 +321,7 @@ fn _upstream_skia_affine_v3_admitted(composition: DrawIrComposition,
     if ir.commands.len() == 0 or ir.commands.len() > 65536:
         return _upstream_skia_rejected("invalid rectangle count", 0, -1)
     var index = 0
+    var total_rects: i64 = 0
     while index < ir.commands.len():
         val command = ir.commands[index]
         val source = composition.batches[0].commands[index]
@@ -298,11 +335,16 @@ fn _upstream_skia_affine_v3_admitted(composition: DrawIrComposition,
             source.glyph_run.ys.len() != 0 or
             source.glyph_run.clusters.len() != 0:
             return _upstream_skia_rejected("rectangle carries unsupported payload", 0, index)
-        if command.computed_style.len() != 0 or command.parent_id != "" or
+        if command.parent_id != "" or
             command.border_rect.present or command.content_rect.present or
             command.hit_rect.present:
             return _upstream_skia_rejected("rectangle has unsupported style, parent, or hit state", 0, index)
-        if ((command.color >> 24) & 0xffu32) != 0xffu32:
+        val has_style = command.computed_style.len() != 0
+        if has_style and (index == 0 or command.affine_transform.is_some() or
+            source.fractional_geometry.is_some() or
+            command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER):
+            return _upstream_skia_rejected("rectangle has unsupported style, parent, or hit state", 0, index)
+        if not has_style and ((command.color >> 24) & 0xffu32) != 0xffu32:
             return _upstream_skia_rejected("opaque rectangle required", 0, index)
         if not (_upstream_skia_v3_finite(command.x) and
             _upstream_skia_v3_finite(command.y) and
@@ -333,6 +375,7 @@ fn _upstream_skia_affine_v3_admitted(composition: DrawIrComposition,
             if not _upstream_skia_v3_affine_admitted(command.x, command.y,
                 command.width, command.height, matrix):
                 return _upstream_skia_rejected("affine f32 corner error or determinant invalid", 0, index)
+            total_rects = total_rects + 1
         else:
             if not (_upstream_skia_exact_scalar(command.x) and
                 _upstream_skia_exact_scalar(command.y) and
@@ -347,11 +390,23 @@ fn _upstream_skia_affine_v3_admitted(composition: DrawIrComposition,
                 command.x + command.width > embedding.width.to_f64() or
                 command.y + command.height > embedding.height.to_f64():
                 return _upstream_skia_rejected("rectangle is outside target", 0, index)
+            if has_style:
+                val dash = draw_ir_parse_dash_runs(source)
+                if not dash.valid:
+                    return _upstream_skia_rejected("rectangle has unsupported style, parent, or hit state", 0, index)
+                for run in dash.runs:
+                    if not _upstream_skia_dash_run_valid(run, command.clip_rect.present, embedding.width, embedding.height):
+                        return _upstream_skia_rejected("rectangle is outside target", 0, index)
+                total_rects = total_rects + dash.runs.len().to_i64()
+            else:
+                total_rects = total_rects + 1
         index = index + 1
+    if total_rects == 0 or total_rects > 65536:
+        return _upstream_skia_rejected("invalid rectangle count", 0, -1)
     UpstreamSkiaGaneshAdmission(accepted: true, reason: "",
         batch_index: -1, command_index: -1,
         width: embedding.width, height: embedding.height,
-        rect_count: ir.commands.len(),
+        rect_count: total_rects as i32,
         draw_format: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3,
         draw_magic: UPSTREAM_SKIA_GANESH_VULKAN_DRAW_MAGIC_V3,
         rect_stride: 128)
@@ -360,7 +415,64 @@ pub fn upstream_skia_ganesh_vulkan_preflight_affine_v3_candidate(
     composition: DrawIrComposition) -> UpstreamSkiaGaneshAdmission:
     _upstream_skia_affine_v3_admitted(composition, draw_ir_to_ui_ir(composition))
 
-fn _upstream_skia_payload(ir: UiIr, admission: UpstreamSkiaGaneshAdmission) -> i64:
+fn _upstream_skia_write_rect_record(ptr: i64, out_index: i32, rx: f64, ry: f64,
+    rw: f64, rh: f64, color: u32, clip_rect: DrawIrRect,
+    affine_transform: DrawIrAffine2D?, raster_policy: text,
+    admission: UpstreamSkiaGaneshAdmission):
+    val offset = 16 + out_index.to_i64() * admission.rect_stride
+    raw_write_i64(ptr, offset, spl_f64_to_bits(rx))
+    raw_write_i64(ptr, offset + 8, spl_f64_to_bits(ry))
+    raw_write_i64(ptr, offset + 16, spl_f64_to_bits(rw))
+    raw_write_i64(ptr, offset + 24, spl_f64_to_bits(rh))
+    raw_write_i64(ptr, offset + 32, color.to_i64())
+    if admission.draw_format == UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2:
+        if clip_rect.present:
+            raw_write_i64(ptr, offset + 40,
+                ((clip_rect.x as u32).to_u64() |
+                ((clip_rect.y as u32).to_u64() << 32)) as i64)
+            raw_write_i64(ptr, offset + 48,
+                ((clip_rect.width as u32).to_u64() |
+                ((clip_rect.height as u32).to_u64() << 32)) as i64)
+            raw_write_i64(ptr, offset + 56, 1)
+        else:
+            raw_write_i64(ptr, offset + 40, 0)
+            raw_write_i64(ptr, offset + 48, 0)
+            raw_write_i64(ptr, offset + 56, 0)
+    elif admission.draw_format == UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3:
+        var flags: i64 = 0
+        if clip_rect.present:
+            raw_write_i64(ptr, offset + 40,
+                ((clip_rect.x as u32).to_u64() |
+                ((clip_rect.y as u32).to_u64() << 32)) as i64)
+            raw_write_i64(ptr, offset + 48,
+                ((clip_rect.width as u32).to_u64() |
+                ((clip_rect.height as u32).to_u64() << 32)) as i64)
+            flags = 1
+        else:
+            raw_write_i64(ptr, offset + 40, 0)
+            raw_write_i64(ptr, offset + 48, 0)
+        if val matrix = affine_transform:
+            flags = flags | 2
+            raw_write_i64(ptr, offset + 64, spl_f64_to_bits(matrix.a))
+            raw_write_i64(ptr, offset + 72, spl_f64_to_bits(matrix.b))
+            raw_write_i64(ptr, offset + 80, spl_f64_to_bits(matrix.c))
+            raw_write_i64(ptr, offset + 88, spl_f64_to_bits(matrix.d))
+            raw_write_i64(ptr, offset + 96, spl_f64_to_bits(matrix.tx))
+            raw_write_i64(ptr, offset + 104, spl_f64_to_bits(matrix.ty))
+        else:
+            raw_write_i64(ptr, offset + 64, 0)
+            raw_write_i64(ptr, offset + 72, 0)
+            raw_write_i64(ptr, offset + 80, 0)
+            raw_write_i64(ptr, offset + 88, 0)
+            raw_write_i64(ptr, offset + 96, 0)
+            raw_write_i64(ptr, offset + 104, 0)
+        raw_write_i64(ptr, offset + 56, flags)
+        raw_write_i64(ptr, offset + 112,
+            if raster_policy == DRAW_IR_RASTER_COVERAGE_AA: 1 else: 0)
+        raw_write_i64(ptr, offset + 120, 0)
+
+fn _upstream_skia_payload(composition: DrawIrComposition, ir: UiIr,
+    admission: UpstreamSkiaGaneshAdmission) -> i64:
     val size = 16 + admission.rect_count.to_i64() * admission.rect_stride
     val ptr = raw_alloc(size)
     if ptr == 0:
@@ -370,63 +482,28 @@ fn _upstream_skia_payload(ir: UiIr, admission: UpstreamSkiaGaneshAdmission) -> i
         (admission.width.to_i64() << 32))
     raw_write_i64(ptr, 8, admission.height.to_i64() |
         (admission.rect_count.to_i64() << 32))
-    var index = 0
-    while index < admission.rect_count:
-        val rect = ir.commands[index]
-        val offset = 16 + index.to_i64() * admission.rect_stride
-        raw_write_i64(ptr, offset, spl_f64_to_bits(rect.x))
-        raw_write_i64(ptr, offset + 8, spl_f64_to_bits(rect.y))
-        raw_write_i64(ptr, offset + 16, spl_f64_to_bits(rect.width))
-        raw_write_i64(ptr, offset + 24, spl_f64_to_bits(rect.height))
-        raw_write_i64(ptr, offset + 32, rect.color.to_i64())
-        if admission.draw_format == UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V2:
-            if rect.clip_rect.present:
-                val clip = rect.clip_rect
-                raw_write_i64(ptr, offset + 40,
-                    ((clip.x as u32).to_u64() |
-                    ((clip.y as u32).to_u64() << 32)) as i64)
-                raw_write_i64(ptr, offset + 48,
-                    ((clip.width as u32).to_u64() |
-                    ((clip.height as u32).to_u64() << 32)) as i64)
-                raw_write_i64(ptr, offset + 56, 1)
-            else:
-                raw_write_i64(ptr, offset + 40, 0)
-                raw_write_i64(ptr, offset + 48, 0)
-                raw_write_i64(ptr, offset + 56, 0)
-        elif admission.draw_format == UPSTREAM_SKIA_GANESH_VULKAN_DRAW_FORMAT_V3:
-            var flags: i64 = 0
-            if rect.clip_rect.present:
-                val clip = rect.clip_rect
-                raw_write_i64(ptr, offset + 40,
-                    ((clip.x as u32).to_u64() |
-                    ((clip.y as u32).to_u64() << 32)) as i64)
-                raw_write_i64(ptr, offset + 48,
-                    ((clip.width as u32).to_u64() |
-                    ((clip.height as u32).to_u64() << 32)) as i64)
-                flags = 1
-            else:
-                raw_write_i64(ptr, offset + 40, 0)
-                raw_write_i64(ptr, offset + 48, 0)
-            if val matrix = rect.affine_transform:
-                flags = flags | 2
-                raw_write_i64(ptr, offset + 64, spl_f64_to_bits(matrix.a))
-                raw_write_i64(ptr, offset + 72, spl_f64_to_bits(matrix.b))
-                raw_write_i64(ptr, offset + 80, spl_f64_to_bits(matrix.c))
-                raw_write_i64(ptr, offset + 88, spl_f64_to_bits(matrix.d))
-                raw_write_i64(ptr, offset + 96, spl_f64_to_bits(matrix.tx))
-                raw_write_i64(ptr, offset + 104, spl_f64_to_bits(matrix.ty))
-            else:
-                raw_write_i64(ptr, offset + 64, 0)
-                raw_write_i64(ptr, offset + 72, 0)
-                raw_write_i64(ptr, offset + 80, 0)
-                raw_write_i64(ptr, offset + 88, 0)
-                raw_write_i64(ptr, offset + 96, 0)
-                raw_write_i64(ptr, offset + 104, 0)
-            raw_write_i64(ptr, offset + 56, flags)
-            raw_write_i64(ptr, offset + 112,
-                if rect.raster_policy == DRAW_IR_RASTER_COVERAGE_AA: 1 else: 0)
-            raw_write_i64(ptr, offset + 120, 0)
-        index = index + 1
+    var cmd_idx = 0
+    var out_idx: i32 = 0
+    while cmd_idx < ir.commands.len() and out_idx < admission.rect_count:
+        val rect = ir.commands[cmd_idx]
+        val source_cmd = composition.batches[0].commands[cmd_idx]
+        if rect.computed_style.len() != 0:
+            val dash = draw_ir_parse_dash_runs(source_cmd)
+            for run in dash.runs:
+                if out_idx < admission.rect_count:
+                    _upstream_skia_write_rect_record(ptr, out_idx,
+                        run.x.to_f64(), run.y.to_f64(),
+                        run.width.to_f64(), run.height.to_f64(),
+                        run.color, rect.clip_rect, None,
+                        rect.raster_policy, admission)
+                    out_idx = out_idx + 1
+        else:
+            _upstream_skia_write_rect_record(ptr, out_idx,
+                rect.x, rect.y, rect.width, rect.height,
+                rect.color, rect.clip_rect, rect.affine_transform,
+                rect.raster_policy, admission)
+            out_idx = out_idx + 1
+        cmd_idx = cmd_idx + 1
     ptr
 
 fn _upstream_skia_copy_bytes(ptr: i64, length: i64) -> [i64]:
@@ -441,25 +518,35 @@ fn _upstream_skia_copy_bytes(ptr: i64, length: i64) -> [i64]:
         offset = offset + 4
     out
 
+fn _upstream_skia_serialize_bytes(composition: DrawIrComposition, ir: UiIr,
+    admission: UpstreamSkiaGaneshAdmission) -> Result<[i64], text>:
+    if not admission.accepted:
+        return Err(admission.reason)
+    val length = 16 + admission.rect_count.to_i64() * admission.rect_stride
+    val ptr = _upstream_skia_payload(composition, ir, admission)
+    if ptr == 0:
+        return Err("upstream Skia payload allocation failed")
+    val bytes = _upstream_skia_copy_bytes(ptr, length)
+    raw_free(ptr, length)
+    Ok(bytes)
+
+fn upstream_skia_ganesh_vulkan_payload_bytes(
+    composition: DrawIrComposition) -> Result<[i64], text>:
+    val ir = draw_ir_to_ui_ir(composition)
+    _upstream_skia_serialize_bytes(
+        composition, ir, _upstream_skia_rects_admitted(composition, ir))
+
 # Candidate wire inspection uses the same serializer as submit. It creates no
 # native provider session and never promotes V3 to the default render route.
 pub fn upstream_skia_ganesh_vulkan_payload_bytes_affine_v3_candidate(
     composition: DrawIrComposition) -> Result<[i64], text>:
     val ir = draw_ir_to_ui_ir(composition)
-    val admission = _upstream_skia_affine_v3_admitted(composition, ir)
-    if not admission.accepted:
-        return Err(admission.reason)
-    val length = 16 + admission.rect_count.to_i64() * admission.rect_stride
-    val ptr = _upstream_skia_payload(ir, admission)
-    if ptr == 0:
-        return Err("upstream Skia V3 payload allocation failed")
-    val bytes = _upstream_skia_copy_bytes(ptr, length)
-    raw_free(ptr, length)
-    Ok(bytes)
+    _upstream_skia_serialize_bytes(
+        composition, ir, _upstream_skia_affine_v3_admitted(composition, ir))
 
 # Both entrypoints use the same authenticated owner and readback path. The
 # candidate differs only in complete preflight and its private wire format.
-fn _upstream_skia_render_admitted(ir: UiIr,
+fn _upstream_skia_render_admitted(composition: DrawIrComposition, ir: UiIr,
     admission: UpstreamSkiaGaneshAdmission, device_index: i64,
     correlation_id: i64) -> Result<UpstreamSkiaGaneshFrame, text>:
     if device_index < 0 or correlation_id <= 0:
@@ -480,7 +567,7 @@ fn _upstream_skia_render_admitted(ir: UiIr,
             return Err("upstream Skia output allocation failed")
         return Err("upstream Skia session retirement failed")
     val payload_length = 16 + admission.rect_count.to_i64() * admission.rect_stride
-    val payload = _upstream_skia_payload(ir, admission)
+    val payload = _upstream_skia_payload(composition, ir, admission)
     if payload == 0:
         val released = resource.release()
         val closed = session.close()
@@ -558,7 +645,7 @@ pub fn upstream_skia_ganesh_vulkan_render(composition: DrawIrComposition,
     val admission = _upstream_skia_rects_admitted(composition, ir)
     if not admission.accepted:
         return Err(admission.reason)
-    _upstream_skia_render_admitted(ir, admission, device_index, correlation_id)
+    _upstream_skia_render_admitted(composition, ir, admission, device_index, correlation_id)
 
 # The native V3 execution flag is default-disabled. Even admitted compositions
 # return an error if the authenticated provider does not enable that flag.
@@ -569,7 +656,7 @@ pub fn upstream_skia_ganesh_vulkan_render_affine_v3_candidate(
     val admission = _upstream_skia_affine_v3_admitted(composition, ir)
     if not admission.accepted:
         return Err(admission.reason)
-    _upstream_skia_render_admitted(ir, admission, device_index, correlation_id)
+    _upstream_skia_render_admitted(composition, ir, admission, device_index, correlation_id)
 
 # Package the completed Skia readback with the pixel-domain facts fixed by
 # render(): one offscreen RGBA8888 target, unpremultiplied sRGB readback at
@@ -619,4 +706,4 @@ pub fn upstream_skia_ganesh_vulkan_final_capture(frame: UpstreamSkiaGaneshFrame,
         case Err(err): Err("upstream Skia capture invalid: " + err.code)
         case Ok(_): Ok(capture)
 
-export UpstreamSkiaGaneshAdmission, UpstreamSkiaGaneshFrame
+export UpstreamSkiaGaneshAdmission, UpstreamSkiaGaneshFrame, upstream_skia_ganesh_vulkan_payload_bytes

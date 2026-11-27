@@ -1,0 +1,281 @@
+# @tag: unit, os, compositor, perf
+"""
+WM scene CSS & direct pixel rendering exactness and performance regression spec.
+"""
+
+use std.spec
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_snapshot_present}
+use os.compositor.wm_scene.{
+    SceneElement,
+    WmSceneSpec,
+    render_scene_to_backend,
+    scene_to_html,
+    standard_wm_scene,
+    wm_scene_direct_rect_pixels
+}
+use common.ui.glyph_bitmap_5x7.{glyph_rows_for_char}
+
+fn _fnv1a_pixels(pixels: [u32]) -> u64:
+    var h: u64 = 0xCBF29CE484222325u64
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        h = (h ^ (pixels[i] as u64)) * 0x100000001b3u64
+        i = i + 1
+    h
+
+fn _ref_blend(fg: u32, bg: u32) -> u32:
+    val alpha = (fg >> 24) & 0xFFu32
+    if alpha == 0u32:
+        return bg
+    if alpha >= 255u32:
+        return fg
+    val inv = 255u32 - alpha
+    val fr = (fg >> 16) & 0xFFu32
+    val fgg = (fg >> 8) & 0xFFu32
+    val fb = fg & 0xFFu32
+    val br = (bg >> 16) & 0xFFu32
+    val bgg = (bg >> 8) & 0xFFu32
+    val bb = bg & 0xFFu32
+    val r = (fr * alpha + br * inv + 127u32) / 255u32
+    val g = (fgg * alpha + bgg * inv + 127u32) / 255u32
+    val b = (fb * alpha + bb * inv + 127u32) / 255u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn _ref_inside_corner(lx: i32, ly: i32, w: i32, h: i32, r: i32) -> bool:
+    if r <= 0:
+        return true
+    var dx = 0
+    var dy = 0
+    if lx < r:
+        dx = r - lx - 1
+    elif lx >= w - r:
+        dx = lx - (w - r)
+    else:
+        return true
+    if ly < r:
+        dy = r - ly - 1
+    elif ly >= h - r:
+        dy = ly - (h - r)
+    else:
+        return true
+    (dx * dx + dy * dy) <= (r * r)
+
+fn _ref_radius(kind: text, w: i32, h: i32) -> i32:
+    if w < 16 or h < 16:
+        return 0
+    var r = 0
+    if kind == "taskbar" or kind == "workspace_switcher" or kind == "live_activity":
+        r = h / 2
+        if r > 16:
+            r = 16
+    elif kind == "glass_panel" or kind == "motion_window" or kind == "command_palette" or kind == "control_center" or kind == "desktop_widgets" or kind == "window_overview":
+        r = 10
+    elif kind == "decoration":
+        r = 0
+    if r * 2 > w:
+        r = w / 2
+    if r * 2 > h:
+        r = h / 2
+    r
+
+fn _ref_frosted(kind: text) -> bool:
+    kind == "glass_panel" or kind == "taskbar" or kind == "command_lane" or kind == "motion_window" or kind == "command_palette" or kind == "control_center" or kind == "desktop_widgets" or kind == "window_overview" or kind == "notification_toast" or kind == "notification_center" or kind == "quick_settings" or kind == "app_launcher" or kind == "context_menu"
+
+fn _ref_is_text(kind: text) -> bool:
+    kind == "text_label" or kind == "command_clock" or kind == "taskbar_launcher" or kind == "taskbar_running"
+
+fn _ref_blurred_at(pixels: [u32], width: i32, height: i32, px: i32, py: i32) -> u32:
+    val xm = if px >= 3: px - 3 else: 0
+    val xp = if px + 3 < width: px + 3 else: width - 1
+    val ym = if py >= 3: py - 3 else: 0
+    val yp = if py + 3 < height: py + 3 else: height - 1
+    val c0 = pixels[py * width + px]
+    val c1 = pixels[py * width + xm]
+    val c2 = pixels[py * width + xp]
+    val c3 = pixels[ym * width + px]
+    val c4 = pixels[yp * width + px]
+    val r = (((c0 >> 16) & 0xFFu32) + ((c1 >> 16) & 0xFFu32) + ((c2 >> 16) & 0xFFu32) + ((c3 >> 16) & 0xFFu32) + ((c4 >> 16) & 0xFFu32)) / 5u32
+    val g = (((c0 >> 8) & 0xFFu32) + ((c1 >> 8) & 0xFFu32) + ((c2 >> 8) & 0xFFu32) + ((c3 >> 8) & 0xFFu32) + ((c4 >> 8) & 0xFFu32)) / 5u32
+    val b = ((c0 & 0xFFu32) + (c1 & 0xFFu32) + (c2 & 0xFFu32) + (c3 & 0xFFu32) + (c4 & 0xFFu32)) / 5u32
+    0xFF000000u32 | (r << 16) | (g << 8) | b
+
+fn _scalar_direct_oracle(scene: WmSceneSpec) -> [u32]:
+    val total = if scene.width > 0 and scene.height > 0: scene.width * scene.height else: 0
+    val theme = wm_chrome_theme()
+    var pixels: [u32] = [theme.compositor_bg; total]
+    if total == 0:
+        return pixels
+    val stride = scene.width
+    val frosted_active = active_wm_theme_snapshot_present()
+    for elem in scene.elements:
+        if _ref_is_text(elem.kind):
+            val ty = elem.y + (if elem.h > 7: (elem.h - 7) / 2 else: 0)
+            if elem.text != "":
+                var pen_x = elem.x
+                val max_x = if elem.x + elem.w < stride: elem.x + elem.w else: stride
+                for ch in elem.text.chars():
+                    if pen_x + 5 > max_x:
+                        break
+                    val rows = glyph_rows_for_char(ch)
+                    var r = 0
+                    while r < rows.len():
+                        val py = ty + r
+                        if py >= 0 and py < scene.height:
+                            val bits = rows[r]
+                            var c = 0
+                            while c < 5:
+                                val px = pen_x + c
+                                if px >= 0 and px < max_x and ((bits >> (4 - c)) & 1) != 0:
+                                    pixels[py * stride + px] = _ref_blend(elem.color, pixels[py * stride + px])
+                                c = c + 1
+                        r = r + 1
+                    pen_x = pen_x + 6
+        else:
+            val alpha = (elem.color >> 24) & 0xFFu32
+            if alpha == 0u32:
+                continue
+            val x0 = if elem.x < 0: 0 else: elem.x
+            val y0 = if elem.y < 0: 0 else: elem.y
+            var x1 = elem.x + elem.w
+            if x1 > stride:
+                x1 = stride
+            var y1 = elem.y + elem.h
+            if y1 > scene.height:
+                y1 = scene.height
+            val rad = if frosted_active or alpha < 255u32: _ref_radius(elem.kind, elem.w, elem.h) else: 0
+            val do_frost = _ref_frosted(elem.kind)
+            var yy = y0
+            while yy < y1:
+                var xx = x0
+                while xx < x1:
+                    if rad <= 0 or _ref_inside_corner(xx - elem.x, yy - elem.y, elem.w, elem.h, rad):
+                        val idx = yy * stride + xx
+                        if alpha >= 255u32:
+                            pixels[idx] = elem.color
+                        elif do_frost:
+                            val bg = _ref_blurred_at(pixels, stride, scene.height, xx, yy)
+                            var blended = _ref_blend(elem.color, bg)
+                            if yy == elem.y:
+                                blended = _ref_blend(0x28FFFFFFu32, blended)
+                            pixels[idx] = blended
+                        else:
+                            pixels[idx] = _ref_blend(elem.color, pixels[idx])
+                    xx = xx + 1
+                yy = yy + 1
+    pixels
+
+fn _count_pixel_diffs(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var diffs = 0
+    var i = 0
+    val n = a.len()
+    while i < n:
+        if a[i] != b[i]:
+            diffs = diffs + 1
+        i = i + 1
+    diffs
+
+fn _glass_scene(w: i32, h: i32) -> WmSceneSpec:
+    WmSceneSpec(
+        name: "glass_bench",
+        width: w,
+        height: h,
+        elements: [
+            SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: w, h: h, color: 0xFF101418u32, text: ""),
+            SceneElement(kind: "decoration", x: 20, y: 20, w: 120, h: 24, color: 0xFF2563EBu32, text: "Term"),
+            SceneElement(kind: "glass_panel", x: 16, y: 36, w: w - 32, h: h - 72, color: 0xB81E293Bu32, text: ""),
+            SceneElement(kind: "window_border", x: 16, y: h - 38, w: w - 32, h: 2, color: 0xFF38BDF8u32, text: ""),
+            SceneElement(kind: "taskbar", x: 0, y: h - 28, w: w, h: 28, color: 0xCC0F172Au32, text: ""),
+            SceneElement(kind: "text_label", x: 28, y: 26, w: 96, h: 12, color: 0xFFFFFFFFu32, text: "Term")
+        ]
+    )
+
+describe "wm_scene render perf and exactness":
+    it "preserves standard_wm_scene 80x60 CSS and direct pixels against unoptimized baseline and accelerates repeats":
+        val small = standard_wm_scene(80, 60)
+        val t0 = time_now_unix_micros()
+        val p1 = render_scene_to_backend(small, nil)
+        val t1 = time_now_unix_micros()
+        val p2 = render_scene_to_backend(small, nil)
+        val t2 = time_now_unix_micros()
+        val direct = wm_scene_direct_rect_pixels(small)
+        val html_full = scene_to_html(small)
+        print "PERF small_80x60 cold_us={t1 - t0} repeat_us={t2 - t1} hash1={_fnv1a_pixels(p1)} direct_hash={_fnv1a_pixels(direct)}\n"
+        expect(p1.len()).to_equal(80 * 60)
+        expect(p2.len()).to_equal(80 * 60)
+        expect(direct.len()).to_equal(80 * 60)
+        expect(_fnv1a_pixels(p1)).to_equal(14432758499751269943u64)
+        expect(_fnv1a_pixels(p2)).to_equal(14432758499751269943u64)
+        expect(_fnv1a_pixels(direct)).to_equal(13903082916748295269u64)
+        expect((t2 - t1) < 200000).to_equal(true)
+        expect(html_full.contains("@keyframes wm-bg-drift")).to_equal(true)
+        expect(html_full.contains("body[data-motion-mode='reduced']")).to_equal(true)
+
+    it "renders 100x100 CSS scene bit-identically to baseline and hits cache on repeat":
+        val css_scene = standard_wm_scene(100, 100)
+        val t0 = time_now_unix_micros()
+        val p1 = render_scene_to_backend(css_scene, nil)
+        val t1 = time_now_unix_micros()
+        val p2 = render_scene_to_backend(css_scene, nil)
+        val t2 = time_now_unix_micros()
+        print "PERF css_100x100 cold_us={t1 - t0} repeat_us={t2 - t1} hash={_fnv1a_pixels(p1)}\n"
+        expect(p1.len()).to_equal(100 * 100)
+        expect(p2.len()).to_equal(100 * 100)
+        expect(_fnv1a_pixels(p1)).to_equal(8367153169614613988u64)
+        expect(_fnv1a_pixels(p2)).to_equal(8367153169614613988u64)
+        expect((t2 - t1) < 200000).to_equal(true)
+
+    it "matches scalar reference oracle with zero diffs on frosted glass and standard 320x200 scenes":
+        val glass = _glass_scene(320, 200)
+        val t0 = time_now_unix_micros()
+        val gp = wm_scene_direct_rect_pixels(glass)
+        val t1 = time_now_unix_micros()
+        val gp_ref = _scalar_direct_oracle(glass)
+        val std_med = standard_wm_scene(320, 200)
+        val t2 = time_now_unix_micros()
+        val mp = render_scene_to_backend(std_med, nil)
+        val t3 = time_now_unix_micros()
+        val mp_ref = _scalar_direct_oracle(std_med)
+        print "PERF direct_320x200 glass_us={t1 - t0} glass_hash={_fnv1a_pixels(gp)} std_us={t3 - t2} std_hash={_fnv1a_pixels(mp)}\n"
+        expect(_count_pixel_diffs(gp, gp_ref)).to_equal(0)
+        expect(_count_pixel_diffs(mp, mp_ref)).to_equal(0)
+        expect(_fnv1a_pixels(mp)).to_equal(17264902467920769818u64)
+        expect(gp[0]).to_equal(0xFF101418u32)
+        expect(gp[22 * 320 + 24]).to_equal(0xFF2563EBu32)
+        expect(gp[38 * 320 + 24] != gp[100 * 320 + 160]).to_equal(true)
+        expect(gp[100 * 320 + 160] != 0xFF101418u32).to_equal(true)
+
+    it "matches scalar oracle for top-clipped frosted rect and scales cleanly to 800x600 desktop scenes":
+        val clipped = WmSceneSpec(
+            name: "clipped_glass",
+            width: 120,
+            height: 80,
+            elements: [
+                SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 120, h: 80, color: 0xFF101418u32, text: ""),
+                SceneElement(kind: "glass_panel", x: -4, y: -2, w: 128, h: 50, color: 0xB81E293Bu32, text: "")
+            ]
+        )
+        val cp = wm_scene_direct_rect_pixels(clipped)
+        val cp_ref = _scalar_direct_oracle(clipped)
+        expect(_count_pixel_diffs(cp, cp_ref)).to_equal(0)
+
+        val hd_std = standard_wm_scene(800, 600)
+        val t0 = time_now_unix_micros()
+        val hd_p = render_scene_to_backend(hd_std, nil)
+        val t1 = time_now_unix_micros()
+        val hd_p2 = render_scene_to_backend(hd_std, nil)
+        val t2 = time_now_unix_micros()
+        val hd_glass = _glass_scene(800, 600)
+        val t3 = time_now_unix_micros()
+        val hd_gp = wm_scene_direct_rect_pixels(hd_glass)
+        val t4 = time_now_unix_micros()
+        print "PERF desktop_800x600 std_us={t1 - t0} std_repeat_us={t2 - t1} glass_us={t4 - t3}\n"
+        expect(hd_p.len()).to_equal(800 * 600)
+        expect(_fnv1a_pixels(hd_p2)).to_equal(_fnv1a_pixels(hd_p))
+        expect(hd_gp.len()).to_equal(800 * 600)
+        expect((t1 - t0) < 10000000).to_equal(true)
+        expect((t2 - t1) < 500000).to_equal(true)
+        expect((t4 - t3) < 10000000).to_equal(true)

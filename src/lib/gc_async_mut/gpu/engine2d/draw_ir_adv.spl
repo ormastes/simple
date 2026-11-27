@@ -16,6 +16,8 @@ use std.common.ui.draw_ir.{
     DRAW_IR_RASTER_COVERAGE_AA,
     DrawIrBatch,
     DrawIrCommand,
+    DrawIrDashRun,
+    DrawIrDashRunsResult,
     DrawIrPoint,
     DrawIrComposition,
     DrawIrRect,
@@ -26,6 +28,7 @@ use std.common.ui.draw_ir.{
     Simple2dDrawIrPlan,
     DRAW_IR_BACKEND_GPU,
     draw_ir_no_rect,
+    draw_ir_parse_dash_runs,
     draw_ir_rect_bounds,
     draw_ir_rect_intersection,
     draw_ir_rect_translate,
@@ -1988,14 +1991,17 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
 # PATH, and resolved vector text.  In particular it never asks the generic
 # executor to turn images, effects, clipped child surfaces, or a CPU result
 # into a device receipt.
+fn _engine2d_draw_ir_strict_vulkan_rect_bounded(x: i32, y: i32, rw: i32, rh: i32, width: i32, height: i32) -> bool:
+    val right = x.to_i64() + rw.to_i64()
+    val bottom = y.to_i64() + rh.to_i64()
+    rw > 0 and rh > 0 and x >= 0 and y >= 0 and
+        right <= width.to_i64() and bottom <= height.to_i64()
+
 fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i32, height: i32) -> bool:
     if command.fractional_geometry.is_some() or draw_ir_command_has_unsupported_v4_state(command):
         return false
-    val right = command.x.to_i64() + command.width.to_i64()
-    val bottom = command.y.to_i64() + command.height.to_i64()
-    command.width > 0 and command.height > 0 and
-        command.x >= 0 and command.y >= 0 and
-        right <= width.to_i64() and bottom <= height.to_i64()
+    _engine2d_draw_ir_strict_vulkan_rect_bounded(
+        command.x, command.y, command.width, command.height, width, height)
 
 # Rasterize the authoritative f64 rectangle, rather than converting its
 # geometry to integer DrawIR. A non-AA pixel is covered exactly when its
@@ -2102,25 +2108,33 @@ fn _engine2d_draw_ir_strict_vulkan_affine_pixels(command: DrawIrCommand,
             return visible
     draw_ir_no_rect()
 
-fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> text:
-    if engine.selected_backend_name != "vulkan" or engine.vulkan_font_poisoned():
+fn engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+    selected_backend_name: text,
+    vulkan_font_poisoned: bool,
+    affine_coverage_ready: bool,
+    surface_width: i32,
+    surface_height: i32,
+    composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage]
+) -> text:
+    if selected_backend_name != "vulkan" or vulkan_font_poisoned:
         return "strict-vulkan-engine-required"
     var first = true
     var count = 0
     for batch in composition.batches:
         val embedding = batch.embedding
         if (batch.backend_target != DRAW_IR_BACKEND_GPU or embedding.x != 0 or
-            embedding.y != 0 or embedding.width != engine.width() or
-            embedding.height != engine.height() or embedding.opacity_milli != 1000 or
+            embedding.y != 0 or embedding.width != surface_width or
+            embedding.height != surface_height or embedding.opacity_milli != 1000 or
             embedding.clip):
             return "strict-vulkan-single-surface-required"
         for command in batch.commands:
             if command.? == None:
                 return "strict-vulkan-command-preflight-required"
             # A surface clip is admitted on an affine coverage rect (the
-            # coverage kernel clips in surface space) and on a later plain or
-            # fractional rect (the rect kernel's push-constant scissor). The
-            # first command is the clear, which ignores clip; text, edge and
+            # coverage kernel clips in surface space) and on a later plain,
+            # fractional, or dash-runs rect (the rect kernel's push-constant scissor).
+            # The first command is the clear, which ignores clip; text, edge and
             # path executors apply no clip; a negative clip is malformed. All
             # of those still fail closed.
             if (command.clip_rect.present and command.affine_transform == None and
@@ -2153,10 +2167,10 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
                     (command.clip_rect.present and
                      (command.clip_rect.width < 0 or command.clip_rect.height < 0))):
                     return "strict-vulkan-affine-plain-rect-required"
-                if not engine.vulkan_affine_coverage_ready():
+                if not affine_coverage_ready:
                     return "strict-vulkan-affine-coverage-pipeline-required"
                 val affine_pixels = _engine2d_draw_ir_strict_vulkan_affine_pixels(
-                    command, engine.width(), engine.height())
+                    command, surface_width, surface_height)
                 if (not affine_pixels.present or affine_pixels.width <= 0 or
                     affine_pixels.height <= 0):
                     return "strict-vulkan-affine-coverage-required"
@@ -2166,28 +2180,38 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
                 if command.kind != DRAW_IR_COMMAND_RECT:
                     return "fractional-geometry-unsupported"
                 if not _engine2d_draw_ir_strict_vulkan_fractional_pixels(
-                    command, engine.width(), engine.height()).present:
+                    command, surface_width, surface_height).present:
                     return "strict-vulkan-fractional-rect-coverage-required"
             if first and command.kind != DRAW_IR_COMMAND_RECT:
                 return "strict-vulkan-clear-first-required"
             if command.kind == DRAW_IR_COMMAND_RECT:
                 if (command.fractional_geometry == None and
                     not _engine2d_draw_ir_strict_vulkan_box_bounded(
-                        command, engine.width(), engine.height())):
+                        command, surface_width, surface_height)):
                     return "strict-vulkan-command-bounds-required"
-                if (command.computed_style.len() != 0 or
-                    ((command.color >> 24) & 0xFFu32) != 0xFFu32):
+                if command.computed_style.len() != 0:
+                    if first:
+                        return "strict-vulkan-opaque-rect-required"
+                    val dash = draw_ir_parse_dash_runs(command)
+                    if not dash.valid:
+                        return "strict-vulkan-opaque-rect-required"
+                    for run in dash.runs:
+                        if not _engine2d_draw_ir_strict_vulkan_rect_bounded(
+                            run.x, run.y, run.width, run.height,
+                            surface_width, surface_height):
+                            return "strict-vulkan-command-bounds-required"
+                elif ((command.color >> 24) & 0xFFu32) != 0xFFu32:
                     return "strict-vulkan-opaque-rect-required"
                 if first and (command.x != 0 or command.y != 0 or
-                    command.width != engine.width() or
-                    command.height != engine.height()):
+                    command.width != surface_width or
+                    command.height != surface_height):
                     return "strict-vulkan-clear-first-required"
             elif command.kind == DRAW_IR_COMMAND_TEXT:
                 if not _engine2d_draw_ir_strict_vulkan_box_bounded(
-                    command, engine.width(), engine.height()):
+                    command, surface_width, surface_height):
                     return "strict-vulkan-command-bounds-required"
                 if not _engine2d_draw_ir_fresh_device_command_supported(
-                    command, images, engine.width(), engine.height(), false, false):
+                    command, images, surface_width, surface_height, false, false):
                     return "strict-vulkan-font-preflight-required"
             elif command.kind == DRAW_IR_COMMAND_PATH and _engine2d_draw_ir_style_value(command.computed_style, "path-fill") != "":
                 # A filled path is clamped to the surface by its own fill loop.
@@ -2198,8 +2222,8 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
                 if not stroke.valid:
                     return "strict-vulkan-linear-stroke-required"
                 for point in stroke.points:
-                    if (point.x < 0 or point.y < 0 or point.x >= engine.width() or
-                        point.y >= engine.height()):
+                    if (point.x < 0 or point.y < 0 or point.x >= surface_width or
+                        point.y >= surface_height):
                         return "strict-vulkan-line-bounds-required"
             else:
                 return "strict-vulkan-primitive-kind-required"
@@ -2208,6 +2232,16 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
     if first or count == 0:
         return "strict-vulkan-nonempty-composition-required"
     ""
+
+fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> text:
+    engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface(
+        engine.selected_backend_name,
+        engine.vulkan_font_poisoned(),
+        engine.vulkan_affine_coverage_ready(),
+        engine.width(),
+        engine.height(),
+        composition,
+        images)
 
 fn _engine2d_draw_ir_strict_vulkan_rejected(composition: DrawIrComposition, reason: text) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
@@ -4218,7 +4252,13 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                     val clip = command.clip_rect
                     if clip.present:
                         eng.set_clip(clip.x, clip.y, clip.width, clip.height)
-                    if command.fractional_geometry != None:
+                    val dash = draw_ir_parse_dash_runs(command)
+                    if dash.valid:
+                        for run in dash.runs:
+                            eng.draw_rect_filled(
+                                run.x, run.y, run.width, run.height,
+                                run.color)
+                    elif command.fractional_geometry != None:
                         val pixels = _engine2d_draw_ir_strict_vulkan_fractional_pixels(
                             command, eng.width(), eng.height())
                         eng.draw_rect_filled(
@@ -5666,6 +5706,7 @@ export engine2d_draw_ir_adv_composition_window_present_with_images
 export engine2d_draw_ir_adv_fresh_device_composition_with_images
 export engine2d_draw_ir_retained_idle
 export engine2d_draw_ir_retained_rejected
+export engine2d_draw_ir_adv_strict_vulkan_preflight_reason_for_surface
 export engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 export engine2d_draw_ir_adv_strict_vulkan_submit_with_images
 export engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images
