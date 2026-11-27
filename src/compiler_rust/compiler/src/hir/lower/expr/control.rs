@@ -136,6 +136,36 @@ fn hir_arm_yields_no_value(expr: &HirExpr) -> bool {
     }
 }
 
+/// Nesting depth down to which an array literal holds only empty literals
+/// (`[]` = 1, `[[]]` and `[[], []]` = 2): below it the literal's default element
+/// type is not evidence. `None` for anything else.
+fn hir_hollow_literal_depth(expr: &HirExpr) -> Option<usize> {
+    match &expr.kind {
+        HirExprKind::Array(items) => {
+            let mut depth = usize::MAX;
+            for item in items {
+                depth = depth.min(hir_hollow_literal_depth(item)?);
+            }
+            Some(if items.is_empty() { 1 } else { depth + 1 })
+        }
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Expr(tail)) => hir_hollow_literal_depth(tail),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The value of `expr` comes from an `if`/`else` or `match` join.
+fn hir_is_value_join(expr: &HirExpr) -> bool {
+    match &expr.kind {
+        HirExprKind::If { else_branch: Some(_), .. } => true,
+        HirExprKind::LetIn { body, .. } => hir_is_value_join(body),
+        HirExprKind::Block(stmts) => matches!(stmts.last(), Some(HirStmt::Expr(tail)) if hir_is_value_join(tail)),
+        _ => false,
+    }
+}
+
 /// True when the arm value is concrete (not bottom, not a weak empty literal).
 fn hir_value_is_concrete(expr: &HirExpr) -> bool {
     weak_expr(expr) == Some(false)
@@ -421,14 +451,19 @@ impl Lowerer {
     }
 
     /// Two judged types that cannot share one slot: different classes, or
-    /// arrays whose element types disagree (`[f64]` vs `[i64]`).
-    fn join_types_disagree(&self, a: TypeId, b: TypeId) -> bool {
+    /// arrays whose element types disagree (`[f64]` vs `[i64]`). `hollow` is
+    /// the depth below which one side is only empty literals
+    /// (`hir_hollow_literal_depth`): nothing is compared past it.
+    fn join_types_disagree(&self, a: TypeId, b: TypeId, hollow: Option<usize>) -> bool {
+        if hollow == Some(0) {
+            return false;
+        }
         let (Some(ca), Some(cb)) = (self.join_class(a), self.join_class(b)) else {
             return false;
         };
         match (self.module.types.get(a), self.module.types.get(b)) {
             (Some(HirType::Array { element: ea, .. }), Some(HirType::Array { element: eb, .. })) => {
-                self.join_types_disagree(*ea, *eb)
+                self.join_types_disagree(*ea, *eb, hollow.map(|d| d - 1))
             }
             _ => ca != cb,
         }
@@ -450,16 +485,32 @@ impl Lowerer {
         }
     }
 
+    /// A float-typed `if`/`match` join stored into an integer slot (annotated
+    /// binding, assignment target, struct field). The int -> float promotion
+    /// of `join_value_arms` must never reach an int slot silently.
+    pub(in crate::hir::lower) fn reject_float_join_for_int_slot(
+        &self,
+        expected: TypeId,
+        value: &HirExpr,
+        slot: &str,
+    ) -> LowerResult<()> {
+        if hir_is_value_join(value) {
+            self.reject_float_for_int_slot(expected, value, slot)?;
+        }
+        Ok(())
+    }
+
     /// Typed join of two value-position `if`/`match` arms. The first concrete
     /// arm's type used to win and the sibling was read through it as garbage
     /// (`1` vs `"a"`, `{}` vs `5`, `[f64]` vs `[i64]`).
     ///
     /// - int vs float: the language's implicit int -> float widening (same
     ///   rule as mixed arithmetic); the int arm is converted and the join is
-    ///   the float type.
+    ///   the float type. A float join stored into an int slot is E1003
+    ///   (`reject_float_join_for_int_slot`, index, argument, return).
     /// - any other disagreement is a compile-time type error in safe code.
-    ///   Only `unsafe` code and functions of a script entry file (run by the
-    ///   interpreter, see `set_entry_script_mode`) keep the untyped join.
+    ///   Only `unsafe` code and functions of a script entry file (`.shs` /
+    ///   `.sscript`, see `set_entry_script_mode`) keep the untyped join.
     ///
     /// Bottom arms, weak empty literals against the same collection kind and
     /// types `join_class` does not judge are left to the existing rules.
@@ -503,7 +554,8 @@ impl Lowerer {
             return Ok(());
         }
         let both_concrete = hir_value_is_concrete(then_arm) && hir_value_is_concrete(else_arm);
-        let disagree = a != b || (both_concrete && self.join_types_disagree(then_arm.ty, else_arm.ty));
+        let hollow = [hir_hollow_literal_depth(then_arm), hir_hollow_literal_depth(else_arm)].into_iter().flatten().min();
+        let disagree = a != b || (both_concrete && self.join_types_disagree(then_arm.ty, else_arm.ty, hollow));
         let script_fn = crate::hir::lower::lowerer::entry_script_mode() && self.current_function_owner.is_none();
         if !disagree || ctx.unsafe_depth > 0 || script_fn {
             return Ok(());
@@ -961,8 +1013,9 @@ impl Lowerer {
         self.lower_match_with(subject, arms, "expression", ctx)
     }
 
-    /// `form` is `"expression"` or `"statement"` and only names the match form
-    /// in the no-arm-matched panic: a match used as a statement (value
+    /// `form` is `"expression"` or `"statement"`. It names the match form in the
+    /// no-arm-matched panic, and only the expression form has its arms joined
+    /// (`join_value_arms`). A match used as a statement (value
     /// discarded) fails closed exactly like a value-position one (owner
     /// decision 2026-11-14,
     /// doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md).

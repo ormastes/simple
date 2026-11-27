@@ -645,6 +645,7 @@ impl Lowerer {
                             Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_default()
                         );
                         self.reject_callable_for_enum_slot(ty, v, &slot)?;
+                        self.reject_float_join_for_int_slot(ty, v, &slot)?;
                     }
                 }
 
@@ -983,6 +984,7 @@ impl Lowerer {
 
                 let target = self.lower_expr(assign_target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
+                self.reject_float_join_for_int_slot(target.ty, &value, "the assignment target")?;
 
                 // E1052: Check for self mutation in immutable fn method
                 self.check_self_mutation_in_fn_method(&target, ctx)?;

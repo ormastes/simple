@@ -449,8 +449,8 @@ thread_local! {
 }
 
 /// Tell the lowerings that follow on this thread whether the entry file is a
-/// script: a file the driver hands to the interpreter (top-level statements,
-/// or no `main`) instead of running as a compiled safe module. Script-owned
+/// script by file kind (`.shs` / `.sscript`; `.spl` is a compiled safe module,
+/// specs included). Script-owned
 /// functions keep dynamically typed value joins; see
 /// `Lowerer::join_value_arms`. Only the run/JIT lane sets it.
 pub fn set_entry_script_mode(on: bool) {

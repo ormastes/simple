@@ -1340,16 +1340,15 @@ impl ExecCore {
             std::collections::HashMap::new()
         };
         let _ = hir::take_dropped_unsupported_exprs();
-        // A script entry (top-level statements or examples, or no `main`) is
-        // handed to the interpreter below, never run as a compiled safe module:
-        // its own functions keep dynamically typed value joins.
-        let entry_is_script = !spec_entry
-            && (!ast
-                .items
-                .iter()
-                .any(|i| matches!(i, simple_parser::ast::Node::Function(f) if f.name == "main"))
-                || Self::jit_entry_skipped_statements(path, &ast.items, false) > 0
-                || simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests > 0);
+        // Script mode is the file kind (owner decision 2026-11-27): `.shs` and
+        // `.sscript` entries are scripts, `.spl` (specs included) is compiled.
+        // A script's own functions keep dynamically typed value joins.
+        // A file-header source-mode attribute, `--source-mode` and `simple.sdn [source_mode]` are
+        // not read here yet (plan lanes S4-A / S4-B).
+        let entry_is_script = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("shs" | "sscript")
+        );
         hir::set_entry_script_mode(entry_is_script);
         let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,

@@ -334,7 +334,12 @@ The join of two value arms is typed. `ANY` / `[ANY]` is never produced.
    conversion the language already has (mixed arithmetic promotes to float;
    int -> float widening at declared slots stays implicit, float -> int is
    error E1003). The int arm is wrapped in a real `Cast` to the float arm's
-   type, so the value is converted, not reinterpreted.
+   type, so the value is converted, not reinterpreted. The promoted (float)
+   join never reaches an integer slot silently: stored into an annotated int
+   binding (`val r: i64 = if c: 1 else: 2.5`), an int assignment target, an int
+   struct field, an int parameter or return, or used as an index, it is
+   `error[E1003] ... is declared as `i64` but receives `f64``. Review found the
+   first cut of this fix dropped that check and turned `21 42` into `0 0`.
 2. **Any other disagreement is a compile-time type error in safe code**,
    reported with the existing lowering type-error tag `error[E1003]`, which the
    run lane never demotes to the interpreter (`jit_failure_must_propagate`).
@@ -342,7 +347,9 @@ The join of two value arms is typed. `ANY` / `[ANY]` is never produced.
    when their classes differ (`1` vs `"a"`, `{}` vs `5`, `[]` vs `"txt"`,
    `[]` vs a dict) or when both are concrete arrays whose element types
    disagree, recursively (`[f64]` vs `[i64]`, `[i64]` vs `[text]`). There is no
-   array promotion: `[i64]` does not become `[f64]`.
+   array promotion: `[i64]` does not become `[f64]`. An array literal that holds
+   only empty literals (`[[]]`, `[[], []]`) is weak below that nesting depth,
+   like `[]` itself: `if c: [[]] else: xs` with `xs: [[f64]]` is accepted.
 3. **Declared expected types do not relax the rule.** A union annotation
    (`val r: i64 | text = if c: 1 else: "a"`) printed `<enum@0x...>` on seed `r`:
    the seed has no typed union join, so the same error is reported. The fix for
@@ -350,14 +357,18 @@ The join of two value arms is typed. `ANY` / `[ANY]` is never produced.
    alternatives. A union-typed join is a named gap, not implemented here.
 4. **Permissive contexts**, both detected at HIR lowering:
    - `unsafe:` blocks (`ctx.unsafe_depth > 0`) keep the untyped first-arm join.
-   - Script mode. A script is an entry file the run lane hands to the
-     interpreter instead of running as a compiled module: it has top-level
-     statements or examples, or no `main` (`run_file_jit_outcome` in
-     `driver/src/exec_core.rs`; spec-entry synthesis excluded). The driver sets
-     `hir::set_entry_script_mode` for that lowering, and only functions OWNED
-     BY THE ENTRY FILE (`current_function_owner == None`) are exempt. Modules a
-     script imports are safe modules and are still checked. The interpreter
-     evaluates the arms dynamically, so a script prints the right values.
+   - Script mode, by FILE KIND (owner decision 2026-11-27): a `.shs` or
+     `.sscript` entry file is a script; a `.spl` file is a compiled safe module,
+     spec files (`*_spec.spl`) included. The driver sets
+     `hir::set_entry_script_mode` for the lowering (`run_file_jit_outcome` in
+     `driver/src/exec_core.rs`), and only functions OWNED BY THE ENTRY FILE
+     (`current_function_owner == None`) are exempt; modules a script imports
+     are still checked. This file-kind test is TEMPORARY: the owner precedence
+     is file-header `@source_mode(...)` > CLI `--source-mode` > `simple.sdn
+     [source_mode]` > file kind, and plan lanes S4-A / S4-B replace this check
+     with that resolution. None of the three overrides is read here yet. (The
+     first cut used a heuristic -- top-level statements or no `main` -- which
+     exempted every spec file; it is gone.)
    The native-build lane never sets script mode: it has no interpreter to give
    a mixed join dynamic semantics, so the rule is unconditional there.
 
@@ -393,8 +404,13 @@ module path.
   tail `match`) is not a join error. It was and still is the untagged
   `declared return type mismatch`, which drops the module to the interpreter
   with a `[jit-fallback]` line and prints the right values (same on `r`, `w`).
-- Where the int -> float conversion now lands in existing `src` code was not
-  counted; the sweep only looked for the error.
+- Where the int -> float conversion lands in existing `src` code was not
+  counted; the sweeps only looked for errors.
+- The int-slot check covers a join used DIRECTLY as the stored value. A float
+  join bound to an untyped local and later copied into an int slot
+  (`val r = if c: n else: 2.5` then `val q: i64 = r`) is the general
+  float-into-int-binding hole, which exists without any join and is not closed
+  here; only the index use of such a local is rejected.
 - An explicit empty repeat `[0; 0]` lowers to an empty array literal and is
   treated as weak; `[0; 0]` vs `[f64]` keeps the pre-existing behaviour.
 - Dict key/value disagreement between two concrete dicts is not judged.
@@ -440,5 +456,8 @@ modules they import are checked.
 `int_and_float_arms_join_to_float_by_converting_the_int_arm`,
 `value_join_rule_leaves_agreeing_bottom_weak_unsafe_and_statement_forms_alone`,
 `script_entry_functions_keep_the_untyped_join_and_compiled_entries_do_not`.
-Two older pins of an ill-typed join (`[1]` vs `[text]`, `["typed"; 0]` vs `[1]`)
-were removed and the `[]` vs dict pin moved inside `unsafe:`.
+`promoted_float_join_never_reaches_an_int_slot`,
+`nested_empty_literals_are_weak_at_every_depth`.
+One older pin was removed because it now is the error (`[1]` vs `[text]`), and
+the `[]` vs dict pin moved inside `unsafe:`. The `["typed"; 0]` vs `[1]` pin is
+kept: an explicit empty repeat is a weak arm, so that join still lowers.

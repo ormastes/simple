@@ -526,3 +526,41 @@ fn script_entry_functions_keep_the_untyped_join_and_compiled_entries_do_not() {
     script.expect("a script entry function runs on the interpreter and is not checked");
     assert!(join_error(source).contains("value arms disagree"));
 }
+
+#[test]
+fn promoted_float_join_never_reaches_an_int_slot() {
+    let p = "struct P:\n    n: i64\n";
+    for (body, slot) in [
+        ("    val r: i64 = if c: 1 else: 2.5\n", "binding `r`"),
+        ("    val r: i64 = match n:\n        case 0: n\n        case 1: n * 2\n        case _: 0.0\n", "binding `r`"),
+        ("    var r = 0\n    r = if c: 1 else: 2.5\n", "the assignment target"),
+        ("    val p = P(n: if c: n else: 2.5)\n", "field `P.n`"),
+        ("    val r = if c: n else: 2.5\n    val xs = [10, 20, 30]\n    val e = xs[r]\n", "the index"),
+    ] {
+        let msg = join_error(&format!("{p}fn probe(c: bool, n: i64) -> i64:\n{body}    0\n"));
+        assert!(msg.contains(crate::hir::LOWERING_TYPE_ERROR_TAG), "{body}{msg}");
+        assert!(msg.contains(&format!("{slot} is declared as `i64` but receives `f64`")), "{body}{msg}");
+    }
+    // A float slot, or an untyped one, takes the promoted join.
+    for body in ["    val r: f64 = if c: 1 else: 2.5\n", "    var r = 0.5\n    r = if c: 1 else: 2.5\n"] {
+        parse_and_lower(&format!("fn probe(c: bool, n: i64) -> i64:\n{body}    0\n")).unwrap_or_else(|e| panic!("{body}{e}"));
+    }
+}
+
+#[test]
+fn nested_empty_literals_are_weak_at_every_depth() {
+    for body in [
+        "    val r = if c: [[]] else: xs\n",
+        "    val r = if c: xs else: [[], []]\n",
+        "    val r = match n:\n        case 0: ts\n        case _: [[]]\n",
+        "    val r = if c: [] else: xs\n",
+    ] {
+        let source = format!("fn probe(c: bool, n: i64, xs: [[f64]], ts: [[text]], fs: [f64]) -> i64:\n{body}    0\n");
+        parse_and_lower(&source).unwrap_or_else(|e| panic!("must lower:\n{body}{e}"));
+    }
+    // Still judged above the hollow depth, and for populated inner arrays.
+    for body in ["    val r = if c: [[]] else: fs\n", "    val r = if c: [[1]] else: xs\n"] {
+        let msg = join_error(&format!("fn probe(c: bool, n: i64, xs: [[f64]], ts: [[text]], fs: [f64]) -> i64:\n{body}    0\n"));
+        assert!(msg.contains("value arms disagree"), "{body}{msg}");
+    }
+}
