@@ -1,0 +1,53 @@
+# Driver collection of MirLowering fatal errors vs non-fatal advisories
+# @req REQ-MIR-DRIVER-FATAL-COLLECTION
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{env_get_nullable, env_set_process, env_remove_process}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.hir.hir_definitions.{SymbolTable}
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_mir_error_owner.{driver_mir_error_is_fatal_owned_v1}
+use compiler.driver.driver_pipeline_lowering.{_driver_collect_mir_errors, driver_mir_has_new_fatal_errors_v1}
+
+describe "Driver MIR fatal error collection":
+    it "counts fatal MirLowering errors in CompileContext so builds fail instead of exiting rc=0":
+        step("Record payload decode, unregistered enum, and undefined variable errors and collect via driver")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.error_fatal("undefined variable: missing_x", None)
+        lowering.payload_decode_failed("HirExprKind.If", Span.empty())
+        lowering.type_payload_decode_failed("HirTypeKind.Dict", Span.empty())
+        lowering.error_fatal("enum construction: unregistered enum 'Ghost'", None)
+        expect(driver_mir_has_new_fatal_errors_v1(lowering.errors, 0)).to_equal(true)
+
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        _driver_collect_mir_errors(ctx, lowering.errors)
+        expect(ctx.error_count_value).to_equal(4)
+        expect(ctx.warnings.len()).to_equal(0)
+
+    it "routes non-fatal advisories to warnings without incrementing error_count_value":
+        step("Collect asm_and_targets advisory note and unreachable match arm warning via driver")
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.error("note: target backend differs from recommended version", None)
+        lowering.error("unreachable match arm: it follows an unguarded catch-all (`case _:` / `case x:`), which already matches every value", None)
+        expect(driver_mir_has_new_fatal_errors_v1(lowering.errors, 0)).to_equal(false)
+
+        var ctx = CompileContext.create(driver_core_compile_options_default())
+        _driver_collect_mir_errors(ctx, lowering.errors)
+        expect(ctx.error_count_value).to_equal(0)
+        expect(ctx.warnings.len()).to_equal(2)
+
+    it "keeps driver_mir_error_is_fatal_owned_v1 consistent for legacy fatal:false messages and direct error_fatal":
+        step("Check both explicit fatal=true and legacy allowlist fallback")
+        val legacy_fatal = MirError(message: "unresolved method call: nope", span: nil, fatal: false)
+        val explicit_fatal = MirError(message: "E-MIR-EXPR-PAYLOAD: synthetic", span: nil, fatal: true)
+        val advisory = MirError(message: "note: target backend differs from recommended version", span: nil, fatal: false)
+        expect(driver_mir_error_is_fatal_owned_v1(legacy_fatal)).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(explicit_fatal)).to_equal(true)
+        expect(driver_mir_error_is_fatal_owned_v1(advisory)).to_equal(false)
