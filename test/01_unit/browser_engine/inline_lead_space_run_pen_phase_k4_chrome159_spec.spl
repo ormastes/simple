@@ -1,0 +1,134 @@
+"""
+## Purpose and audience
+Purpose: Pin, at device scale 4 against Chrome 159, where a text run that
+opens with a collapsible space after an inline element STARTS, and where the
+item after that run starts. The catalog's inventory rows are this shape:
+`<code>animation-duration</code> — partial; values=...`.
+
+Chrome shapes ` — partial; ...` as ONE inline item. The glyphs inside it sit
+at float advances, so the dash starts at the item start plus the EXACT space
+advance. Only the item's whole width is snapped up to a LayoutUnit (1/64 px),
+and that snap moves what comes AFTER the item. A whitespace-only node between
+two elements is an item of its own, so there the space itself is snapped
+(bug web_render_space_layoutunit_tie_2026-11-27, PR #12215).
+
+PR #12215 put the LayoutUnit ceil on the lead space before the run's own pen
+origin was taken, so the run's glyphs moved by up to 1/64 px and three of the
+22 rows below crossed a quarter-device-px phase (catalog animation page at 4x:
+15997 -> 18267 mismatching px).
+Audience: web renderer device-scale text placement.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=4 --window-size=1000,540
+--screenshot`, 2026-11-28), body `margin:0;font:16px/24px sans-serif`, the
+host's sans-serif and monospace faces on both sides, one `height:24px` div per
+row: green `<code>NAME</code>`, then ` — partial; values=time-and-keyword;`,
+then a red `l`.
+- DASH: darkness centroid x (weight = 255 - green, so the green code text has
+  no weight) of the 73 device columns from 3 left of the first black column:
+  the em dash alone. CSS milli-px.
+- MARK: red-ink centroid x of the `l` (weight = red - green). CSS milli-px.
+
+| probe | Chrome k=4 | Simple at 531e49cc972 |
+|-------|------------|-----------------------|
+| DASH  | see DASH_CHROME | rows 3, 16, 20 one quarter device px right (185875, 108812, 262937) |
+| MARK  | see MARK_CHROME | all 22 rows within 1 milli-px |
+
+Tolerance: 20 milli-px, under a third of one quarter device px (62.5).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-LEAD-SPACE-RUN-PEN-K4-001 - a run's lead space moves its own glyphs by the exact space advance; the LayoutUnit snap applies to the pen after the run.
+"""
+# @tag: unit, browser_engine, text, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val W: i32 = 1000
+val H: i32 = 540
+val K: i32 = 4
+val ROWS: i32 = 22
+
+fn _page() -> text:
+    val names = ["animation", "animation-delay", "animation-direction", "animation-duration", "animation-fill-mode", "animation-iteration-count", "animation-name", "animation-play-state", "animation-timing-function", "backface-visibility", "rotate", "scale", "transform", "transform-box", "transform-origin", "transform-style", "transition", "transition-delay", "transition-duration", "transition-property", "transition-timing-function", "translate"]
+    var body = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font:16px/24px sans-serif\">"
+    for n in names:
+        body = body + "<div style=\"height:24px\"><code style=\"color:#0f0\">" + n + "</code> — partial; values=time-and-keyword;<span style=\"color:#f00\">l</span></div>"
+    body + "</body></html>"
+
+# Chrome k=4 centroids per row, CSS milli-px.
+val DASH_CHROME: [i64] = [99125, 156934, 195500, 185815, 195500, 253250, 147315, 205125, 253250, 195500, 70250,
+    60625, 99125, 137684, 166565, 156934, 108750, 166565, 195500, 195500, 262875, 99125]
+val MARK_CHROME: [i64] = [353027, 410841, 449341, 439722, 449341, 507158, 401222, 458972, 507158, 449341, 324158,
+    314527, 353027, 391591, 420472, 410841, 362658, 420472, 449341, 449341, 516777, 353027]
+
+fn _dash_x(px: [u32], line: i32) -> i64:
+    val fw = W * K
+    val y0 = line * 24 * K
+    val y1 = (line + 1) * 24 * K
+    var x0 = -1
+    var x = 0
+    while x < fw and x0 < 0:
+        var y = y0
+        while y < y1:
+            val p = px[y * fw + x]
+            if ((p >> 8u32) & 0xFFu32) < 150u32 and ((p >> 16u32) & 0xFFu32) < 150u32:
+                x0 = x
+                break
+            y = y + 1
+        x = x + 1
+    if x0 < 3:
+        return -1000000
+    var s: i64 = 0
+    var sx: i64 = 0
+    x = x0 - 3
+    while x < x0 + 70:
+        var y = y0
+        while y < y1:
+            val wgt = 255 - (((px[y * fw + x] >> 8u32) & 0xFFu32) as i64)
+            if wgt > 0:
+                s = s + wgt
+                sx = sx + wgt * (x as i64)
+            y = y + 1
+        x = x + 1
+    if s == 0: -1000000 else: (sx * 1000 / s + 500) / (K as i64)
+
+fn _mark_x(px: [u32], line: i32) -> i64:
+    val fw = W * K
+    var s: i64 = 0
+    var sx: i64 = 0
+    var y = line * 24 * K
+    while y < (line + 1) * 24 * K:
+        var x = 0
+        while x < fw:
+            val p = px[y * fw + x]
+            val wgt = ((p >> 16u32) & 0xFFu32) as i64 - ((p >> 8u32) & 0xFFu32) as i64
+            if wgt > 40:
+                s = s + wgt
+                sx = sx + wgt * (x as i64)
+            x = x + 1
+        y = y + 1
+    if s == 0: -1000000 else: (sx * 1000 / s + 500) / (K as i64)
+
+# Rows whose probe is not within 20 milli-px of Chrome, "row:got/want".
+fn _misses(px: [u32], want: [i64], dash: bool) -> text:
+    var out = ""
+    var i = 0
+    while i < ROWS:
+        val got = if dash: _dash_x(px, i) else: _mark_x(px, i)
+        if got < want[i] - 20 or got > want[i] + 20:
+            out = out + "{i}:{got}/{want[i]} "
+        i = i + 1
+    out
+
+describe "lead-space text run after an inline element at k=4 (Chrome 159)":
+    it "AC-1: the run's first glyph starts at the exact space advance, not the LayoutUnit-snapped one":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(), W, H, K, "cpu_simd")
+        expect(_misses(px, DASH_CHROME, true)).to_equal("")
+
+    it "AC-2: the item after the run starts at the LayoutUnit-snapped pen":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(_page(), W, H, K, "cpu_simd")
+        expect(_misses(px, MARK_CHROME, false)).to_equal("")

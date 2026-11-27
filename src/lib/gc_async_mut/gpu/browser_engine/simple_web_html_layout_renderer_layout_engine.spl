@@ -5019,6 +5019,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # <span></span> x` keeps ONE space in Chrome 159).
                 val node_pen_start = inline_x
                 var lead_charged = false
+                var lead_snap_milli: i64 = 0
                 var nowrap_lead_collapsed = false
                 var nowrap_lead_px = 0
                 var nowrap_lead_milli: i64 = 0
@@ -5064,7 +5065,18 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         )
                         inline_x = inline_x + lead_space
                         if lead_err != INLINE_PEN_ERR_UNKNOWN and cst.resolved_space_milli > 0:
-                            val lead_milli = layout_unit_ceil_milli(if cst.resolved_lead_space_milli > 0: cst.resolved_lead_space_milli else: cst.resolved_space_milli)
+                            # Glyphs inside an item sit at float advances, so at k > 1
+                            # the run starts at the exact space (Chrome 159, k=4:
+                            # `<code>animation-duration</code> — partial` starts the dash
+                            # at 185.815, the snapped space gives 185.875) and the
+                            # LayoutUnit snap joins the carry after the run. At k == 1
+                            # the run starts on a whole px and the snapped space breaks
+                            # the rounding tie Chrome's way (catalog 1x html 0.30 vs 0.36;
+                            # workaround, bug web_render_k1_lead_space_run_start_tie_2026-11-28).
+                            val lead_exact_milli = if cst.resolved_lead_space_milli > 0: cst.resolved_lead_space_milli else: cst.resolved_space_milli
+                            val lead_snapped_milli = layout_unit_ceil_milli(lead_exact_milli)
+                            val lead_milli = if layout_device_scale() > 1: lead_exact_milli else: lead_snapped_milli
+                            lead_snap_milli = lead_snapped_milli - lead_milli
                             inline_err_milli = lead_err + lead_milli - (lead_space as i64) * 1000
                             inline_err_x = inline_x
                             inline_err_y = cy
@@ -5436,6 +5448,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 ):
                     out_bw[c] = 0
                     any_nowrap_collapsed = true
+                # The lead space this run charged is part of its inline item:
+                # the item width snaps up to a LayoutUnit only now, after the
+                # run took its own pen origin from the exact advance.
+                if lead_snap_milli != 0:
+                    inline_err_milli = inline_err_milli + lead_snap_milli
                 val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err))
                 val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
                 if layout_device_scale() == 1 and nodes[c].tag == "button":

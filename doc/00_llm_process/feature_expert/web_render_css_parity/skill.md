@@ -6089,3 +6089,28 @@ pins the border-box form, the default-UA gap is unfiled.
   - The offset goes through `_html_draw_ir_add_device_dy`, not a second `device-y-offset` prop: `_html_draw_ir_resolved_text_command` already adds one for a fallback face, `_dir_device_y_offset` reads the first and `_html_draw_ir_device_top` the last, so one was lost. Arabic value at k=3: 247..284 with two props, 246..284 (Chrome) summed.
   - Button-type values (`submit`, `button`, `reset`) and placeholders share the command and the rule. Chrome agrees at k = 2..4 (k=3 submit 46..73, button 247..274, reset in 40px 495..522; placeholders by baseline row), so the scope stays; AC-6 pins them.
   - Baseline: dpr4 forms-media row lowered 0.27 -> 0.19, the value base and head both measure. The drop is from earlier landed work, not this change.
+
+## 2026-11-28 — lead-space run: exact advance for the run, LayoutUnit snap for what follows
+
+- **Rule.** Chrome snaps an inline ITEM's width up to a LayoutUnit (1/64 px); glyphs inside the
+  item sit at float advances. A run that opens with a collapsible space after an inline element
+  (`<code>x</code> — partial`) is one item: its first glyph starts at the item start plus the
+  EXACT space advance, and only the pen after the run takes the snap. A whitespace-only node
+  between two elements is an item of its own, so its space is snapped (bug
+  `web_render_space_layoutunit_tie_2026-11-27`).
+- **Trap.** PR #12215 put `layout_unit_ceil_milli` on the lead space before `run_pen_err` was
+  read in `layout_with_style_flow`. The run moved by at most 8 milli-px, but at k=4 that crosses
+  a quarter-device-px phase on some rows: catalog animation 4x went 15997 -> 18267 px (3 of 22
+  inventory rows), with every 1x page and every spec green. The engine now keeps the raw lead
+  for the run's pen origin and adds the snap remainder (`lead_snap_milli`) to `inline_err_milli`
+  just before the item-width carry.
+- **Probe.** `inline_lead_space_run_pen_phase_k4_chrome159_spec.spl`: em-dash darkness centroid
+  (green `<code>` so it has no weight) and a red marker after the run, 22 rows, Chrome k=4.
+  Give each row `height:24px`: a `<code>` in a 24px line grows the line box in Chrome and the
+  rows drift.
+- **Not measured.** Chrome snaps the whole item once; Simple adds a snapped lead to a separately
+  snapped run width. The two differ by under 1/64 px and no row here tells them apart.
+- **k == 1 is the other way (measured).** With the exact lead at k=1 the 1x catalog rose (html
+  0.30 -> 0.36, css-paint 0.41 -> 0.44, animation 0.37 -> 0.41): there the run starts on a whole
+  px and the snapped lead breaks the rounding tie Chrome's way. So the exact lead is `k > 1`
+  only; k=1 keeps #12215's pen byte for byte. Run BOTH catalogs for any pen-carry change.
