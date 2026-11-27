@@ -1,0 +1,69 @@
+use std.spec
+use std.nogc_sync_mut.io.privdrop_v1.{PrivDropStepV1, PrivDropErrorV1, PosixUidV1, PosixGidV1, PosixPidV1, PosixDirFdV1, PrivSpawnSessionV1, PrivCredentialV1, PrivSpawnRequestV1, PrivSpawnJoinV1,
+    privdrop_self_v1, privdrop_spawn_v1, privdrop_wait_v1}
+
+# Root-only contract of the privilege-drop SFFI. MUST run as root; it fails,
+# never skips, otherwise. Harness (Linux, run as root):
+#   D=$(mktemp -d /dev/shm/privdrop.XXXXXX); chmod 1777 "$D"
+#   : > "$D/procs"; chmod 0666 "$D/procs"; ln -s procs "$D/procs_link"
+#   PRIVDROP_SPEC_DIR="$D" PRIVDROP_SPEC_DIR_FD=9 bin/simple test <this> 9<"$D"
+extern fn geteuid() -> u32
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_file_read_text(path: text) -> text?
+
+fn spec_dir() -> text:
+    rt_env_get("PRIVDROP_SPEC_DIR") ?? ""
+
+fn spec_dir_fd() -> i64:
+    (rt_env_get("PRIVDROP_SPEC_DIR_FD") ?? "-1").to_int() ?? -1
+
+fn nobody() -> PrivCredentialV1:
+    PrivCredentialV1(uid: PosixUidV1(value: 65534), gid: PosixGidV1(value: 65534), groups: [PosixGidV1(value: 65534)])
+
+fn sh(script: text, procs: Option<PrivSpawnJoinV1>) -> Result<i64, PrivDropErrorV1>:
+    privdrop_spawn_v1(PrivSpawnRequestV1(path: "/bin/sh", args: ["-c", script],
+        env: ["PATH=/usr/bin:/bin", "OUT=" + spec_dir()], credential: nobody(), session: PrivSpawnSessionV1.NewSession, procs_join: procs))
+
+fn reaped(pid: PosixPidV1) -> i64:
+    match privdrop_wait_v1(pid):
+        case Ok(status): status
+        case Err(e): -1000 - e.errno
+
+describe "privdrop_v1 as root":
+    it "runs as root with a prepared directory and inherited dir fd":
+        expect(geteuid()).to_equal(0u32)
+        expect(spec_dir() != "").to_equal(true)
+        expect(spec_dir_fd() >= 0).to_equal(true)
+
+    it "drops real, effective, saved and filesystem ids plus groups in the child":
+        match sh("cat /proc/self/status > \"$OUT/status\"", None):
+            case Err(e): expect(e.errno).to_equal(-1)
+            case Ok(pid):
+                expect(reaped(pid)).to_equal(0)
+                val status = rt_file_read_text(spec_dir() + "/status") ?? ""
+                expect(status.contains("Uid:\t65534\t65534\t65534\t65534")).to_equal(true)
+                expect(status.contains("Gid:\t65534\t65534\t65534\t65534")).to_equal(true)
+                expect(status.contains("Groups:\t65534 \n") or status.contains("Groups:\t65534\n")).to_equal(true)
+                # saved ids equal the target and no capabilities remain: root cannot be regained
+                expect(status.contains("CapPrm:\t0000000000000000")).to_equal(true)
+                expect(status.contains("CapEff:\t0000000000000000")).to_equal(true)
+
+    it "writes the child's own pid through the dir fd before dropping":
+        match sh("echo $$ > \"$OUT/self\"", Some(PrivSpawnJoinV1(dir_fd: PosixDirFdV1(value: spec_dir_fd()), leaf: "procs"))):
+            case Err(e): expect(e.errno).to_equal(-1)
+            case Ok(pid):
+                expect(reaped(pid)).to_equal(0)
+                expect((rt_file_read_text(spec_dir() + "/procs") ?? "").trim()).to_equal("{pid.value}")
+
+    it "refuses to follow a symlinked join leaf (O_NOFOLLOW)":
+        match sh("true", Some(PrivSpawnJoinV1(dir_fd: PosixDirFdV1(value: spec_dir_fd()), leaf: "procs_link"))):
+            case Ok(pid): expect(pid.value).to_equal(-1)
+            case Err(e):
+                expect(e.step).to_equal(PrivDropStepV1.JoinOpen)
+                # ELOOP on Linux (40); FreeBSD reports EMLINK (31) for O_NOFOLLOW
+                expect(e.errno == 40 or e.errno == 31).to_equal(true)
+
+    it "drops this process irreversibly (last: the runner stays unprivileged)":
+        match privdrop_self_v1(nobody()):
+            case Err(e): expect(e.errno).to_equal(-1)
+            case Ok(_): expect(geteuid()).to_equal(65534u32)
