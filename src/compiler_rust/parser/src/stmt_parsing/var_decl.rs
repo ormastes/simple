@@ -824,6 +824,7 @@ impl Parser<'_> {
             ty,
             visibility: Visibility::Private,
             where_clause,
+            attributes: Vec::new(),
         }))
     }
 

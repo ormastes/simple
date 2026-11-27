@@ -65,7 +65,7 @@ fn constructor_value_type_matches_name(value: &Value, expected: &str, type_param
         // constructor taking a trait-typed parameter fails overload scoring
         // (see bug doc fat32_core_lfn_static_new_trait_param_2026-07-20.md).
         Value::Object { class, .. } => {
-            class == expected
+            crate::interpreter::class_identity_matches(class, expected)
                 || TRAIT_IMPLS.with(|cell| cell.borrow().contains_key(&(expected.to_string(), class.clone())))
         }
         Value::Enum { enum_name, .. } => enum_name == expected,
@@ -437,12 +437,16 @@ pub fn handle_constructor_methods(
             .map(|m| m.name.as_str())
             .collect();
         let mut msg = if candidates.is_empty() {
-            format!("unknown static method {method} on class {class_name}")
+            format!(
+                "unknown static method {method} on class {}",
+                crate::interpreter::flatten_owner_source_name(class_name)
+            )
         } else {
             // The name exists; only the arguments failed overload scoring.
             let arg_types: Vec<String> = positional_values.iter().map(|v| v.type_name().to_string()).collect();
             format!(
-                "no overload of {class_name}.{method} matches argument types ({})",
+                "no overload of {}.{method} matches argument types ({})",
+                crate::interpreter::flatten_owner_source_name(class_name),
                 arg_types.join(", ")
             )
         };
@@ -544,7 +548,7 @@ pub fn handle_constructor_methods(
 
     // Collect available classes for suggestion
     let available: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
-    let mut msg = format!("unknown class {class_name}");
+    let mut msg = format!("unknown class {}", crate::interpreter::flatten_owner_source_name(class_name));
     if let Some(suggestion) = crate::error::typo::format_suggestion(class_name, available) {
         msg.push_str(&format!("; {}", suggestion));
     }

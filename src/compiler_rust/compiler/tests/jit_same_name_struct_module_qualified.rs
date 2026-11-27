@@ -380,11 +380,13 @@ fn main() -> i64:
     assert_eq!(code, 0);
 }
 
+/// Owner decision 2026-11-27 (no refusal policy): a type alias resolves through
+/// its declaring module's scope, so `c`'s `Spanish` is `b`'s `TextSpan`.
 #[test]
-#[should_panic(expected = "type alias `Spanish`")]
-fn type_alias_of_a_colliding_struct_fails_closed() {
-    jit_run_pkg(
+fn type_alias_of_a_colliding_struct_resolves_through_its_module() {
+    let code = jit_run_pkg(
         &[("a", SPAN_A), ("b", SPAN_B), ("c", "use pkg.b.{TextSpan}\n\ntype Spanish = TextSpan\n\nfn c_len(s: Spanish) -> i64:\n    s.len\n")],
-        "use pkg.a.{make_a}\nuse pkg.c.{c_len}\n\nfn main() -> i64:\n    make_a().end\n",
+        "use pkg.a.{make_a}\nuse pkg.b.{make_b}\nuse pkg.c.{c_len}\n\nfn main() -> i64:\n    make_a().end * 100 + c_len(make_b())\n",
     );
+    assert_eq!(code, 509);
 }

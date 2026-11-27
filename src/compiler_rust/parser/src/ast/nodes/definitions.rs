@@ -585,6 +585,9 @@ pub struct TypeAliasDef {
     /// Refinement predicate: `where self > 0`
     /// In the predicate, `self` refers to a value of the base type
     pub where_clause: Option<Expr>,
+    /// Synthetic attributes only (the flattening loader's owner tag); the
+    /// parser never fills it.
+    pub attributes: Vec<Attribute>,
 }
 
 /// Class/struct/enum alias definition

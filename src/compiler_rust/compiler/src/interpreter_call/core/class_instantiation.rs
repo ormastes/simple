@@ -152,6 +152,18 @@ pub(crate) fn instantiate_class(
     // same-named overload whose fields do. Only rescues constructions that would
     // otherwise fail, so it cannot change the result of an already-valid literal.
     let class_def = pick_fitting_class_def(class_name, class_def, args);
+    // A class renamed to its owner-exact symbol (same-named classes of several
+    // flattened modules) names its instances by that symbol, so method dispatch
+    // on the instance reaches this owner's bodies from any module.
+    let owner_exact_name;
+    let class_name: &str = if class_def.name != class_name
+        && class_def.name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)
+    {
+        owner_exact_name = class_def.name.clone();
+        &owner_exact_name
+    } else {
+        class_name
+    };
     if std::env::var("SIMPLE_DBG_COLLISION").is_ok() {
         eprintln!(
             "[DBG INST] call_name={} picked_def={} def_fields=[{}] args=[{}]",
@@ -468,7 +480,11 @@ pub(crate) fn instantiate_class(
                     );
                 }
                 return Err(CompileError::semantic_with_context(
-                    format!("class `{}` has no field named `{}`", class_name, name),
+                    format!(
+                        "class `{}` has no field named `{}`",
+                        crate::interpreter::flatten_owner_source_name(&class_name),
+                        name
+                    ),
                     ctx,
                 ));
             }

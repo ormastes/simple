@@ -208,6 +208,22 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
 }
 
 fn overload_score(func: &FunctionDef, values: &[Value]) -> Option<usize> {
+    // A parameter type is spelled in the CANDIDATE's module: score an
+    // owner-exact class instance (`__spl_flat_...`) through that scope.
+    let owner_exact = crate::interpreter::renamed_classes_present()
+        && values.iter().any(|value| {
+        value
+            .aggregate_class()
+            .is_some_and(|class| class.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX))
+    });
+    if owner_exact {
+        let owner = self::core::function_exec::function_module_owner(func);
+        return crate::interpreter::with_exec_owner(owner, || overload_score_in_scope(func, values));
+    }
+    overload_score_in_scope(func, values)
+}
+
+fn overload_score_in_scope(func: &FunctionDef, values: &[Value]) -> Option<usize> {
     // Defaulted parameters are optional at the call site: `fn f(a, b = 1)`
     // called with one value must still score, otherwise any overloaded fn
     // whose signature carries a default becomes uncallable with the defaults
