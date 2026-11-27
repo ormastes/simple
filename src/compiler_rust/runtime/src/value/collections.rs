@@ -2155,17 +2155,21 @@ pub extern "C" fn rt_bytes_u8_set(array: RuntimeValue, index: i64, value: i64) -
 /// A typed word write (`[i64]` / `[u64]` / `[u32]` parameter) that receives a
 /// byte-packed `[u8]` has no 8-byte slot to store into. Writing one would
 /// overrun the byte buffer and refusing it silently drops the value, so it is a
-/// runtime error (owner decision). Reads decode the byte instead.
+/// runtime error (owner decision). Reads decode the byte instead. The report
+/// and exit status match the C lane, whose `rt_typed_words_byte_write_trap`
+/// (runtime_native.c) calls `spl_panic` (runtime.c: `PANIC: <msg>`, exit 1).
 /// Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
-fn typed_words_byte_write_trap(op: &str) -> ! {
-    eprintln!("error: {op}: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])");
-    std::process::abort();
+fn typed_words_byte_write_trap() -> ! {
+    eprintln!(
+        "PANIC: typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])"
+    );
+    std::process::exit(1);
 }
 
 /// Cold-branch entry for the JIT's inlined typed word writers.
 #[no_mangle]
 pub extern "C" fn rt_typed_words_byte_write_trap() {
-    typed_words_byte_write_trap("typed word write");
+    typed_words_byte_write_trap();
 }
 
 /// Write a u32 element into a `[u32]`-style runtime array without generic index dispatch.
@@ -2174,7 +2178,7 @@ pub extern "C" fn rt_typed_words_u32_set(array: RuntimeValue, index: i64, value:
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u32_set");
+            typed_words_byte_write_trap();
         }
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -2192,7 +2196,7 @@ pub extern "C" fn rt_typed_words_u64_set(array: RuntimeValue, index: i64, value:
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u64_set");
+            typed_words_byte_write_trap();
         }
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -2250,7 +2254,7 @@ pub extern "C" fn rt_typed_words_i64_set(array: RuntimeValue, index: i64, value:
             return false;
         }
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_i64_set");
+            typed_words_byte_write_trap();
         }
         if !(*arr).is_u64_packed() && RuntimeValue::fits_inline_int(value) {
             *(*arr).data.add(idx as usize) = RuntimeValue::from_int(value);
@@ -2273,7 +2277,7 @@ pub extern "C" fn rt_typed_words_i64_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_i64_push");
+            typed_words_byte_write_trap();
         }
         if !(*arr).is_u64_packed() && !RuntimeValue::fits_inline_int(value) {
             pack_tagged_words_in_place(arr);
@@ -2349,7 +2353,7 @@ pub extern "C" fn rt_typed_words_u32_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u32_push");
+            typed_words_byte_write_trap();
         }
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
@@ -2385,7 +2389,7 @@ pub extern "C" fn rt_typed_words_u64_push(array: RuntimeValue, value: i64) -> bo
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u64_push");
+            typed_words_byte_write_trap();
         }
         if (*arr).len >= (*arr).capacity {
             let old_cap = (*arr).capacity;
@@ -2425,7 +2429,7 @@ pub extern "C" fn rt_typed_words_u32_push_known_at(array: RuntimeValue, index: i
     let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u32_push_known_at");
+            typed_words_byte_write_trap();
         }
         if index < 0 || index as u64 >= (*arr).capacity {
             return false;
@@ -2442,7 +2446,7 @@ pub extern "C" fn rt_typed_words_u64_push_known_at(array: RuntimeValue, index: i
     let arr = as_typed_ptr_packed!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u64_push_known_at");
+            typed_words_byte_write_trap();
         }
         if index < 0 || index as u64 >= (*arr).capacity {
             return false;
@@ -2471,7 +2475,7 @@ pub extern "C" fn rt_typed_words_u32_push_known_data_at(
     unsafe {
         let arr = header_ptr as *mut RuntimeArray;
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u32_push_known_data_at");
+            typed_words_byte_write_trap();
         }
         if index as u64 >= (*arr).capacity {
             return false;
@@ -2496,7 +2500,7 @@ pub extern "C" fn rt_typed_words_u64_push_known_data_at(
     unsafe {
         let arr = header_ptr as *mut RuntimeArray;
         if (*arr).is_byte_packed() {
-            typed_words_byte_write_trap("rt_typed_words_u64_push_known_data_at");
+            typed_words_byte_write_trap();
         }
         if index as u64 >= (*arr).capacity {
             return false;

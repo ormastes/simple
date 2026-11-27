@@ -44,8 +44,10 @@ fn jit_hoisted_loop_readers_decode_bytes_from_untyped_caller() {
 /// A typed word write into a `[u8]` (owner decision: a runtime error, both
 /// lanes). The inlined `[u32]` set stored a tagged word over bytes 8..15, the
 /// runtime `[u64]` / `[i64]` set did the same, and an in-capacity push grew
-/// `len` past the byte buffer. Each write runs in a child, which must abort.
+/// `len` past the byte buffer. Each write runs in a child, which must exit like the C lane's spl_panic.
 const JIT_TRAP_ENV: &str = "SIMPLE_TEST_JIT_WORD_WRITE";
+const WORD_WRITE_PANIC_LINE: &str =
+    "PANIC: typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])";
 
 fn word_write_source(op: &str) -> String {
     let (ty, body) = match op {
@@ -82,10 +84,11 @@ fn jit_word_array_writers_trap_on_bytes_from_untyped_caller() {
             .expect("spawn child");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{op}: child exited cleanly: {stdout}");
         assert!(!stdout.contains("NO-TRAP"), "{op}: write returned: {stdout}");
+        // Same report and status as the C lane's spl_panic (runtime.c).
+        assert_eq!(out.status.code(), Some(1), "{op}: status {:?}: {stderr}", out.status);
         assert!(
-            stderr.contains("cannot be written through a word-typed array parameter"),
+            stderr.lines().any(|line| line == WORD_WRITE_PANIC_LINE),
             "{op}: {stderr}"
         );
     }

@@ -4046,8 +4046,10 @@ fn test_typed_words_hoisted_readers_decode_byte_packed_arrays() {
 
 // A typed word write into a byte-packed `[u8]` is a runtime error (owner
 // decision): it used to overrun the byte buffer (u32/u64 set) or drop the
-// value silently. Each writer runs in a child process, which must abort.
+// value silently. Each writer runs in a child process, which must exit like the C lane's spl_panic.
 const TYPED_WORDS_TRAP_ENV: &str = "SIMPLE_TEST_TYPED_WORDS_TRAP_OP";
+const WORD_WRITE_PANIC_LINE: &str =
+    "PANIC: typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])";
 
 #[test]
 fn typed_words_byte_write_trap_child() {
@@ -4095,10 +4097,11 @@ fn test_typed_words_writers_trap_on_byte_packed_arrays() {
             .expect("spawn child");
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{op}: child exited cleanly: {stdout}");
         assert!(!stdout.contains("NO-TRAP"), "{op}: write returned: {stdout}");
+        // Same report and status as the C lane's spl_panic (runtime.c).
+        assert_eq!(out.status.code(), Some(1), "{op}: status {:?}: {stderr}", out.status);
         assert!(
-            stderr.contains("cannot be written through a word-typed array parameter"),
+            stderr.lines().any(|line| line == WORD_WRITE_PANIC_LINE),
             "{op}: {stderr}"
         );
     }
