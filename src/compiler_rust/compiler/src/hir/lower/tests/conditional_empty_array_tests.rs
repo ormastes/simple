@@ -381,3 +381,18 @@ fn option_wrapped_empty_dict_defers_and_option_never_adopts_result() {
     let ty = local_type(&module, "r");
     assert!(!matches!(ty, HirType::Enum { name, .. } if name == "Result"), "Some([]) must not adopt a Result type: {ty:?}");
 }
+
+#[test]
+fn some_array_literal_payload_stays_erased_so_reassignment_and_mixed_pushes_stay_correct() {
+    // b03: `Some([0])` later reassigned `Some([1.5, 2.5])`; b05: heterogeneous `Some([..])` pushes.
+    for source in [
+        "fn probe() -> f64:\n    var c2 = Some([0])\n    c2 = Some([1.5, 2.5])\n    0.0\n",
+        "fn probe() -> f64:\n    val a = Some([1.5, 2.5])\n    0.0\n",
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+        for local in function.locals.iter().filter(|l| l.name == "c2" || l.name == "a") {
+            assert!(!matches!(module.types.get(local.ty), Some(HirType::Enum { .. })), "literal payload must not become authoritative Option<T>");
+        }
+    }
+}

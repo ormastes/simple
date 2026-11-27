@@ -49,3 +49,8 @@ the erased weak `Some([])` as weak and adopts the concrete sibling's Option type
 return type mismatch admitted" for `-> [T]?`). Dict sibling (a15) uses the same path.
 Tests: `some_empty_array_stays_weak_when_later_replaced_or_filled`,
 `option_wrapped_empty_dict_defers_and_option_never_adopts_result`.
+
+Second revision: `Some(<array/dict literal>)` also stays erased (a literal's element type is
+a guess: `var c = Some([0]); c = Some([1.5, 2.5])` and heterogeneous `Some([..])` pushes read
+garbage when typed, rvd b03/b05). Only `Some(<local|call|field>)` with a declared array/dict
+type becomes `Option<T>`.

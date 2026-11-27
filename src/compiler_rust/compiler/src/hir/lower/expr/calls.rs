@@ -89,9 +89,14 @@ impl Lowerer {
                     };
                     let ty = match (name.as_str(), payload_ty) {
                         ("Some", Some(payload_ty))
-                            if (!args_hir.first().is_some_and(super::control::hir_value_is_weak_empty)
-                                || args.first().is_some_and(|a| super::control::ast_expr_tail_is_array_repeat(&a.value)))
-                                && matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. } | HirType::Array { .. } | HirType::Dict { .. })) =>
+                            // An array/dict LITERAL payload carries only a guessed element
+                            // type (`Some([0])` later reassigned `Some([1.5])`, mixed pushes),
+                            // so it stays erased; only a payload with a declared type (local,
+                            // call, field) is evidence for `Option<T>`.
+                            if !args_hir.first().is_some_and(|p| {
+                                matches!(p.kind, HirExprKind::Array(_) | HirExprKind::Dict(_))
+                                    || super::control::hir_value_is_weak_empty(p)
+                            }) && matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. } | HirType::Array { .. } | HirType::Dict { .. })) =>
                         {
                             self.module.types.register(HirType::Enum {
                                 name: "Option".to_string(),

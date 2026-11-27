@@ -139,7 +139,7 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
 /// True when the tail value of `expr` (through do-blocks, nested if/match) is
 /// an explicit `[x; n]` repeat. That form carries real element evidence even
 /// when `n` is 0 (it lowers to an empty HIR array), so it is never "weak".
-pub(super) fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
+fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayRepeat { .. } => true,
         // `Some([x; 0])` keeps the repeat evidence through the Option wrapper.
