@@ -65,6 +65,14 @@ pub enum LowerError {
     )]
     OptionalCast { target: String },
 
+    /// A value whose type stage-1 implicit generics could not infer reached a
+    /// typed use outside `unsafe` / script mode. Carries the strict marker so
+    /// the JIT catch site cannot demote it to the interpreter.
+    #[error(
+        "SIMPLE_JIT_STRICT: cannot infer a type for {origin} used in {usage}; add a type annotation or an explicit generic (`fn f<T>(x: T) -> T`). `any` is allowed only inside `unsafe` and in script mode"
+    )]
+    UninferredType { origin: String, usage: String },
+
     #[error("Cannot infer element type of empty array - use explicit annotation")]
     EmptyArrayNeedsType,
 

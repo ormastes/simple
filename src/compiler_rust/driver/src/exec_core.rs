@@ -1717,6 +1717,14 @@ pub(crate) fn synthesize_spec_main(items: &mut Vec<simple_parser::ast::Node>) ->
     }
     body.append(&mut main_fn.body.statements);
     main_fn.body.statements = body;
+    // A spec is a script: mark the entry so HIR lowering permits `any` there.
+    main_fn.attributes.push(simple_parser::ast::Attribute {
+        span: main_fn.span,
+        name: simple_compiler::pipeline::script_detection::SCRIPT_ENTRY_ATTR.to_string(),
+        value: None,
+        args: None,
+        named_args: None,
+    });
     kept.push(N::Function(main_fn));
     *items = kept;
     true

@@ -285,6 +285,7 @@ impl Lowerer {
             Expr::Identifier(name) => self.owner_scoped_extern_return(name).unwrap_or(ret_ty),
             _ => ret_ty,
         };
+        let erased_ret_ty = ret_ty;
         let ret_ty = self.refine_generic_identity_return(orig_callee, resolved_callee_symbol, args, ret_ty, ctx);
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may
@@ -531,13 +532,14 @@ impl Lowerer {
         // Prefer the declared return type for the named callee when we know it.
         // This keeps local variables initialized from imported/helper calls on a
         // concrete type path instead of degrading to ANY at the next field access.
-        Ok(HirExpr {
+        let call = HirExpr {
             kind: HirExprKind::Call {
                 func: func_hir,
                 args: args_hir,
             },
-            ty: ret_ty,
-        })
+            ty: erased_ret_ty,
+        };
+        Ok(self.instantiate_generic_call(call, ret_ty))
     }
 
     /// Reject a function or type (constructor) value bound to an enum-typed

@@ -412,7 +412,15 @@ pub(crate) fn wrap_entry_script_as_main(
         visibility: Visibility::Private,
         effects: Vec::new(),
         decorators: Vec::new(),
-        attributes: Vec::new(),
+        // Marks the unit as a script for HIR lowering (`any` is permitted in
+        // script mode; see hir/lower/implicit_generic.rs).
+        attributes: vec![simple_parser::ast::Attribute {
+            span: body_span,
+            name: crate::pipeline::script_detection::SCRIPT_ENTRY_ATTR.to_string(),
+            value: None,
+            args: None,
+            named_args: None,
+        }],
         doc_comment: None,
         contract: None,
         is_abstract: false,

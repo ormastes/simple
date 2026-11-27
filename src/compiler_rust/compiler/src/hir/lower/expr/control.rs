@@ -467,6 +467,7 @@ impl Lowerer {
                 }
             }
         }
+        self.reject_uninferred_join(&then_hir, else_hir.as_deref(), ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -920,6 +921,7 @@ impl Lowerer {
             && self.weak_arm_matches_sibling(&then_branch, then_ty, else_branch.ty)
             && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
         let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
+        self.reject_uninferred_join(&then_branch, Some(&else_branch), ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::If {

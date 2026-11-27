@@ -41,6 +41,9 @@ pub(super) struct GenericIdentityParamSpec {
     pub index: usize,
     pub name: String,
     pub generic_param_pos: Option<usize>,
+    /// Other parameters typed by the same type variable (index, name): the
+    /// call is instantiated only when their arguments agree.
+    pub same_type_params: Vec<(usize, String)>,
 }
 
 pub struct Lowerer {
@@ -335,6 +338,19 @@ pub struct Lowerer {
     /// Erased generics type the call as Any; a struct/class argument (or
     /// explicit `<Struct>`) recovers the nominal struct identity.
     pub(super) generic_identity_param: HashMap<String, GenericIdentityParamSpec>,
+    /// Functions declared without a return annotation, by every key
+    /// `generic_identity_param` uses (see `implicit_generic.rs`). The value is
+    /// whether the body yields a value, known once the body is lowered.
+    pub(super) unannotated_return_fns: HashMap<String, Option<bool>>,
+    /// Typed uses of a call to an unannotated function whose body was not yet
+    /// lowered: (callee, error), judged once every body is lowered (a
+    /// procedure's call is `()`, not an uninferred value).
+    pub(super) pending_uninferred_uses: Vec<(String, super::error::LowerError)>,
+    /// The entry module is a script (top-level statements wrapped as `main`).
+    pub(super) entry_is_script: bool,
+    /// Run lane: a unit with top-level statements and no `main` is handed to
+    /// the interpreter after lowering, so it is a script too.
+    pub(super) mainless_unit_is_script: bool,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
@@ -542,6 +558,10 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             generic_identity_param: HashMap::new(),
+            unannotated_return_fns: HashMap::new(),
+            pending_uninferred_uses: Vec::new(),
+            entry_is_script: false,
+            mainless_unit_is_script: false,
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -652,6 +672,10 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             generic_identity_param: HashMap::new(),
+            unannotated_return_fns: HashMap::new(),
+            pending_uninferred_uses: Vec::new(),
+            entry_is_script: false,
+            mainless_unit_is_script: false,
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -785,6 +809,10 @@ impl Lowerer {
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
             generic_identity_param: HashMap::new(),
+            unannotated_return_fns: HashMap::new(),
+            pending_uninferred_uses: Vec::new(),
+            entry_is_script: false,
+            mainless_unit_is_script: false,
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -826,6 +854,12 @@ impl Lowerer {
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub fn set_lenient_types(&mut self, lenient: bool) {
         self.lenient_types = lenient;
+    }
+
+    /// Run lane only: treat a mainless unit with top-level statements as a
+    /// script (see `implicit_generic.rs`).
+    pub fn set_mainless_unit_is_script(&mut self, script: bool) {
+        self.mainless_unit_is_script = script;
     }
 
     /// Attribute a name that the `lenient_types` fallback is about to lower to
@@ -1885,17 +1919,25 @@ impl Lowerer {
     pub(super) fn generic_identity_param_spec(
         f: &simple_parser::ast::FunctionDef,
     ) -> Option<GenericIdentityParamSpec> {
-        let Type::Simple(ret_param) = f.return_type.as_ref()? else {
-            return None;
+        let Some(Type::Simple(ret_param)) = f.return_type.as_ref() else {
+            return Self::implicit_identity_param_spec(f);
         };
         let generic_param_pos = f.generic_params.iter().position(|g| g == ret_param)?;
         let (index, param) = f.params.iter().enumerate().find(|(_, p)| {
             matches!(&p.ty, Some(Type::Simple(n)) if n == ret_param)
         })?;
+        let same_type_params = f
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| *i != index && matches!(&p.ty, Some(Type::Simple(n)) if n == ret_param))
+            .map(|(i, p)| (i, p.name.clone()))
+            .collect();
         Some(GenericIdentityParamSpec {
             index,
             name: param.name.clone(),
             generic_param_pos: Some(generic_param_pos),
+            same_type_params,
         })
     }
 
@@ -1907,11 +1949,17 @@ impl Lowerer {
         if let Some(spec) = Self::generic_identity_param_spec(f) {
             self.generic_identity_param.insert(key.to_string(), spec);
         }
+        if f.return_type.is_none() {
+            self.unannotated_return_fns.entry(key.to_string()).or_insert(None);
+        }
     }
 
     pub(super) fn record_generic_identity_param_alias(&mut self, original: &str, alias: &str) {
         if let Some(spec) = self.generic_identity_param.get(original).cloned() {
             self.generic_identity_param.insert(alias.to_string(), spec);
+        }
+        if let Some(verdict) = self.unannotated_return_fns.get(original).copied() {
+            self.unannotated_return_fns.insert(alias.to_string(), verdict);
         }
     }
 

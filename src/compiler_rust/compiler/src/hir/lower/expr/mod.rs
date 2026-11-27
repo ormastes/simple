@@ -794,7 +794,7 @@ impl Lowerer {
         ret: TypeId,
         ctx: &FunctionContext,
     ) -> TypeId {
-        if ret != TypeId::ANY {
+        if !matches!(ret, TypeId::ANY | TypeId::VOID) {
             return ret;
         }
         let (base_callee, explicit_type_args) = match callee {
@@ -804,13 +804,24 @@ impl Lowerer {
         let Some(spec) = self.lookup_generic_identity_param_spec(base_callee, resolved_symbol) else {
             return ret;
         };
-        let arg = args
-            .iter()
-            .find(|a| a.name.as_deref() == Some(spec.name.as_str()))
-            .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(spec.index));
-        if let Some(arg) = arg {
+        // `()` is what a call to an unannotated function declared further down
+        // is typed before its body is lowered; only that implicit shape counts.
+        if ret == TypeId::VOID && spec.generic_param_pos.is_some() {
+            return ret;
+        }
+        let arg_of = |index: usize, name: &str| {
+            args.iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(index))
+        };
+        if let Some(arg) = arg_of(spec.index, &spec.name) {
             if let Ok(ty) = self.infer_type(&arg.value, ctx) {
-                if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                // One type variable, one type: `max(0, x)` with `x: f64` does
+                // not instantiate `T` to the first argument's `i64`.
+                let agree = spec.same_type_params.iter().all(|(index, name)| {
+                    arg_of(*index, name).is_some_and(|other| self.infer_type(&other.value, ctx).ok() == Some(ty))
+                });
+                if agree && self.is_instantiable_type(ty) {
                     return ty;
                 }
             }
@@ -823,6 +834,11 @@ impl Lowerer {
                     }
                 }
             }
+        }
+        // Not instantiated: the erased identity still returns its argument as
+        // a tagged word, never `()`.
+        if ret == TypeId::VOID {
+            return TypeId::ANY;
         }
         ret
     }

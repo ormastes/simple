@@ -1437,6 +1437,10 @@ impl Lowerer {
                 param.inject,
             );
             self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
+            if param.ty.is_none() && ty == TypeId::ANY {
+                let origin = format!("unannotated parameter `{}` of `{}`", param.name, f.name);
+                ctx.uninferred_locals.insert(param_index, (origin, None));
+            }
             if let Some(n) = param.ty.as_ref().and_then(Self::simple_type_name) {
                 match self.unit_kind_of_type_name(&n) {
                     Some(kind) => {
@@ -1509,6 +1513,9 @@ impl Lowerer {
         };
         ctx.return_type = return_type;
         self.method_return_types.insert(func_name.clone(), return_type);
+        if let Some(verdict) = self.unannotated_return_fns.get_mut(&func_name) {
+            *verdict = Some(return_type != TypeId::VOID && !Self::body_ends_in_unit(&body));
+        }
 
         // Implicit-return counterpart of the `Node::Return` bool coercion in
         // stmt_lowering: a function declared `-> bool` whose trailing

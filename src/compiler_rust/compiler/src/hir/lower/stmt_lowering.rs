@@ -820,6 +820,9 @@ impl Lowerer {
                 };
                 ctx.bind_local_unit_facts(&name, unit_kind, type_name, lambda_sig);
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let_stmt.ty.is_none() {
+                    self.bind_uninferred_local(local_index, value.as_ref(), ctx);
+                }
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
                     let fn_ty = self.module.types.register(HirType::Function {
