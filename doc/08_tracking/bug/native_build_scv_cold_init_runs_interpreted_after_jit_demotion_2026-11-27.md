@@ -255,3 +255,24 @@ instead of ~270 s), so each trace-point edit costs ~17 min before the worker sta
 Trace additions (kept): `log_phase` tee to `SIMPLE_BUILD_TRACE_FILE`; `driver:hir:streaming:prelude_done`,
 `driver:hir:streaming:visit_order n=`, and per-module `driver:hir:module:start pos= path=` in the streaming HIR loop
 (untested: HIR was not reached).
+
+## d29-f: the worker entry itself demotes to the interpreter (2026-11-27)
+
+Seed `simple-local-20261127r.exe`, `SIMPLE_EXECUTION_MODE=jit run src/app/cli/native_build_worker.spl --help`
+(the entry prints "internal entrypoint" and exits 1, so this isolates module load + JIT compile):
+
+- DEMOTED. `[engine-demotion] reason=jit-compile-error detail=HIR lowering error: ambiguous call to
+  llvm_int8_type_in_context: 2 co-compiled definitions (src/lib/nogc_async_mut/sffi/llvm_types.spl,
+  src/lib/nogc_sync_mut/sffi/llvm_types.spl) ... [compiler_cross_module_private_symbol_collision]`.
+  Raised for src/plugins/backend_llvm_lib/llvm_lib_type_mapper.spl, then llvm_lib_translate_expr.spl.
+  Cause: `use std.sffi.llvm.*` (also in llvm_lib_backend.spl, llvm_lib_translate.spl) resolves to both
+  lane copies, so every `llvm_*` call is ambiguous. Whole worker closure falls back to the interpreter
+  (2m04s to demote, then interpreted).
+- Fix: those four files now import `std.nogc_sync_mut.sffi.llvm.*` explicitly. After it,
+  no `jit-compile-error` demotion remains; only `reason=hybrid-interp-splice` for `rt_*` externs
+  (cache_host/heap/sysctl/etc., expected on this seed) plus 7 CODEGEN-AMBIGUOUS-METHOD lines
+  (`CudaTypeMapper.map_tuple` bare `map`, 4 candidates) - not fixed here, separate shape.
+- Timings (--help, wall): JIT before fix 2m04 (demote + interp); JIT after fix 3m29 (full JIT compile of
+  the closure); forced interpret 1m22. So for this entry the interpreter is faster to first output;
+  JIT is not a win on cold start, and the >600 s silence after load_sources is not explained by this
+  demotion alone (the c27 stage trace owns that). Logs: scratchpad d29f/{jit,jit2,jit3,interp}.log.
