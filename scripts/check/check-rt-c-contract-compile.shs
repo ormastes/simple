@@ -1,0 +1,204 @@
+#!/bin/sh
+# check-rt-c-contract-compile.shs: R2 C-contract compile probe, report only.
+# POSIX sh + one awk (scripts/check/lib/rt-scan.awk); replaces check-rt-c-contract-compile.py.
+#
+# For each translation unit (default: runtime_simd_dispatch.c plus every top-level
+# src/runtime/*.c that includes runtime_nonnull.h) it derives a C prototype from every
+# `extern fn rt_x` whose C definition is in that unit, then asks the compiler
+# (`<cc> -fsyntax-only -include <generated header> <tu>`) whether the unit still compiles with
+# that prototype visible. PASS = compiles, FAIL = the compiler rejects the prototype and names
+# the symbol, UNTESTED = anything not proven (unmapped type, not defined on this host, broken
+# unit, unattributed compiler error). Link is always UNTESTED.
+#
+# Usage: check-rt-c-contract-compile.shs [--root DIR] [--cc CMD] [--tu REL]... [--selftest]
+# stdout: RT_C_CONTRACT_HOST, one RT_C_CONTRACT row per (tu, symbol, sig, spl), then
+# RT_C_CONTRACT_COMPILE. Exit 0 rows produced, 2 nothing checked, 1 selftest failure.
+# Deliberate deviations from the Python original: see the header of lib/rt-scan.awk.
+LC_ALL=C; export LC_ALL
+here=$(cd "$(dirname "$0")" && pwd) || exit 2
+repo=$(cd "$here/../.." && pwd) || exit 2
+root=$repo; cc=cc; selftest=0; tus=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --selftest) selftest=1 ;;
+    --root) shift; root=$(cd "${1:-.}" && pwd) || { echo "ERROR — bad --root"; exit 2; } ;;
+    --cc) shift; cc=${1:-cc} ;;
+    --tu) shift; [ $# -gt 0 ] && tus="$tus$1
+" ;;
+    *) ;;
+  esac
+  shift
+done
+
+run_contract() { # root cc tus -> stdout of the awk program, exit status passed through
+  _root=$1; _cc=$2; _tus=$3
+  _tmp=$(mktemp -d) || { echo "ERROR — mktemp failed"; return 2; }
+  _to=
+  command -v timeout >/dev/null 2>&1 && _to="timeout 300"
+  find "$_root/src" -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.rs' -o -name '*.spl' \) 2>/dev/null |
+    RT_ROOT=$_root RT_CC=$_cc RT_TMP=$_tmp RT_TUS=$_tus RT_TIMEOUT=$_to RT_UNAME=$(uname -sm) \
+      awk -v MODE=contract -f "$here/lib/rt-scan.awk"
+  _rc=$?
+  rm -rf "$_tmp"
+  return $_rc
+}
+
+if [ "$selftest" = 0 ]; then
+  run_contract "$root" "$cc" "$tus"
+  exit $?
+fi
+
+# ------------------------------------------------------------------ selftest
+fails=0
+note() { echo "SELFTEST FAIL: $1"; fails=$((fails + 1)); }
+fx_dirs=
+cleanup() { for _d in $fx_dirs; do rm -rf "$_d"; done; }
+trap cleanup EXIT INT TERM
+newfx() { _d=$(mktemp -d) || exit 2; fx_dirs="$fx_dirs $_d"; mkdir -p "$_d/src/runtime" "$_d/src/lib" "$_d/src/compiler/50.mir"; FX=$_d; }
+# want OUT SYM COMPILE REASON_PREFIX : exactly one row for SYM with that verdict
+want() {
+  awk -v sym="$2" -v cv="$3" -v pfx="$4" '
+    index($0, "RT_C_CONTRACT compile=") == 1 && index($0, " symbol=" sym " ") > 0 {
+      n++; c = $0; sub(/^RT_C_CONTRACT compile=/, "", c); sub(/ .*/, "", c)
+      r = $0; sub(/^.* reason=/, "", r); sub(/ diag=.*$/, "", r)
+      if (c != cv || index(r, pfx) != 1) bad = c " " r
+    }
+    END { if (n != 1) { printf "%d rows for %s, wanted 1\n", n, sym; exit 1 }
+          if (bad != "") { printf "%s compile+reason %s, wanted %s %s\n", sym, bad, cv, pfx; exit 1 } }' "$1" || note "$(awk -v sym="$2" -v cv="$3" -v pfx="$4" '
+    index($0, "RT_C_CONTRACT compile=") == 1 && index($0, " symbol=" sym " ") > 0 { n++ ; l = $0 }
+    END { printf "%s: %d row(s), wanted %s %s (%s)\n", sym, n, cv, pfx, l }' "$1")"
+}
+
+spl_a='extern fn rt_good(a: i64) -> i64
+extern fn rt_flag() -> bool
+extern fn rt_wrong(a: i64) -> f64
+extern fn rt_win_only() -> i64
+extern fn rt_textual(s: text) -> i64
+extern fn rt_dup(a: i64) -> i64
+extern fn rt_split(s: text, n: i64) -> i64
+extern fn rt_empty(s: text) -> i64
+extern fn rt_split_wrong(s: text, n: i64) -> i64
+extern fn rt_positions(a: text, n: i64, b: text) -> i64
+extern fn rt_positions_peer(a: text, n: i64, b: text) -> i64
+extern fn rt_arr(a: [u8]) -> i64
+extern fn rt_opt(a: i64) -> i64?
+extern fn rt_vec(v: Vec4f) -> Vec4f
+extern fn rt_obj(w: Widget) -> i64
+extern fn rt_alias(h: Handle) -> i64
+extern fn rt_tuple(t: (i64, i64)) -> i64
+extern fn rt_generic(x: T) -> i64'
+table_spl='fn text_arg_indices(func_name: text) -> [i64]?:
+    match func_name:
+        case "rt_split" | "rt_split_wrong":
+            return Some([0])
+        # case "rt_textual": return Some([0])
+        case "rt_positions" | "rt_positions_peer":
+            # both text positions, with scalar in between
+            return Some([0, 2])
+        case "rt_empty": return Some([])
+        case _("default # keeps tagged ABI"):
+            return None
+# fn fake_boundary(): comments do not close the body
+
+export text_arg_indices
+pub fn neighboring_registry(name: text) -> [i64]?:
+    match name:
+        case "rt_split" | "rt_textual": return Some([1])'
+
+newfx; r=$FX
+printf '%s\n' '#include <stdint.h>' '#include <stdbool.h>' '#include <stddef.h>' \
+  'int64_t rt_good(int64_t a) { return a; }' 'bool rt_flag(void) { return true; }' \
+  'int64_t rt_wrong(int64_t a) { return a; }' '#ifdef _WIN32' 'int64_t rt_win_only(void) { return 1; }' '#endif' \
+  'int64_t rt_textual(int64_t v) { return v; }' 'int64_t rt_empty(int64_t v) { return v; }' \
+  'int64_t rt_dup(int64_t a) { return a; }' \
+  'int64_t rt_split(const uint8_t* p, uint64_t len, int64_t n) { return n + (int64_t)len + p[0]; }' \
+  'int64_t rt_split_wrong(int64_t s, int64_t n) { return s + n; }' \
+  'int64_t rt_positions(const uint8_t* a, uint64_t al, int64_t n, const uint8_t* b, uint64_t bl) { return n + al + bl; }' \
+  'int64_t rt_positions_peer(const uint8_t* a, uint64_t al, int64_t n, const uint8_t* b, uint64_t bl) { return n + al + bl; }' \
+  'int64_t rt_arr(int64_t a) { return a; }' 'int64_t rt_opt(int64_t a) { return a; }' \
+  'int64_t rt_vec(int64_t v) { return v; }' 'int64_t rt_obj(int64_t w) { return w; }' \
+  'int64_t rt_alias(int64_t h) { return h; }' 'int64_t rt_tuple(int64_t t) { return t; }' \
+  'int64_t rt_generic(int64_t x) { return x; }' > "$r/src/runtime/good.c"
+printf '%s\n' "$spl_a" > "$r/src/lib/a.spl"
+printf 'extern fn rt_dup(a: i64) -> f64\n' > "$r/src/lib/b.spl"
+printf 'class Widget:\n    id: i64\ntype Handle = i64\n' > "$r/src/lib/types.spl"
+printf '%s\n' "$table_spl" > "$r/src/compiler/50.mir/text_extern_abi.spl"
+out=$r/rows.out
+run_contract "$r" cc "src/runtime/good.c
+" > "$out" 2>&1
+want "$out" rt_good PASS compiles-with-prototype
+want "$out" rt_flag PASS compiles-with-prototype
+want "$out" rt_wrong FAIL prototype-rejected
+want "$out" rt_win_only UNTESTED not-defined-on-host
+want "$out" rt_textual PASS compiles-with-prototype
+want "$out" rt_split PASS compiles-with-prototype
+want "$out" rt_empty PASS compiles-with-prototype
+want "$out" rt_split_wrong FAIL prototype-rejected
+want "$out" rt_positions PASS compiles-with-prototype
+want "$out" rt_positions_peer PASS compiles-with-prototype
+want "$out" rt_arr PASS compiles-with-prototype
+want "$out" rt_opt PASS compiles-with-prototype
+want "$out" rt_vec PASS compiles-with-prototype
+want "$out" rt_obj PASS compiles-with-prototype
+want "$out" rt_alias PASS compiles-with-prototype
+want "$out" rt_tuple UNTESTED 'unmapped-spl-type:'
+want "$out" rt_generic UNTESTED 'unmapped-spl-type:T'
+dup=$(awk 'index($0, "RT_C_CONTRACT compile=") == 1 && index($0, " symbol=rt_dup ") > 0 {
+  c = $0; sub(/^RT_C_CONTRACT compile=/, "", c); sub(/ .*/, "", c)
+  s = $0; sub(/^.* sig=/, "", s); sub(/ .*/, "", s)
+  p = $0; sub(/^.* spl=/, "", p); sub(/ .*/, "", p); sub(/^.*\//, "", p)
+  print s ":" p ":" c }' "$out" | sort | tr '\n' ' ')
+[ "$dup" = "(i64)->f64:b.spl:FAIL (i64)->i64:a.spl:PASS " ] || note "rt_dup rows $dup, wanted a.spl PASS and b.spl FAIL"
+grep ' symbol=rt_wrong ' "$out" | grep -q 'diag=.*rt_wrong' || note 'rt_wrong FAIL diagnostic does not name the symbol'
+
+# Refuse incomplete or ambiguous owners rather than silently treating all text as tagged.
+tbl=$r/src/compiler/50.mir/text_extern_abi.spl
+bad_table() { # label content
+  printf '%s\n' "$2" > "$tbl"
+  _o=$(run_contract "$r" false "src/runtime/good.c
+" 2>&1); _rc=$?
+  [ "$_rc" = 2 ] && printf '%s\n' "$_o" | grep -q '^ERROR — ' || note "$1 registry accepted"
+}
+bad_table 'missing owner' 'fn neighboring_registry():
+    return None'
+bad_table 'duplicate owner' "$table_spl
+$table_spl"
+bad_table 'malformed case' "$(printf '%s\n' "$table_spl" | sed 's/Some(\[0, 2\])/Some([bad])/')"
+bad_table 'malformed declaration' "$(printf '%s\n' "$table_spl" | sed 's/text_arg_indices(func_name: text) -> \[i64\]?:/text_arg_indices broken/')"
+printf '%s\n' "$table_spl" > "$tbl"
+# The compiler being unavailable must never produce PASS.
+nocc=$(run_contract "$r" false "src/runtime/good.c
+" 2>&1)
+printf '%s\n' "$nocc" | grep -q '^RT_C_CONTRACT compile=PASS' && note 'PASS reported with a failing compiler'
+printf '%s\n' "$nocc" | grep '^RT_C_CONTRACT compile=' | grep -vq 'reason=tu-baseline-failed' && note 'failing compiler did not mark every row tu-baseline-failed'
+printf '%s\n' "$nocc" | grep -q '^RT_C_CONTRACT compile=' || note 'failing compiler did not mark every row tu-baseline-failed'
+
+# Current production registry and runtime header together: the tagged sysctl parameter stays
+# one word while print_str splits. Real C compilation catches false splits and lost rows.
+newfx; r=$FX
+rtwin=$(cd "$repo" && { pwd -W 2>/dev/null || pwd; })
+printf '#include "%s/src/runtime/runtime.h"\nint32_t rt_sysctlbyname_i32(int64_t name) { return 0; }\nvoid rt_print_str(const uint8_t* p, uint64_t len) {}\n' "$rtwin" > "$r/src/runtime/production.c"
+printf 'extern fn rt_sysctlbyname_i32(name: text) -> i32\nextern fn rt_print_str(s: text) -> void\n' > "$r/src/lib/abi.spl"
+cp "$repo/src/compiler/50.mir/text_extern_abi.spl" "$r/src/compiler/50.mir/text_extern_abi.spl"
+out=$r/rows.out
+run_contract "$r" cc "src/runtime/production.c
+" > "$out" 2>&1
+want "$out" rt_sysctlbyname_i32 PASS compiles-with-prototype
+want "$out" rt_print_str PASS compiles-with-prototype
+
+newfx; r=$FX
+printf '#include "no_such_rt_header_for_selftest.h"\nint64_t rt_broken(int64_t a) { return a; }\n' > "$r/src/runtime/broken.c"
+printf 'extern fn rt_broken(a: i64) -> i64\n' > "$r/src/lib/b.spl"
+out=$r/rows.out
+run_contract "$r" cc "src/runtime/broken.c
+" > "$out" 2>&1
+grep -q '^RT_C_CONTRACT compile=' "$out" || note 'broken TU produced no rows'
+grep -q '^RT_C_CONTRACT compile=PASS' "$out" && note 'PASS reported for a TU that does not compile'
+grep '^RT_C_CONTRACT compile=' "$out" | grep -vq 'reason=tu-baseline-failed' && note 'broken TU rows are not tu-baseline-failed'
+
+if [ "$fails" -gt 0 ]; then
+  echo "ERROR — selftest $fails failure(s)"
+  exit 1
+fi
+echo "PASS — selftest: PASS, FAIL (wrong prototype, wrong text-ABI split), UNTESTED (ifdef, tuple, bare generic, broken TU, failing cc) all as expected; text, arrays, optionals, vectors, declared classes and aliases map to their C ABI"
+exit 0

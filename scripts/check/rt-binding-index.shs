@@ -1,0 +1,38 @@
+#!/bin/sh
+# rt-binding-index.shs: R1 metadata index of rt_ externs, MAPPING and POINTER evidence only.
+# POSIX sh + one awk (scripts/check/lib/rt-scan.awk); replaces rt-binding-index.py.
+# One record per `extern fn rt_x` under src/compiler, src/lib, src/app, src/os; versioned JSON
+# (sorted keys, indent 2, no timestamps), byte-identical across runs. The summary line goes to
+# stderr, so stdout is pure JSON when --out is omitted. Exit 0 written, 2 nothing checked,
+# 1 selftest failure. Usage: rt-binding-index.shs [--root DIR] [--out PATH] [--selftest]
+# Deliberate deviations from the Python original: see the header of lib/rt-scan.awk.
+LC_ALL=C; export LC_ALL
+here=$(cd "$(dirname "$0")" && pwd) || exit 2
+root=$(cd "$here/../.." && pwd) || exit 2
+selftest=0; out=
+while [ $# -gt 0 ]; do
+  case $1 in
+    --selftest) selftest=1 ;;
+    --root) shift; root=${1:-}; [ -n "$root" ] || { echo "ERROR — --root needs a value"; exit 2; } ;;
+    --out) shift; out=${1:-}; [ -n "$out" ] || { echo "ERROR — --out needs a value"; exit 2; } ;;
+    *) ;;
+  esac
+  shift
+done
+if [ "$selftest" = 1 ]; then
+  RT_ROOT= awk -v MODE=index -v SELFTEST=1 -f "$here/lib/rt-scan.awk" </dev/null
+  exit $?
+fi
+if [ -n "$out" ]; then
+  mkdir -p "$(dirname "$out")" || { echo "ERROR — cannot create output directory"; exit 2; }
+fi
+RT_ROOT=$root RT_OUT=$out
+export RT_ROOT RT_OUT
+tops=
+for d in src/runtime src/compiler_rust/runtime/src src/compiler src/lib src/app src/os; do
+  [ -d "$root/$d" ] && tops="$tops $root/$d"
+done
+[ -n "$tops" ] || { echo "ERROR — nothing was checked (0 extern records)"; exit 2; }
+# shellcheck disable=SC2086
+find $tops -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.rs' -o -name '*.spl' \) 2>/dev/null |
+  awk -v MODE=index -f "$here/lib/rt-scan.awk"
