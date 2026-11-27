@@ -61,9 +61,9 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 Carried by reference, not duplicated: see the "Open (P2, next increment)" list in `doc/03_plan/platform/container/simple_container_improvement.md`.
 
 ### 8. Open at session close (2026-11-27)
-Landed this run on `release/1.0.0`: #12115-#12143 (store hardening, view conflicts, GC quarantine restore, `rt_dir_sync`, root claim compaction, SCV gc per-run owner). Still open, each tracked in `doc/08_tracking/todo/todo_db.sdn`:
-- Keep-marked pin tombs (`pin-owner-changed-unrestored`) and `pins/<id>.r<n>` restored pins are not surfaced to their owner or reclaimed (todo 476).
-- SCV gc keeps unmarked `scv-gc:` pins forever; ageing them out needs a liveness signal, not a timeout (todo 477).
+Landed this run on `release/1.0.0`: #12115-#12143 (store hardening, view conflicts, GC quarantine restore, `rt_dir_sync`, root claim compaction, SCV gc per-run owner). Items below marked DONE are closed; the rest are tracked in `doc/08_tracking/todo/todo_db.sdn`:
+- DONE (2026-11-28, todo 476 closed, 951bdc66a8e): keep-marked pin tombs and `pins/<id>.r<n>` restored pins are listed and reclaimed by their owner.
+- DONE (2026-11-28, todo 477 closed, 6c590d005e9 + 64a2eb08ce6): unmarked `scv-gc:` pins of dead runs are reclaimed via a per-run liveness record, not pin age.
 - DONE (2026-11-28, todo 478 closed): Windows native-build smoke of `dir_sync` links and prints `true` then `false` (root cause: `type Codegen` alias, see `doc/08_tracking/bug/seed_jit_type_alias_captures_same_named_trait_dispatch_2026-11-28.md`).
-- Storage view junction TOCTOU between parent walk and open; needs handle-relative opens (todo 479).
-- 18 undefined-but-used strict-use imports block flipping `SIMPLE_STRICT_USE` on by default; see `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` (todo 480).
+- DONE (2026-11-28, todo 479 closed, af7af5e8918): storage view read/write use handle-relative under-root I/O that refuses links at open time.
+- 7 undefined-but-used strict-use imports block flipping `SIMPLE_STRICT_USE` on by default; see `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` (todo 480).
