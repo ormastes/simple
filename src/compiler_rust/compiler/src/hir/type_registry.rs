@@ -409,6 +409,11 @@ impl TypeRegistry {
         self.types.iter().map(|(id, ty)| (*id, ty))
     }
 
+    /// Number of registered types (a cheap change detector for caches).
+    pub fn type_count(&self) -> usize {
+        self.types.len()
+    }
+
     /// Get the element type of an array type
     pub fn get_array_element(&self, id: TypeId) -> Option<TypeId> {
         match self.types.get(&id) {

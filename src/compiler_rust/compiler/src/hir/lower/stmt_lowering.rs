@@ -2659,12 +2659,29 @@ impl Lowerer {
                             // Interpreter lane was always correct; this is the
                             // compiled HIR/MIR/JIT path. See doc/08_tracking/bug/
                             // elif_val_pattern_in_if_expression_fails_to_bind_2026-08-19.md
+                            // An erased (`any`) subject can hold a raw `T?` too
+                            // (`"12".parse_int()` passed to an untyped parameter),
+                            // where `rt_enum_payload` answered nil.
+                            // `rt_unwrap_or_self` is the whole Option-id test in
+                            // one call: payload for an Option enum, the word
+                            // itself for the raw form. A user enum declaring
+                            // `Some` reaches here only through that variant (the
+                            // arm test checks it), so it binds its own payload.
+                            // parse_family_strips_option_jit_native_2026-08-02,
+                            // seed_jit_any_match_bare_some_arm_takes_user_enum_unit_variant_2026-11-27
                             let subject_is_optional = self.optional_enum_payload_inner(subject_ty).is_some()
                                 || self.module.types.optional_inner(subject_ty).is_some();
-                            let payload_expr = if enum_variant == "Some"
+                            let erased_option_some = subject_ty == TypeId::ANY
+                                && enum_variant == "Some"
                                 && payload_patterns.len() == 1
-                                && subject_is_optional
-                            {
+                                && matches!(enum_name.as_str(), "_" | "Option");
+                            let payload_expr = if erased_option_some {
+                                let subject = HirExpr {
+                                    kind: HirExprKind::Local(subject_idx),
+                                    ty: subject_ty,
+                                };
+                                self.erased_some_arm_binding(&subject, payload_expr_ty, ctx)
+                            } else if enum_variant == "Some" && payload_patterns.len() == 1 && subject_is_optional {
                                 HirExpr {
                                     kind: HirExprKind::If {
                                         condition: Box::new(HirExpr {

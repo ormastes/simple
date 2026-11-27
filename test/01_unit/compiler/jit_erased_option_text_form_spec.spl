@@ -1,0 +1,50 @@
+# Purpose and audience: compiler engineers who own the compiled-lane `T?`
+# representation (raw payload/nil vs boxed Option enum).
+# @req REQ-SSPEC-UNIT
+# Tracks: parse_family_strips_option_jit_native_2026-08-02
+# @tag:in-development
+"""
+# An optional keeps one text form across an untyped boundary (JIT lane)
+
+The compiled lane carries `"12".parse_int()` raw and an explicit `Some(12)` as
+a boxed Option enum, so through an untyped parameter the JIT prints `12`,
+`nil` or `<enum@0x...>` where the interpreter prints `Option::Some(12)` and
+`Option::None`. Unifying the representation at the erased boundary is the open
+part of the bug; `match x: Some(v)` over the raw form is fixed and covered by
+src/compiler_rust/compiler/tests/seed_jit_erased_option_some_pattern.rs.
+
+**This spec must shell out**: `bin/simple test` runs specs under the
+interpreter, which is correct here. Set SIMPLE_BIN to target a binary.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_engine(mode_env: text) -> text:
+    val command = mode_env + " " + simple_binary() + " run test/fixtures/jit_differential/erased_option_text_form.spl"
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+describe "erased optional text form under the JIT":
+    it "prints a parsed Some like the interpreter":
+        step("prints a parsed Some like the interpreter")
+        expect(run_engine("SIMPLE_EXECUTION_MODE=jit")).to_contain("parsed=Option::Some(12)")
+
+    it "prints a parsed None like the interpreter":
+        step("prints a parsed None like the interpreter")
+        expect(run_engine("SIMPLE_EXECUTION_MODE=jit")).to_contain("parsed_none=Option::None")
+
+    it "prints an explicit Some like the interpreter":
+        step("prints an explicit Some like the interpreter")
+        expect(run_engine("SIMPLE_EXECUTION_MODE=jit")).to_contain("explicit=Option::Some(12)")
+
+    it "keeps the Option form through an untyped relay":
+        step("keeps the Option form through an untyped relay")
+        expect(run_engine("SIMPLE_EXECUTION_MODE=jit")).to_contain("relay=Option::Some(12) Option::None")

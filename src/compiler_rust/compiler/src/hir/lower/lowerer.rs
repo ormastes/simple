@@ -21,6 +21,21 @@ type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
 type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<Vec<Type>>)>>>;
 pub(crate) type QualifiedImportFunctions = std::sync::Arc<HashMap<String, String>>;
 
+/// A project-wide enum entry that is the generic builtin `Option<T>`
+/// (`Some(T) | None`, e.g. the legacy std `core/option.spl`). The table keeps
+/// no generic params, so the shape is read from the `Some` payload naming a
+/// single-letter type parameter. A user `enum Option: Some(i64) | None` is not
+/// this.
+pub(crate) fn global_def_is_builtin_option(name: &str, variants: &[(String, Option<Vec<Type>>)]) -> bool {
+    name == "Option"
+        && variants.len() == 2
+        && variants.iter().any(|(v, p)| v == "None" && p.is_none())
+        && variants.iter().any(|(v, p)| {
+            v == "Some"
+                && matches!(p.as_deref(), Some([Type::Simple(t)]) if t.len() == 1 && t.chars().all(|c| c.is_ascii_uppercase()))
+        })
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct GenericIdentityParamSpec {
     pub index: usize,
@@ -352,6 +367,8 @@ pub struct Lowerer {
     /// early-return in `expr/access.rs::lower_field_access` falls through
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
     pub(super) global_enum_defs: Option<GlobalEnumDefs>,
+    /// `user_option_shaped_enums`, keyed by the type count it was built at.
+    pub(super) user_option_shaped_cache: Option<(usize, std::sync::Arc<Vec<(i64, Option<i64>)>>)>,
     /// Bare enum names declared by several modules; their `global_enum_defs`
     /// row is a merged union, so a seeded registration from it is not one
     /// owner's declaration and must not yield a discriminant (#6953).
@@ -535,6 +552,7 @@ impl Lowerer {
             struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            user_option_shaped_cache: None,
             merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
             active_fn_generic_params: Vec::new(),
@@ -644,6 +662,7 @@ impl Lowerer {
             struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            user_option_shaped_cache: None,
             merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
             active_fn_generic_params: Vec::new(),
@@ -776,6 +795,7 @@ impl Lowerer {
             struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            user_option_shaped_cache: None,
             merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
             active_fn_generic_params: Vec::new(),
@@ -901,6 +921,14 @@ impl Lowerer {
     /// W15-H: paired with `register_global_enums()`, which the
     /// `native_project` compiler driver calls before `lower_module(&ast)`.
     /// See the doc comment on `global_enum_defs` for the why.
+    /// The project-wide `Option` entry, if any, is the generic builtin.
+    pub(crate) fn global_option_is_builtin(&self) -> bool {
+        self.global_enum_defs
+            .as_ref()
+            .and_then(|defs| defs.get("Option"))
+            .is_some_and(|vs| global_def_is_builtin_option("Option", vs))
+    }
+
     pub fn set_global_enum_defs(&mut self, defs: GlobalEnumDefs) {
         self.global_enum_defs = Some(defs);
     }
