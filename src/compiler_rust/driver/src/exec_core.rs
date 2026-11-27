@@ -1292,6 +1292,19 @@ impl ExecCore {
             ));
         }
 
+        // Drop imported functions nothing reachable can name BEFORE HIR/MIR
+        // lowering (wrapper: 1,283 lowered vs 174 reachable). Runs after the
+        // comprehension check so which modules de-JIT is unchanged. Soundness:
+        // mir/ast_reachability.rs.
+        if std::env::var("SIMPLE_JIT_AST_PRUNE").map_or(true, |v| v != "0") {
+            if let Some((before, after)) = simple_compiler::mir::retain_reachable_ast_functions(&mut ast.items, path) {
+                if trace {
+                    eprintln!("[rust-jit] ast-reachability items={before} kept={after}");
+                }
+            }
+        }
+        phase.mark("ast_prune");
+
         // Lower to HIR with context so imported types (enums, classes) are resolved.
         // Lenient variant: aligns this lane's `Lowerer::with_module_resolver`
         // memory-safety strictness with the canonical native-build/compile lane

@@ -445,10 +445,16 @@ pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip:
     entry
 }
 
+/// Cache-miss parses of [`shared_source`]. Modules the loader already parsed
+/// are seeded, so a regression to re-parsing shows up here on every platform
+/// (`[resolve-stats] shared_parses=`).
+pub(crate) static SHARED_SOURCE_PARSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn parse_shared_source(
     source: &str,
     target: &crate::pipeline::cfg_strip::CfgTarget,
 ) -> Result<Arc<simple_parser::ast::Module>, Arc<str>> {
+    SHARED_SOURCE_PARSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let selected = crate::pipeline::cfg_strip::strip_os_when_blocks(source, target)
         .map_err(|error| Arc::<str>::from(error))?;
     simple_parser::Parser::new(&selected)

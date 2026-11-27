@@ -47,7 +47,7 @@ use super::{MirFunction, MirInst, MirModule};
 
 /// Matching keys of a name: the name, its normalised form (`::`, `.`,
 /// `_dot_` -> `__`), and every suffix after a `__` in the normalised form.
-fn name_keys(name: &str, out: &mut Vec<String>) {
+pub(super) fn name_keys(name: &str, out: &mut Vec<String>) {
     // `f$dupN` (same-named overloads, MIR lowering) and `f$boxed`-style
     // derived symbols also carry the keys of `f`, so a reference to either
     // spelling keeps every variant.
@@ -285,7 +285,7 @@ fn function_names(func: &MirFunction, out: &mut Vec<(String, bool)>) {
 /// than MIR calls. (Every flattened function carries the bookkeeping
 /// attributes `actor` and `__simple_flatten_module_owner__=...`, so "has any
 /// attribute" would root the whole module.)
-const ROOT_ATTRIBUTES: &[&str] = &["export", "no_mangle", "entry", "init", "constructor", "used"];
+pub(super) const ROOT_ATTRIBUTES: &[&str] = &["export", "no_mangle", "entry", "init", "constructor", "used"];
 
 fn is_root(func: &MirFunction) -> bool {
     func.name == "main"

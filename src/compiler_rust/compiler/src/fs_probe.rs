@@ -33,9 +33,16 @@
 //! the OS may still match (8.3 short names with `~`, non-ASCII names under
 //! NTFS case folding, trailing `.`/space), an ambiguous case-folded name, a
 //! path with no file name (`..` tail) or no parent, and an unreadable parent.
-//! Listings share the probe cache's lifetime and are dropped with it, so a
-//! file created after its directory was listed is as invisible as one whose
-//! path was already probed absent — the contract this cache always had.
+//! Listings share the probe cache's lifetime and are dropped with it. This is
+//! WIDER staleness than the per-path cache alone: probing one name lists the
+//! directory, which freezes every name in it, so a file created there later is
+//! invisible until `clear_fs_probe_cache()` even if that exact path was never
+//! probed before. Only resolver code calls these probes, and every resolver
+//! cache clear drops both maps.
+//!
+//! Known gap: a directory with per-directory case sensitivity enabled
+//! (`fsutil file setCaseSensitiveInfo`, used by WSL) can report a case-variant
+//! name as present where `metadata` would say absent.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
