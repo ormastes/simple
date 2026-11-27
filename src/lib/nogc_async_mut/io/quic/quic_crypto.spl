@@ -29,9 +29,9 @@ use std.common.crypto.aes_gcm.{aes128_key_expansion, aes128_encrypt_block, aes12
 
 # QUIC v1 Initial salt (20 bytes) — RFC 9001 §5.2
 # 0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a
-val QUIC_INITIAL_SALT_V1: [i64] = [
-    0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
-    0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a
+val QUIC_INITIAL_SALT_V1: [u8] = [
+    0x38u8, 0x76u8, 0x2cu8, 0xf7u8, 0xf5u8, 0x59u8, 0x34u8, 0xb3u8, 0x4du8, 0x17u8,
+    0x9au8, 0xe6u8, 0xa4u8, 0xc8u8, 0x0cu8, 0xadu8, 0xccu8, 0xbbu8, 0x7fu8, 0x0au8
 ]
 
 # SHA-256 hash length
@@ -94,9 +94,9 @@ class QuicPacketKeys:
     Holds the AES-128-GCM key, IV, and header protection key for
     one direction (client→server or server→client) at one encryption level.
     """
-    aead_key: [i64]
-    iv: [i64]
-    hp_key: [i64]
+    aead_key: [u8]
+    iv: [u8]
+    hp_key: [u8]
 
 # ============================================================================
 # QuicCryptoState — full crypto context for a QUIC connection
@@ -124,8 +124,8 @@ class QuicCryptoState:
     initial_crypto_consumed: i64
     handshake_crypto_consumed: i64
     # Current key schedule secrets (for advancing to next level)
-    handshake_secret: [i64]
-    master_secret: [i64]
+    handshake_secret: [u8]
+    master_secret: [u8]
     # Packet number trackers (per level)
     initial_pn: i64
     handshake_pn: i64
@@ -162,7 +162,7 @@ class QuicCryptoState:
 # };
 # ============================================================================
 
-fn quic_hkdf_expand_label(secret: [i64], label: text, ctx: [i64], length: i64) -> [i64]:
+fn quic_hkdf_expand_label(secret: [u8], label: text, ctx: [u8], length: i64) -> [u8]:
     """HKDF-Expand-Label per RFC 8446 §7.1 with 'tls13 ' prefix.
 
     Builds the HkdfLabel struct as the info parameter for HKDF-Expand:
@@ -179,33 +179,33 @@ fn quic_hkdf_expand_label(secret: [i64], label: text, ctx: [i64], length: i64) -
     val full_label_len = prefix.len() + label.len()
 
     # Build info: length(2) || label_len(1) || "tls13 " || label || ctx_len(1) || ctx
-    var info: [i64] = []
+    var info: [u8] = []
 
     # uint16 length
-    info.push((length >> 8) & 0xff)
-    info.push(length & 0xff)
+    info.push(((length >> 8) & 0xff) as u8)
+    info.push((length & 0xff) as u8)
 
     # opaque label<7..255>: length prefix + "tls13 " + label
-    info.push(full_label_len & 0xff)
+    info.push((full_label_len & 0xff) as u8)
 
     # "tls13 " bytes
-    info.push(0x74)  # t
-    info.push(0x6c)  # l
-    info.push(0x73)  # s
-    info.push(0x31)  # 1
-    info.push(0x33)  # 3
-    info.push(0x20)  # space
+    info.push(0x74u8)  # t
+    info.push(0x6cu8)  # l
+    info.push(0x73u8)  # s
+    info.push(0x31u8)  # 1
+    info.push(0x33u8)  # 3
+    info.push(0x20u8)  # space
 
     # label bytes
     var li = 0
     loop:
         if li >= label.len():
             break
-        info.push(_char_code_at(label, li))
+        info.push((_char_code_at(label, li) & 0xff) as u8)
         li = li + 1
 
     # opaque context<0..255>: length prefix + context bytes
-    info.push(ctx.len() & 0xff)
+    info.push((ctx.len() & 0xff) as u8)
     var ci = 0
     loop:
         if ci >= ctx.len():
@@ -223,7 +223,7 @@ fn quic_hkdf_expand_label(secret: [i64], label: text, ctx: [i64], length: i64) -
 # server_initial_secret = HKDF-Expand-Label(initial_secret, "server in", "", 32)
 # ============================================================================
 
-fn derive_initial_secret(client_dst_cid: [u8]) -> [i64]:
+fn derive_initial_secret(client_dst_cid: [u8]) -> [u8]:
     """Derive the Initial secret from client's destination connection ID.
 
     initial_secret = HKDF-Extract(QUIC_INITIAL_SALT_V1, cid)
@@ -232,16 +232,7 @@ fn derive_initial_secret(client_dst_cid: [u8]) -> [i64]:
         client_dst_cid: Destination Connection ID from client's Initial packet
     Returns: 32-byte initial secret
     """
-    # Convert [u8] to [i64] for crypto APIs
-    var ikm: [i64] = []
-    var i = 0
-    loop:
-        if i >= client_dst_cid.len():
-            break
-        ikm.push(client_dst_cid[i])
-        i = i + 1
-
-    return hkdf_extract_sha256(QUIC_INITIAL_SALT_V1, ikm)
+    return hkdf_extract_sha256(QUIC_INITIAL_SALT_V1, client_dst_cid)
 
 fn derive_initial_secrets(client_dst_cid: [u8]) -> (QuicPacketKeys, QuicPacketKeys):
     """Derive both client and server Initial packet keys from connection ID.
@@ -250,7 +241,7 @@ fn derive_initial_secrets(client_dst_cid: [u8]) -> (QuicPacketKeys, QuicPacketKe
     """
     val initial_secret = derive_initial_secret(client_dst_cid)
 
-    val empty_ctx: [i64] = []
+    val empty_ctx: [u8] = []
 
     # Derive client/server initial traffic secrets
     val client_secret = quic_hkdf_expand_label(initial_secret, "client in", empty_ctx, SHA256_HASH_LEN)
@@ -270,14 +261,14 @@ fn derive_initial_secrets(client_dst_cid: [u8]) -> (QuicPacketKeys, QuicPacketKe
 # hp  = HKDF-Expand-Label(secret, "quic hp",  "", hp_key_len)
 # ============================================================================
 
-fn derive_quic_keys(secret: [i64]) -> QuicPacketKeys:
+fn derive_quic_keys(secret: [u8]) -> QuicPacketKeys:
     """Derive QUIC AEAD key, IV, and header protection key from a traffic secret.
 
     Parameters:
         secret: 32-byte traffic secret
     Returns: QuicPacketKeys with key(16), iv(12), hp(16)
     """
-    val empty_ctx: [i64] = []
+    val empty_ctx: [u8] = []
 
     val aead_key = quic_hkdf_expand_label(secret, "quic key", empty_ctx, AES_128_KEY_LEN)
     val iv = quic_hkdf_expand_label(secret, "quic iv", empty_ctx, QUIC_IV_LEN)
@@ -301,7 +292,7 @@ fn derive_quic_keys(secret: [i64]) -> QuicPacketKeys:
 # "derived" = HKDF-Expand-Label(secret, "derived", SHA256(""), 32)
 # ============================================================================
 
-fn derive_secret(secret: [i64], label: text, messages_hash: [i64]) -> [i64]:
+fn derive_secret(secret: [u8], label: text, messages_hash: [u8]) -> [u8]:
     """Derive-Secret per RFC 8446 §7.1.
 
     Derive-Secret(Secret, Label, Messages) =
@@ -315,16 +306,16 @@ fn derive_secret(secret: [i64], label: text, messages_hash: [i64]) -> [i64]:
     """
     return quic_hkdf_expand_label(secret, label, messages_hash, SHA256_HASH_LEN)
 
-fn derive_early_secret() -> [i64]:
+fn derive_early_secret() -> [u8]:
     """Derive Early Secret with no PSK (all zeros).
 
     Early Secret = HKDF-Extract(salt=0, IKM=0)
     """
-    val zero_salt: [i64] = _zeros_i64(SHA256_HASH_LEN)
-    val zero_ikm: [i64] = _zeros_i64(SHA256_HASH_LEN)
+    val zero_salt: [u8] = _zeros_u8(SHA256_HASH_LEN)
+    val zero_ikm: [u8] = _zeros_u8(SHA256_HASH_LEN)
     return hkdf_extract_sha256(zero_salt, zero_ikm)
 
-fn derive_handshake_secrets(shared_secret: [i64], transcript_hash: [i64]) -> ([i64], QuicPacketKeys, QuicPacketKeys):
+fn derive_handshake_secrets(shared_secret: [u8], transcript_hash: [u8]) -> ([u8], QuicPacketKeys, QuicPacketKeys):
     """Derive handshake-level secrets and keys from ECDHE shared secret.
 
     Parameters:
@@ -350,7 +341,7 @@ fn derive_handshake_secrets(shared_secret: [i64], transcript_hash: [i64]) -> ([i
 
     return (hs_secret, client_keys, server_keys)
 
-fn derive_application_secrets(handshake_secret: [i64], transcript_hash: [i64]) -> (QuicPacketKeys, QuicPacketKeys):
+fn derive_application_secrets(handshake_secret: [u8], transcript_hash: [u8]) -> (QuicPacketKeys, QuicPacketKeys):
     """Derive application-level (1-RTT) secrets and keys.
 
     Parameters:
@@ -364,7 +355,7 @@ fn derive_application_secrets(handshake_secret: [i64], transcript_hash: [i64]) -
     val derived = derive_secret(handshake_secret, "derived", empty_hash)
 
     # master_secret = HKDF-Extract(derived, 0)
-    val zero_ikm: [i64] = _zeros_i64(SHA256_HASH_LEN)
+    val zero_ikm: [u8] = _zeros_u8(SHA256_HASH_LEN)
     val master = hkdf_extract_sha256(derived, zero_ikm)
 
     # client/server application traffic secrets
@@ -384,12 +375,12 @@ fn derive_application_secrets(handshake_secret: [i64], transcript_hash: [i64]) -
 # AAD = QUIC packet header (up to and including the packet number).
 # ============================================================================
 
-fn quic_compute_nonce(iv: [i64], packet_number: i64) -> [i64]:
+fn quic_compute_nonce(iv: [u8], packet_number: i64) -> [u8]:
     """Compute AEAD nonce by XORing IV with left-padded packet number.
 
     RFC 9001 §5.3: nonce = iv XOR pn (pn zero-extended to iv length).
     """
-    var nonce: [i64] = []
+    var nonce: [u8] = []
     var i = 0
     loop:
         if i >= iv.len():
@@ -399,13 +390,13 @@ fn quic_compute_nonce(iv: [i64], packet_number: i64) -> [i64]:
 
     # XOR packet number into the rightmost bytes of nonce
     val pn_offset = nonce.len() - 1
-    nonce[pn_offset] = nonce[pn_offset] ^ (packet_number & 0xff)
+    nonce[pn_offset] = ((nonce[pn_offset] as i64) ^ (packet_number & 0xff)) as u8
     if pn_offset >= 1:
-        nonce[pn_offset - 1] = nonce[pn_offset - 1] ^ ((packet_number >> 8) & 0xff)
+        nonce[pn_offset - 1] = ((nonce[pn_offset - 1] as i64) ^ ((packet_number >> 8) & 0xff)) as u8
     if pn_offset >= 2:
-        nonce[pn_offset - 2] = nonce[pn_offset - 2] ^ ((packet_number >> 16) & 0xff)
+        nonce[pn_offset - 2] = ((nonce[pn_offset - 2] as i64) ^ ((packet_number >> 16) & 0xff)) as u8
     if pn_offset >= 3:
-        nonce[pn_offset - 3] = nonce[pn_offset - 3] ^ ((packet_number >> 24) & 0xff)
+        nonce[pn_offset - 3] = ((nonce[pn_offset - 3] as i64) ^ ((packet_number >> 24) & 0xff)) as u8
 
     return nonce
 
@@ -421,18 +412,7 @@ fn quic_aead_encrypt(keys: QuicPacketKeys, pn: i64, header: [u8], payload: [u8])
     """
     val nonce = quic_compute_nonce(keys.iv, pn)
 
-    var key_u8: [u8] = []
-    var ki: i64 = 0
-    while ki < keys.aead_key.len():
-        key_u8.push((keys.aead_key[ki] & 0xFF).to_u8())
-        ki = ki + 1
-    var nonce_u8: [u8] = []
-    var ni: i64 = 0
-    while ni < nonce.len():
-        nonce_u8.push((nonce[ni] & 0xFF).to_u8())
-        ni = ni + 1
-
-    val ct_tag = aes128_gcm_encrypt(key_u8, nonce_u8, payload, header)
+    val ct_tag = aes128_gcm_encrypt(keys.aead_key, nonce, payload, header)
     return _bytes_to_hex_u8(ct_tag)
 
 fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u8]) -> text:
@@ -447,17 +427,6 @@ fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u
     """
     val nonce = quic_compute_nonce(keys.iv, pn)
 
-    var key_u8: [u8] = []
-    var ki: i64 = 0
-    while ki < keys.aead_key.len():
-        key_u8.push((keys.aead_key[ki] & 0xFF).to_u8())
-        ki = ki + 1
-    var nonce_u8: [u8] = []
-    var ni: i64 = 0
-    while ni < nonce.len():
-        nonce_u8.push((nonce[ni] & 0xFF).to_u8())
-        ni = ni + 1
-
     val n = ciphertext.len()
     if n < 16:
         return ""
@@ -471,7 +440,7 @@ fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u
             tag.push(ciphertext[i])
         i = i + 1
 
-    val res = aes128_gcm_decrypt(key_u8, nonce_u8, ct, header, tag)
+    val res = aes128_gcm_decrypt(keys.aead_key, nonce, ct, header, tag)
     match res:
         case Ok(data): _bytes_to_hex_u8(data)
         case Err(e): ""
@@ -489,7 +458,7 @@ fn quic_aead_decrypt(keys: QuicPacketKeys, pn: i64, header: [u8], ciphertext: [u
 # Header protection uses the in-tree pure-Simple AES block primitive.
 # ============================================================================
 
-fn quic_header_protect_mask(hp_key: [i64], sample: [u8]) -> [u8]:
+fn quic_header_protect_mask(hp_key: [u8], sample: [u8]) -> [u8]:
     """Compute header protection mask from ciphertext sample.
 
     Uses AES-ECB(hp_key, sample) → first 5 bytes as mask.
@@ -503,7 +472,7 @@ fn quic_header_protect_mask(hp_key: [i64], sample: [u8]) -> [u8]:
     var key_u8: [u8] = []
     var i: i64 = 0
     while i < 16:
-        key_u8.push((hp_key[i] & 0xFF).to_u8())
+        key_u8.push(hp_key[i])
         i = i + 1
     val round_keys = aes128_key_expansion(key_u8)
     val block = aes128_encrypt_block(sample, round_keys)
@@ -668,14 +637,14 @@ fn extract_handshake_messages(buf: [u8], start_pos: i64) -> ([QuicCryptoEvent], 
 # Internal helpers
 # ============================================================================
 
-fn _zeros_i64(n: i64) -> [i64]:
-    """Return an n-element [i64] list of zeros."""
-    var out: [i64] = []
+fn _zeros_u8(n: i64) -> [u8]:
+    """Return an n-element [u8] array of zeros."""
+    var out: [u8] = []
     var i = 0
     loop:
         if i >= n:
             break
-        out.push(0)
+        out.push(0u8)
         i = i + 1
     return out
 
@@ -744,18 +713,6 @@ fn _hex_nibble(v: i64) -> text:
     if v == 13: return "d"
     if v == 14: return "e"
     return "f"
-
-fn _bytes_to_hex_i64(data: [i64]) -> text:
-    """Convert [i64] byte list to hex string."""
-    var out = ""
-    var i = 0
-    loop:
-        if i >= data.len():
-            break
-        val b = data[i] & 0xff
-        out = out + _hex_nibble((b >> 4) & 0x0f) + _hex_nibble(b & 0x0f)
-        i = i + 1
-    return out
 
 fn _bytes_to_hex_u8(data: [u8]) -> text:
     """Convert [u8] byte list to hex string."""

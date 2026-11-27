@@ -248,3 +248,18 @@ Specs: `test/01_unit/lib/common/crypto/sha512_runtime_primitive_spec.spl`
 (NIST empty/abc/896-bit/1M 'a', runtime vs pure at lengths 111-256),
 `pbkdf2_sha512_fast_spec.spl`; C vectors in
 `src/runtime/test/rt_tls13_sha256_sleep_selfcheck.c`.
+
+## Byte APIs are `[u8]` end to end (owner decision 2026-11-27)
+- Byte-level crypto APIs (sha1/sha256/sha512/sha3/md5/blake2/blake3, hmac, hkdf, pbkdf2,
+  argon2, tls12_prf, `bytes_to_hex`, `crypto_text_to_bytes`) take and return `[u8]`. Only
+  word-oriented cores (keccak_f1600, sha*_process_block/compress, K/IV tables, x25519/ed25519/
+  argon2/blake3 limbs) keep `[u32]`/`[u64]`/`[i64]`.
+- Under the JIT `[u8]` is byte-packed. A `[u8]` that flows into an `[i64]` slot (param, val decl,
+  return, field) reads garbage, and an `[i64]` that flows into a `[u8]` slot truncates values >255.
+  The interpreter hides both. When a word API must be fed, widen with `.map(\x: x as i64)`.
+- `text.bytes()` is `[i64]`; use `crypto_text_to_bytes` for `[u8]`.
+- Seed JIT `[u64].push(v)` with v >= 2^63 flips bit 62, so pre-size `[0u64; n]` and index-assign
+  instead (argon2). Bug: doc/08_tracking/bug/jit_u64_array_push_high_bit_corruption_2026-11-27.md.
+- A `[0u8; n]` buffer that is copied (`var r = a`) and then pushed leaks more under the JIT than a
+  push-built one: pbkdf2 used 172 MB against 137 MB for 20k iterations. The ipad/opad blocks in
+  `pbkdf2.spl` are therefore push-built.
