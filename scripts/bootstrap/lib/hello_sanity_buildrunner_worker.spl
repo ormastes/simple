@@ -21,6 +21,12 @@ use std.common.text_bytes.{text_to_bytes}
 # io_runtime.file_write{,_bytes} collide with the private file_ops twins
 # under the seed's same-signature co-compile (one body silently wins and the
 # private one is then refused), so the twin calls the shared native writer.
+extern fn rt_file_size(path: text) -> i64
+
+fn file_size_of(path: text) -> i64:
+    # io_runtime.file_size collides with a private file_ops name on the seed.
+    rt_file_size(host_path_native(path))
+
 fn write_bytes(path: text, data: [u8]) -> bool:
     file_write_bytes_tagged_native(host_path_native(path), data)
 
@@ -153,21 +159,24 @@ pub fn managed_lane_record(o: WorkerOptions, compiler_sha: text) -> [SdnField]:
 pub fn prepare_worker(o: WorkerOptions, root: text, os_name: text, self_exe: text) -> Result<WorkerOptions, text>:
     """Identity checks before any lane work; returns the options the runner gets."""
     val compiler = root + "/" + (if os_name == "windows": "compiler.exe" else: "compiler")
-    if file_hash_sha256_or_empty(compiler) != o.compiler_sha256:
+    val compiler_sha = file_hash_sha256_or_empty(compiler)
+    if not is_hex64(o.compiler_sha256) or compiler_sha == "" or compiler_sha != o.compiler_sha256:
         return Err("staged compiler identity mismatch")
     # Trust anchor in place of the manager-pinned Python producer.
     if not is_hex64(o.producer_sha256) or self_exe == "" or file_hash_sha256_or_empty(self_exe) != o.producer_sha256:
         return Err("running stage binary does not match its pin")
     if os_name != "windows":
-        process_run("chmod", ["u+x", compiler])
+        val (_o, _e, chmod_rc) = process_run("chmod", ["u+x", compiler])
+        if chmod_rc != 0: return Err("cannot mark staged compiler executable")
     var prepared = o
     prepared.source_root = root
     prepared.compiler = compiler
     prepared.runtime_path = root + "/runtime"
     prepared.results = root + "/results"
     prepared.cache_root = root + "/.builder-cache"
-    if directory_create_mode(prepared.results, 0o777) != 0:
-        return Err("[Errno 17] File exists: '" + prepared.results + "'")
+    val made = directory_create_mode(prepared.results, 0o777)
+    if made == -17: return Err("[Errno 17] File exists: '" + prepared.results + "'")
+    if made != 0: return Err("cannot create " + prepared.results)
     for name in ["runtime", "hir", "frontend"]:
         mkdir_p(prepared.cache_root + "/" + name)
     Ok(prepared)
@@ -195,7 +204,10 @@ pub fn finish_worker(o: WorkerOptions, runner: ManagedLaneRunner, output_path: t
     names = names.sorted()
     var members: [ZipInput] = []
     for name in names:
-        members.push(ZipInput(name: name, data: file_read_bytes(lane + "/" + name), mode: 0o100644))
+        val path = lane + "/" + name
+        val data = file_read_bytes(path)
+        if data.len() != file_size_of(path): return Err("cannot read lane file " + name)
+        members.push(ZipInput(name: name, data: data, mode: 0o100644))
     if file_exists(output_path): return Err("[Errno 17] File exists: '" + output_path + "'")
     if not write_bytes(output_path, zip_stored(members)):
         return Err("cannot write result bundle")

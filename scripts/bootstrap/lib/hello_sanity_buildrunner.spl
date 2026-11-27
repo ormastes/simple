@@ -396,9 +396,12 @@ pub fn bundle_members(b: [u8]) -> Result<[BundleMember], text>:
         if b[i].to_i64() == 0x50 and b[i + 1].to_i64() == 0x4b and b[i + 2].to_i64() == 0x05 and b[i + 3].to_i64() == 0x06:
             eocd = i
         i = i - 1
-    if eocd < 0: return Err("File is not a zip file")
+    if eocd < 0 or eocd < b.len() - 22 - 65535: return Err("File is not a zip file")
     val count = le16(b, eocd + 10)
+    val cd_size = le32(b, eocd + 12)
     var pos = le32(b, eocd + 16)
+    if count != le16(b, eocd + 8) or pos + cd_size != eocd:
+        return Err("Bad magic number for central directory")
     var members: [BundleMember] = []
     for _n in 0..count:
         if pos + 46 > b.len() or le32(b, pos) != 0x02014b50:
@@ -410,13 +413,16 @@ pub fn bundle_members(b: [u8]) -> Result<[BundleMember], text>:
             comp_size: le32(b, pos + 20), file_size: le32(b, pos + 24),
             local_offset: le32(b, pos + 42), mode: le32(b, pos + 38) >> 16))
         pos = pos + 46 + name_len + le16(b, pos + 30) + le16(b, pos + 32)
+    if pos != eocd: return Err("Bad magic number for central directory")
     Ok(members)
 
 pub fn admit_bundle_members(members: [BundleMember]) -> Result<(), text>:
     """Flat, bounded, regular-file members only — checked before any extraction."""
     var total: i64 = 0
     for m in members:
-        total = total + m.file_size
+        # Budget the bytes actually read: stored members must declare equal sizes.
+        if m.method == 0 and m.comp_size != m.file_size: return Err("worker bundle exceeds extraction budget")
+        total = total + m.comp_size
     var unique = true
     for a in 0..members.len():
         for c in (a + 1)..members.len():

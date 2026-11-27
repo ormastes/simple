@@ -23,13 +23,20 @@
 
 use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_read_bytes, file_copy, file_hash_sha256_or_empty, is_dir, dir_walk, mkdir_p, process_run, remove_file_if_exists}
 use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_mode}
-use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField, BundleMember, sdn_str, sdn_int, sdn_bool, hello_forms, runtime_external_headers, task_budget_seconds, lane_status, is_hex64, target_matches_host, verify_result_receipt, memory_receipt_relative, verify_memory_receipt, parse_sdn_record, verify_lane_records, records_equal, record_text, expected_lane_identity, bundle_members, admit_bundle_members, executable_name, JOB_MANIFEST, MONITOR_VERDICT, LANE_COMMAND_MANIFEST, LANE_COMMAND_MANAGER_RUN, LANE_COMMAND_MANAGER_VERIFY, MEMORY_POLICY_MONITOR}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField, BundleMember, sdn_str, sdn_int, sdn_bool, hello_forms, runtime_external_headers, task_budget_seconds, lane_status, is_hex64, target_matches_host, verify_result_receipt, memory_receipt_relative, verify_memory_receipt, parse_sdn_record, verify_lane_records, records_equal, record_text, expected_lane_identity, bundle_members, admit_bundle_members, executable_name, BUNDLE_MAX_BYTES, JOB_MANIFEST, MONITOR_VERDICT, LANE_COMMAND_MANIFEST, LANE_COMMAND_MANAGER_RUN, LANE_COMMAND_MANAGER_VERIFY, MEMORY_POLICY_MONITOR}
 use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
 use std.nogc_sync_mut.fs.host_path.{host_path_native}
 use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
 # io_runtime.file_write{,_bytes} collide with the private file_ops twins
 # under the seed's same-signature co-compile (one body silently wins and the
 # private one is then refused), so the twin calls the shared native writer.
+extern fn rt_file_size(path: text) -> i64
+
+fn file_size_of(path: text) -> i64:
+    # io_runtime.file_size collides with a private file_ops name on the seed.
+    rt_file_size(host_path_native(path))
+
 fn write_bytes(path: text, data: [u8]) -> bool:
     file_write_bytes_tagged_native(host_path_native(path), data)
 
@@ -237,6 +244,8 @@ fn member_bytes(b: [u8], m: BundleMember) -> Result<[u8], text>:
     if sig != 0x04034b50: return Err("Bad magic number for file header")
     val name_len = b[lh + 26].to_i64() | (b[lh + 27].to_i64() << 8)
     val extra_len = b[lh + 28].to_i64() | (b[lh + 29].to_i64() << 8)
+    if name_len != m.name.len() or lh + 30 + name_len > b.len() or bytes_to_text(b[(lh + 30)..(lh + 30 + name_len)]) != m.name:
+        return Err("File name in directory and header differ")
     val start = lh + 30 + name_len + extra_len
     if start + m.comp_size > b.len(): return Err("Truncated file header")
     val raw = b[start..(start + m.comp_size)]
@@ -255,6 +264,7 @@ fn member_named(members: [BundleMember], name: text) -> BundleMember?:
 
 pub fn unpack_verified_lane(bundle: text, destination: text, expected: [SdnField], os_name: text) -> Result<text, text>:
     """Read only flat, bounded artifacts from a manager-verified task output."""
+    if file_size_of(bundle) > BUNDLE_MAX_BYTES + 1048576: return Err("worker bundle exceeds extraction budget")
     val b = file_read_bytes(bundle)
     val members = bundle_members(b)?
     admit_bundle_members(members)?
@@ -270,10 +280,7 @@ pub fn unpack_verified_lane(bundle: text, destination: text, expected: [SdnField
     val exe_member = member_named(members, executable)
     if not exe_member.?: return Err("worker bundle member missing")
     val exe_bytes = member_bytes(b, exe_member.unwrap())?
-    val tmp = bundle + ".exe-check"
-    write_bytes(tmp, exe_bytes)
-    val exe_sha = file_hash_sha256_or_empty(tmp)
-    remove_file_if_exists(tmp)
+    val exe_sha = sha256_u8_hex(exe_bytes)
     if exe_sha == "" or exe_sha != record_text(result, "executable_sha256"):
         return Err("worker executable identity mismatch")
     val made = directory_create_mode(destination, 0o777)
@@ -284,7 +291,8 @@ pub fn unpack_verified_lane(bundle: text, destination: text, expected: [SdnField
             return Err("cannot extract " + m.name)
     val artifact = destination + "/" + executable
     if os_name != "windows":
-        process_run("chmod", ["u+x", artifact])
+        val (_o, _e, chmod_rc) = process_run("chmod", ["u+x", artifact])
+        if chmod_rc != 0: return Err("cannot mark artifact executable")
     Ok(artifact)
 
 # ---------------------------------------------------------------------------
@@ -412,7 +420,7 @@ fn lane_body(port: HelloMatrixPort, ctx: HelloLaneContext, lane: text, backend: 
         return Err("manager did not verify the expected task")
     val receipt = state + "/receipts/hello.sdn"
     val bundle = published + "/" + output
-    if not file_exists(receipt) or not file_exists(bundle) or file_read_bytes(bundle).len() == 0:
+    if not file_exists(receipt) or not file_exists(bundle) or is_dir(bundle) or file_size_of(bundle) <= 0:
         return Err("verified receipt or published bundle missing")
     val memory = verified_memory_receipt(state, receipt, output, bundle, ctx.max_rss_kib * 1024, ctx.memory_policy)?
     val artifact = unpack_verified_lane(bundle, lane + "/verified",
