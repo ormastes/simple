@@ -128,6 +128,41 @@ jobs:
             tools/counterpart/sdk/c
           sparse-checkout-cone-mode: true
 
+      # Release promotion (2026-11-27): a PR based on main whose head is already
+      # published on a versioned release/<x.y> line, with main an ancestor of
+      # it, carries 0 unreviewed commits — every commit was gated by this same
+      # job when it landed on the release line. Scanning base..head instead
+      # (21,916 commits on the first promotion) cannot pass the 64-commit
+      # bound or the +-0.15% size band, and the depth fetch below would pull
+      # most of the repository. release-promotion-admission.shs decides, fail
+      # closed, in a private commit-only scratch repository (this clone is not
+      # touched); exit 0 is the only admission. --expect-tree binds the verdict
+      # to the tree checked out here, so the tip checks in the gate step are
+      # checks of the promoted tree. Decided BEFORE the endpoint fetch.
+      - name: Release promotion admission
+        shell: sh
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          rm -f "$RUNNER_TEMP/release-promotion-admitted"
+          sh scripts/check/release-promotion-admission.shs --selftest ||
+              { echo "fast-gates: release-promotion-admission selftest failed"; exit 1; }
+          if [ "$BASE_REF" = main ] && [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+            _promo_rc=0
+            sh scripts/check/release-promotion-admission.shs --base-ref "$BASE_REF" \
+                --base "$BASE_SHA" --head "$HEAD_SHA" --remote origin \
+                --expect-tree "$(git rev-parse 'HEAD^{tree}')" --scratch-fetch \
+                > "$RUNNER_TEMP/release-promotion.out" || _promo_rc=$?
+            cat "$RUNNER_TEMP/release-promotion.out"
+            if [ "$_promo_rc" -eq 0 ]; then
+              tail -n 1 "$RUNNER_TEMP/release-promotion.out" > "$RUNNER_TEMP/release-promotion-admitted"
+            else
+              echo "fast-gates: not a release promotion (exit $_promo_rc); the normal range gates apply"
+            fi
+          fi
+
       - name: Provision xxhsum and verify LLVM toolchain
         shell: sh
         env:
@@ -137,7 +172,7 @@ jobs:
         run: |
           _fetch_pid=""
           _fetch_rc=0
-          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ] && [ ! -s "$RUNNER_TEMP/release-promotion-admitted" ]; then
             case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
             (
               git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA"
@@ -197,7 +232,9 @@ jobs:
           # `shell: sh` is `sh -e`; without this a red runner exit aborts the
           # step before background subshells are waited and checked below.
           set +e
-          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+          _promoted=0
+          [ ! -s "$RUNNER_TEMP/release-promotion-admitted" ] || _promoted=1
+          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ] && [ "$_promoted" -eq 0 ]; then
             case "$PR_COMMITS" in ''|*[!0-9]*) PR_COMMITS=1 ;; esac
             if [ ! -f "$RUNNER_TEMP/pr-endpoints-fetched" ]; then
               git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
@@ -240,7 +277,11 @@ jobs:
           _pid_land_range=$!
 
           _run_unified=0
-          if [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
+          if [ "$_promoted" -eq 1 ]; then
+            # The PR endpoints are not fetched for an admitted promotion, and
+            # the bootstrap paths it carries were swept on the release line.
+            _run_unified=2
+          elif [ -z "$BASE_SHA" ] || [ -z "$HEAD_SHA" ]; then
             _run_unified=1
           elif git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -Eq '^(scripts/bootstrap/|scripts/check/check-bootstrap-unified-scripts-contract\.shs$|scripts/check/fast-verify-bootstrap-scripts\.shs$)'; then
             _run_unified=1
@@ -259,6 +300,8 @@ jobs:
               ) >"$RUNNER_TEMP/fg-unified.log" 2>&1 </dev/null &
               _unified_pid=$!
             fi
+          elif [ "$_run_unified" -eq 2 ]; then
+            echo "fast-gates: release promotion; the unified-contract sweep ran on the release line and is not repeated"
           else
             echo "fast-gates: no bootstrap unified-contract paths changed in range; skipping standalone duplicate unified-contract sweep"
           fi
@@ -312,8 +355,21 @@ jobs:
           # endpoints from THIS event, never from the manifest file, so a row
           # runs against the real PR content even though its COMMAND TEXT
           # came from BASE.
+          #
+          # Release promotion: the range-bound rows are not run (0 unreviewed
+          # commits; see the admission step). The promoted TIP is still
+          # checked here, on the checked-out merge ref whose tree the
+          # admission bound with --expect-tree: no conflict tree, and the
+          # absolute size band, duplicate-entry, src/ band and path-floor
+          # checks of the tree-size guard.
           _tier_rc=0
-          if [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
+          if [ "$_promoted" -eq 1 ]; then
+            sh scripts/check/check-no-conflict-tree-push.shs --rev-list-args-or-tips HEAD -- HEAD --not HEAD || _tier_rc=1
+            sh scripts/check/check-tree-size-push.shs --push-tip "HEAD..HEAD" || _tier_rc=1
+            if [ "$_tier_rc" -eq 0 ]; then
+              echo "fast-gates: $(cat "$RUNNER_TEMP/release-promotion-admitted")"
+            fi
+          elif [ -n "$BASE_SHA" ] && [ -n "$HEAD_SHA" ]; then
             PRIVATE_IMPORT_BASE="$BASE_SHA" sh scripts/check/run-gate-tier.shs --tier local \
                 --range "$BASE_SHA..$HEAD_SHA" --ref "$HEAD_SHA" --base "$BASE_SHA" \
                 --manifest-rev "$BASE_SHA" --jobs 8 --budget 240

@@ -1937,6 +1937,48 @@ new_ref_closest_published_base() {
     rebased_push_published_base "$1"
 }
 
+# Release promotion (2026-11-27): a branch whose declared base is main
+# (`branch.<b>.merge = refs/heads/main`, exactly one value) and whose tip is
+# already published on a versioned release/<x.y> line of the actual push
+# destination carries 0 unreviewed commits, exactly like a tag. The verdict is
+# release-promotion-admission.shs's, on the LIVE remote; exit 0 is the only
+# admission, and every other outcome leaves the normal range gates in force.
+# A local, non-authoritative pre-check keeps an ordinary main-based push from
+# paying a remote query: its tip is neither on a release tracking ref nor
+# tree-identical to one's tip.
+# Prints the admission line. Returns non-zero when not admitted.
+release_promotion_admission() {
+    _rp_ref=$1; _rp_sha=$2
+    case "$_rp_ref" in refs/heads/*) ;; *) return 1 ;; esac
+    _rp_merge=$(git -C "$ROOT" config --get-all "branch.${_rp_ref#refs/heads/}.merge" 2>/dev/null) || return 1
+    [ "$_rp_merge" = refs/heads/main ] || return 1
+    _rp_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_rp_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+    _rp_destination=${MUST_CHECK_PUSH_DESTINATION:-}
+    case "$_rp_destination" in ''|-*) return 1 ;; esac
+    _rp_tree=$(git -C "$ROOT" rev-parse --verify --quiet "$_rp_sha^{tree}") || return 1
+    _rp_candidate=0
+    for _rp_tip in $(git -C "$ROOT" for-each-ref --format='%(objectname)' "refs/remotes/$_rp_remote/release/" 2>/dev/null); do
+        if [ "$_rp_tip" = "$_rp_sha" ] ||
+            git -C "$ROOT" merge-base --is-ancestor "$_rp_sha" "$_rp_tip" 2>/dev/null ||
+            [ "$(git -C "$ROOT" rev-parse --verify --quiet "$_rp_tip^{tree}")" = "$_rp_tree" ]; then
+            _rp_candidate=1
+            break
+        fi
+    done
+    [ "$_rp_candidate" -eq 1 ] || return 1
+    _rp_out=$(sh "$ROOT/scripts/check/release-promotion-admission.shs" --repo "$ROOT" \
+        --base-ref refs/heads/main --head "$_rp_sha" --remote "$_rp_destination" 2>/dev/null)
+    _rp_rc=$?
+    _rp_line=$(printf '%s\n' "$_rp_out" | tail -n 1)
+    if [ "$_rp_rc" -ne 0 ]; then
+        echo "push-must-check: release promotion of $_rp_ref: $_rp_line" >&2
+        return 1
+    fi
+    case "$_rp_line" in "PASS — release promotion: $_rp_sha tree == published release/"*) ;; *) return 1 ;; esac
+    printf '%s\n' "$_rp_line"
+}
+
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
 # tool, never an unbudgeted run. Resolved here, BEFORE --self-test, so the
 # budget/dispatcher self-test fixtures below exercise the exact same
@@ -2779,6 +2821,19 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
             continue
             ;;
     esac
+    # Release promotion: admitted like a tag, on verified conditions only (see
+    # release_promotion_admission). The conflict-tree union above already ran
+    # over this tip; the range-bound checks (64-commit bound, per-commit size
+    # band, range scans) do not apply to commits that were gated when they
+    # landed on the release line. The tip's own structure is still checked:
+    # absolute size band, duplicate entries, src/ band and path floors.
+    if _promo_line=$(release_promotion_admission "$_local_ref" "$_local_sha"); then
+        _promo_main=$(published_main_ref) || die "release promotion needs refs/remotes/$MUST_CHECK_PUSH_REMOTE/main; fetch it and retry"
+        sh "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_promo_main..$_local_sha" ||
+            die "release promotion tip $_local_sha has a structurally wrong tree"
+        echo "push-must-check: $_promo_line"
+        continue
+    fi
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
     load_committed_dispatcher "$_local_sha"
