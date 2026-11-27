@@ -5802,3 +5802,30 @@ pins the border-box form, the default-UA gap is unfiled.
 - **Pins:** `grid_minmax_floor_justify_content_chrome159_spec` AC-1..6; `grid_justify_content_followup_chrome159_spec` AC-1..5 (second freeze pass, gaps, overflow, painted percent padding, GPU admission).
 - **Open.** Free space is whole CSS px, so an odd centring remainder lands half a px early at 4x. `left` / `right` ignore `direction`. A non-px or fractional minmax floor is still dropped.
 - **Open (4x paint), bug `web_4x_percent_padding_content_box_clip_ignored_2026-11-27`.** At k=4 the device-scale paint path ignores percent padding under `background-clip:content-box`, even on a plain block: a 20px box with padding-left:50% paints from 320 device px (Chrome 360).
+
+## 2026-11-27 — shared CSS length core (`css_length_milli`)
+- There was no shared length resolver: vertical margins read `svg_number_milli`
+  (no exponent, no sign), horizontal margins went through `_decl_inset_exact_milli`,
+  padding had its own integer-px `_padding_length_px`, width used
+  `_decl_font_relative_length_px` (`parse_int` digit scrape). `1e1px` read as 1,
+  `-.5em` as -5, and `calc(...)` as the first digit run.
+- Now `css_length_milli(tok, font_px, allow_bare)` in
+  `simple_web_html_layout_renderer_decl_apply.spl` reads the full CSS <number>
+  grammar (`e` is an exponent only before `[+-]?digit`, so `1em`/`2ex` keep
+  their unit) with px/em/rem, plus `css_calc_length_milli` (+ - * /, nesting,
+  whitespace required around + and -). `%`, `vw`, `var()`, `min()` inside calc
+  are VALID but unresolved -> CSS_LENGTH_NONE -> the caller's legacy reading
+  (e.g. `width:calc(100% - 20px)` still reads 100). Margins, padding and width
+  call it; shorthands split with `css_value_tokens` (paren-aware only when the
+  value has `(`). `_margin_value_authored` rejects an invalid calc so a UA
+  em margin survives `calc(1px +)` (Chrome 159).
+- Encodings respected: negative vertical margins are whole px with milli 0 (a
+  negative `margin_*_milli` means percent); a negative padding calc clamps to 0,
+  a negative padding length rejects.
+- Still on the legacy readers: height, min/max sizes, flex-basis, insets
+  (`_decl_inset_exact_milli` guards `(` — no Chrome rows yet), and absolute
+  units (pt/in/cm) inside calc.
+- Spec: `test/01_unit/browser_engine/css_length_number_calc_chrome159_spec.spl`
+  (26 rows, inline + style-rule paths, measured Chrome 159.0.8154.6).
+- Trap: `.w{height:60px;padding-top:1px}` stacks at a 61px pitch — measure
+  absolute getBoundingClientRect() values, do not derive them.

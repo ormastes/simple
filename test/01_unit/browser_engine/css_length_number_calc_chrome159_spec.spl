@@ -1,0 +1,202 @@
+"""
+## Purpose and audience
+Purpose: Pin that a CSS <number> in a length is read in full -- scientific
+notation (`1e1px`, `1.5e1px`), a leading dot with a sign (`-.5em`, `+.5em`),
+a negative fraction (`-0.5em`) -- and that `calc()` in a margin, padding or
+width resolves to its value instead of a digit scrape. Margins (vertical and
+horizontal), padding and width each have their own length parser in the
+layout renderer, so every one is covered.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--dump-dom` + inline script
+reading getBoundingClientRect() and getComputedStyle(), 900x2000,
+`body{margin:0}`, `.w{width:400px;padding-top:1px;height:60px;font-size:16px}`,
+every inner block `height:10px`, one case per wrapper, 2026-11-27). Wrapper k
+is 61px tall (60 + 1 padding), so a child y is 61k + 1 + its margin;
+the abs column is the measured getBoundingClientRect() value.
+
+| id  | declaration                     | Chrome computed | Chrome abs |
+|-----|---------------------------------|-----------------|------------|
+| m1  | margin-top:1e1px                | 10px            | y 11       |
+| m2  | margin-top:-.5em                | -8px            | y 54       |
+| m3  | margin-top:-0.5em               | -8px            | y 115      |
+| m4  | margin-top:calc(10px + 0.5em)   | 18px            | y 202      |
+| m5  | margin:calc(2px * 3) 0          | 6px             | y 251      |
+| m6  | margin-top:1.5e1px              | 15px            | y 321      |
+| m7  | margin-top:+.5em                | 8px             | y 375      |
+| m8  | margin-top:calc(1em - 3px)      | 13px            | y 441      |
+| h1  | margin-left:1e1px               | 10px            | x 10       |
+| h2  | margin-left:-.5em               | -8px            | x -8       |
+| h3  | margin-left:calc(10px + 0.5em)  | 18px            | x 18       |
+| p1c | parent padding-top:1e1px        | 10px            | y 682      |
+| p2c | parent padding-top:.5em         | 8px             | y 741      |
+| p3c | parent padding-top:calc(4px+1em)| 20px            | y 814      |
+| w1  | width:1e2px                     | 100px           | w 100      |
+| w2  | width:calc(100px + 1em)         | 116px           | w 116      |
+| w3  | width:.5em                      | 8px             | w 8        |
+| c1  | .cm{margin-top:calc(10px+.5em)}| 18px (rule)     | y 1056     |
+| c2  | .cn{margin:-.5em 0}             | -8px (rule)     | y 1091     |
+| c3c | parent padding:calc(2px*3) 0    | 6px             | y 1166     |
+| c4c | parent .cq{padding:calc(2px*3) 0}| 6px (rule)     | y 1227     |
+| c5  | .cs{margin:1e1px 0}             | 10px (rule)     | y 1292     |
+| u1  | <p> margin-top:calc(1px +)      | 16px (UA 1em)   | y 1359     |
+| u2  | <p> margin-top:calc(5px + 5px)  | 10px            | y 1414     |
+| u3  | <p> margin-top:1e1px            | 10px            | y 1475     |
+| u4  | <p> .cr{margin-top:-.5em}       | -8px (rule)     | y 1518     |
+
+`<p>` rows: an invalid calc() is dropped and the UA 1em margin stays; the
+UA bottom margin (16px) of each <p> sits inside its 61px wrapper.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-LENGTH-NUMBER-001 — CSS lengths read the full <number> grammar (exponent, signed leading dot) and resolve calc() in margin, padding and width, inline or through a style rule; an invalid calc() keeps the UA margin.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;padding-top:1px;height:60px;font-size:16px}} .w div,.w p{{height:10px}} .cm{{margin-top:calc(10px + 0.5em)}} .cn{{margin:-.5em 0}} .cq{{padding:calc(2px * 3) 0}} .cr{{margin-top:-.5em}} .cs{{margin:1e1px 0}}</style></head><body>" +
+    "<div class=w><div id=m1 style=\"margin-top:1e1px\"></div></div>" +
+    "<div class=w><div id=m2 style=\"margin-top:-.5em\"></div></div>" +
+    "<div class=w><div id=m3 style=\"margin-top:-0.5em\"></div></div>" +
+    "<div class=w><div id=m4 style=\"margin-top:calc(10px + 0.5em)\"></div></div>" +
+    "<div class=w><div id=m5 style=\"margin:calc(2px * 3) 0\"></div></div>" +
+    "<div class=w><div id=m6 style=\"margin-top:1.5e1px\"></div></div>" +
+    "<div class=w><div id=m7 style=\"margin-top:+.5em\"></div></div>" +
+    "<div class=w><div id=m8 style=\"margin-top:calc(1em - 3px)\"></div></div>" +
+    "<div class=w><div id=h1 style=\"margin-left:1e1px\"></div></div>" +
+    "<div class=w><div id=h2 style=\"margin-left:-.5em\"></div></div>" +
+    "<div class=w><div id=h3 style=\"margin-left:calc(10px + 0.5em)\"></div></div>" +
+    "<div class=w><div id=p1 style=\"padding-top:1e1px\"><div id=p1c></div></div></div>" +
+    "<div class=w><div id=p2 style=\"padding-top:.5em\"><div id=p2c></div></div></div>" +
+    "<div class=w><div id=p3 style=\"padding-top:calc(4px + 1em)\"><div id=p3c></div></div></div>" +
+    "<div class=w><div id=w1 style=\"width:1e2px\"></div></div>" +
+    "<div class=w><div id=w2 style=\"width:calc(100px + 1em)\"></div></div>" +
+    "<div class=w><div id=w3 style=\"width:.5em\"></div></div>" +
+    "<div class=w><div id=c1 class=cm></div></div>" +
+    "<div class=w><div id=c2 class=cn></div></div>" +
+    "<div class=w><div id=c3 style=\"padding:calc(2px * 3) 0\"><div id=c3c></div></div></div>" +
+    "<div class=w><div id=c4 class=cq><div id=c4c></div></div></div>" +
+    "<div class=w><div id=c5 class=cs></div></div>" +
+    "<div class=w><p id=u1 style=\"margin-top:calc(1px +)\"></p></div>" +
+    "<div class=w><p id=u2 style=\"margin-top:calc(5px + 5px)\"></p></div>" +
+    "<div class=w><p id=u3 style=\"margin-top:1e1px\"></p></div>" +
+    "<div class=w><p id=u4 class=cr></p></div>" +
+    "</body></html>"
+
+fn _f(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, field)
+
+describe "CSS <number> in a vertical margin":
+    it "AC-1: margin-top 1e1px is 10px":
+        step("Chrome 159: y 0 + 1 + 10 = 11")
+        expect(_f("m1", "y")).to_equal("11")
+
+    it "AC-2: margin-top -.5em is -8px":
+        step("Chrome 159: y 61 + 1 - 8 = 54")
+        expect(_f("m2", "y")).to_equal("54")
+
+    it "AC-3: margin-top -0.5em is -8px":
+        step("Chrome 159: y 122 + 1 - 8 = 115")
+        expect(_f("m3", "y")).to_equal("115")
+
+    it "AC-4: margin-top 1.5e1px is 15px":
+        step("Chrome 159: y 305 + 1 + 15 = 321")
+        expect(_f("m6", "y")).to_equal("321")
+
+    it "AC-5: margin-top +.5em is 8px":
+        step("Chrome 159: y 366 + 1 + 8 = 375")
+        expect(_f("m7", "y")).to_equal("375")
+
+describe "calc() in a vertical margin":
+    it "AC-6: margin-top calc(10px + 0.5em) is 18px":
+        step("Chrome 159: y 183 + 1 + 18 = 202")
+        expect(_f("m4", "y")).to_equal("202")
+
+    it "AC-7: margin shorthand calc(2px * 3) 0 is 6px":
+        step("Chrome 159: y 244 + 1 + 6 = 251")
+        expect(_f("m5", "y")).to_equal("251")
+
+    it "AC-8: margin-top calc(1em - 3px) is 13px":
+        step("Chrome 159: y 427 + 1 + 13 = 441")
+        expect(_f("m8", "y")).to_equal("441")
+
+describe "horizontal margin":
+    it "AC-9: margin-left 1e1px is 10px":
+        step("Chrome 159: x 10")
+        expect(_f("h1", "x")).to_equal("10")
+
+    it "AC-10: margin-left -.5em is -8px":
+        step("Chrome 159: x -8")
+        expect(_f("h2", "x")).to_equal("-8")
+
+    it "AC-11: margin-left calc(10px + 0.5em) is 18px":
+        step("Chrome 159: x 18")
+        expect(_f("h3", "x")).to_equal("18")
+
+describe "padding":
+    it "AC-12: padding-top 1e1px is 10px":
+        step("Chrome 159: child y 671 + 1 + 10 = 682")
+        expect(_f("p1c", "y")).to_equal("682")
+
+    it "AC-13: padding-top .5em is 8px":
+        step("Chrome 159: child y 732 + 1 + 8 = 741")
+        expect(_f("p2c", "y")).to_equal("741")
+
+    it "AC-14: padding-top calc(4px + 1em) is 20px":
+        step("Chrome 159: child y 793 + 1 + 20 = 814")
+        expect(_f("p3c", "y")).to_equal("814")
+
+describe "width":
+    it "AC-15: width 1e2px is 100px":
+        step("Chrome 159: w 100")
+        expect(_f("w1", "w")).to_equal("100")
+
+    it "AC-16: width calc(100px + 1em) is 116px":
+        step("Chrome 159: w 116")
+        expect(_f("w2", "w")).to_equal("116")
+
+    it "AC-17: width .5em is 8px":
+        step("Chrome 159: w 8")
+        expect(_f("w3", "w")).to_equal("8")
+
+describe "the same lengths through a style rule":
+    it "AC-18: .cm margin-top calc(10px + 0.5em) is 18px":
+        step("Chrome 159: y 1037 + 1 + 18 = 1056")
+        expect(_f("c1", "y")).to_equal("1056")
+
+    it "AC-19: .cn margin -.5em 0 is -8px":
+        step("Chrome 159: y 1098 + 1 - 8 = 1091")
+        expect(_f("c2", "y")).to_equal("1091")
+
+    it "AC-20: .cs margin 1e1px 0 is 10px":
+        step("Chrome 159: y 1281 + 1 + 10 = 1292")
+        expect(_f("c5", "y")).to_equal("1292")
+
+describe "calc() in the padding shorthand":
+    it "AC-21: inline padding calc(2px * 3) 0 is 6px":
+        step("Chrome 159: child y 1159 + 1 + 6 = 1166")
+        expect(_f("c3c", "y")).to_equal("1166")
+
+    it "AC-22: .cq padding calc(2px * 3) 0 is 6px":
+        step("Chrome 159: child y 1220 + 1 + 6 = 1227")
+        expect(_f("c4c", "y")).to_equal("1227")
+
+describe "a UA em margin (<p>) under an authored length":
+    it "AC-23: an invalid calc(1px +) is dropped, UA 1em stays":
+        step("Chrome 159: y 1342 + 1 + 16 = 1359")
+        expect(_f("u1", "y")).to_equal("1359")
+
+    it "AC-24: margin-top calc(5px + 5px) is 10px":
+        step("Chrome 159: y 1403 + 1 + 10 = 1414")
+        expect(_f("u2", "y")).to_equal("1414")
+
+    it "AC-25: margin-top 1e1px is 10px":
+        step("Chrome 159: y 1464 + 1 + 10 = 1475")
+        expect(_f("u3", "y")).to_equal("1475")
+
+    it "AC-26: .cr margin-top -.5em is -8px":
+        step("Chrome 159: y 1525 + 1 - 8 = 1518")
+        expect(_f("u4", "y")).to_equal("1518")
