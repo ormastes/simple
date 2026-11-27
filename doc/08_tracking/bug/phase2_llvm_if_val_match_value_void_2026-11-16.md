@@ -1,6 +1,6 @@
 # Phase 2 LLVM backend: `if val ... else: match ...` used as a value lowers to void
 
-Registered 2026-11-16. Status: open. Severity P2.
+Registered 2026-11-16. Status: fix-implemented-verification-pending (updated 2026-11-27). Severity P2.
 
 ## Symptom
 
@@ -47,14 +47,19 @@ then a statement-form `match` that assigns the slot or returns, then
 `completion_slot.unwrap()`. This avoids the value-position `if val/else/match`.
 It has not yet been confirmed through a codegen run.
 
-## Proposed fix
+## Fix Implemented (2026-11-27)
 
-When joining the value types of an if/match expression, ignore arms that end in
-`return`/`break`/`continue` (diverging, type `never`) instead of letting their
-void type unify with the value arms. Add a regression spec for a value-position
-`if val ... else:` whose else is a `match` with mixed returning and yielding
-arms, run under the LLVM backend.
+- `src/compiler/50.mir/mir_lowering_stmts.spl`:
+  - Added `mir_join_slot_is_unit` (separating genuine `Unit`/`void` join slots from `Never` diverging-arm types) and hardened `mir_merge_arm_types` to ignore payloadless (`Unit`/`Never`) arms whenever merging against concrete value-yielding arms.
+  - Updated `lower_if` and `lower_if_chain` so diverging/payloadless arms are excluded from branch result copies (`merge_result_is_payloadless`) and branch type unification while non-`Unit` merge destinations (`not result_slot_unit`) still receive `set_local_type(result, inferred_ty)` from concrete yielding arms, keeping all-diverging merges sound via `merge_has_incoming`.
+- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`:
+  - Applied the same payloadless/diverging arm guards and `mir_merge_arm_types` unification across `emit_switch_dispatch`, `emit_if_chain_dispatch`, `lower_match`, `lower_guarded_scalar_match`, and `lower_enum_match_flat` (skipping dead `next_block`/cascade-tail emission once `closed` holds, and taking the early return on `not merge_has_incoming and (closed or self.builder.current_block_has_explicit_terminator())` so all-diverging guarded catch-all matches never fall into a dead merge with `Const(0, i64)`).
+
+## Verification
+
+- `test/01_unit/compiler/50.mir/if_val_match_diverging_value_type_spec.spl`: `9 examples, 0 failures` (`--mode=interpreter`, 2026-11-27), covering `mir_merge_arm_types`, typed and untyped `if val ... else: match ...` with `return Err` / `return Ok` and `Ok(Some(value))` yielding arms, `break`/`continue` loops, all-diverging `match`, standalone and `if val ... else: match ...` all-diverging guarded catch-all matches, and positive non-diverging control.
+- Native LLVM Phase 2 backend rebuild verification remains pending (`fix-implemented-verification-pending`).
 
 ## Status
 
-Open. Compiler code not changed by this registration.
+`fix-implemented-verification-pending` (MIR lowering fix + unit spec verified on interpreter; native Phase 2 LLVM backend rebuild verification pending).

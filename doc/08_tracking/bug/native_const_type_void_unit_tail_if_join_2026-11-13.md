@@ -1,4 +1,4 @@
-# native_const_type_void_unit_tail_if_join_2026-11-13 (P1, open -- source workaround landed; compiler hardening in a follow-up PR; Phase 2 rebuild pending)
+# native_const_type_void_unit_tail_if_join_2026-11-13 (P1, fix-implemented-verification-pending -- MIR lowering hardened; native Phase 2 / Stage 3 rebuild verification pending)
 
 ## Symptom
 The frozen Windows Phase 2 pure-Simple compiler
@@ -46,18 +46,32 @@ the next occurrence.
    `# @workaround bug=native_const_type_void_unit_tail_if_join_2026-11-13`):
    explicit `()` unit tail in `print_command_help`; `val registered_unit: i64 =
    if ...` plus explicit `()` tail in `parser_lower_unit_decl`.
-2. Compiler hardening (follow-up PR `work/mir-unit-join-no-const`): the
-   lower_if / lower_if_chain default defs are decided from the slot's own
-   non-optional MirType value (`mir_join_slot_is_payloadless`), never from the
-   Option compare or the `??` re-lookup. Hosted behaviour is identical; the
-   native lane no longer depends on the miscompile-prone predicates. Takes
-   effect after a Phase 1/2 rebuild from the tip.
+2. Compiler hardening (landed 2026-11-27):
+   - `src/compiler/50.mir/mir_lowering_stmts.spl`: added `mir_join_slot_is_unit`,
+     hardened `mir_join_slot_is_payloadless` / `mir_merge_arm_types`, and gated
+     `lower_if` and `lower_if_chain` (`if_has_else`, `chain_has_else`,
+     `result_slot_unit`, `result_slot_payloadless`, `emitted_default_def`,
+     `emit_copy`, `set_local_type`) from the slot's non-optional `MirType` value
+     so `Unit` / `Never` / else-less join slots never receive `Const` or `Copy`
+     definitions while preserving side effects and legitimate non-`Unit` value
+     joins.
+   - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`: applied the
+     same `result_slot_unit` / `result_slot_payloadless` /
+     `merge_result_is_payloadless` / `set_local_type` guards across
+     `emit_switch_dispatch`, `emit_if_chain_dispatch`, `lower_match`, and
+     `lower_enum_match_flat`.
+   Takes effect natively after a Phase 2 / Stage 3 rebuild from tip.
 
 ## Verification
 - Fixture probe build on the frozen Phase 2: failing variants as tabled.
 - Lint rebuild on the frozen Phase 2 with the workaround: see PR.
 - Prevention spec `test/01_unit/compiler/50.mir/native_const_type_void_unit_tail_if_join_spec.spl`
-  (follow-up PR) counts Const/Copy defs into Unit locals for the tail shapes.
+  counts `Const`/`Copy` defs into `Unit` locals across all documented tail shapes
+  (`v_a_help` else-less call preserving call, `v_f_two`, `p1_exact`, mixed
+  `Unit`/`i64` `if`/`else` and `if`/`elif`/`else`, unit-tail `match`, plus
+  positive non-`Unit` `if`/`else` value control): `12 examples, 0 failures`
+  (`--mode=interpreter`, 2026-11-27).
+- Native Phase 2 / Stage 3 rebuild verification remains pending (`fix-implemented-verification-pending`).
 
 ## Related
 - `native_const_type_void_checked_join_host_facade_2026-11-07.md` (same error

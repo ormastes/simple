@@ -30,6 +30,9 @@ use compiler.mir._MirLowering.module_lowering.*
 val data_source = "pub fn spawn(s: text) -> i64:\n    s.len()\n"
 
 var last_void_word_defs = 0
+var last_fn_found = false
+var last_call_count = 0
+var last_value_ret_count = 0
 
 fn lower_errors(body: text) -> text:
     val consumer_source = "use lib.data.*\n\n" + body
@@ -56,8 +59,12 @@ fn lower_errors(body: text) -> text:
     mir_lowering.prescan_module_struct_names(prescan_mods, "consumer_hir")
     val _mir = mir_lowering.lower_module(consumer_hir, [data_hir, consumer_hir])
     last_void_word_defs = 0
+    last_fn_found = false
+    last_call_count = 0
+    last_value_ret_count = 0
     for function in _mir.functions.values():
         if function.name == "a" or function.name.ends_with(".a"):
+            last_fn_found = true
             var unit_ids: Dict<i64, bool> = {}
             for local in function.locals:
                 match local.type_.kind:
@@ -70,7 +77,13 @@ fn lower_errors(body: text) -> text:
                             if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
                         case MirInstKind.Copy(dest, _):
                             if unit_ids.contains(dest.id): last_void_word_defs = last_void_word_defs + 1
+                        case MirInstKind.Call(_, _, _):
+                            last_call_count = last_call_count + 1
                         case _: pass
+                match block.terminator:
+                    case MirTerminator.Ret(Some(_)):
+                        last_value_ret_count = last_value_ret_count + 1
+                    case _: pass
     var out = ""
     for e in consumer_lowering.errors:
         out = out + "hir: " + e.message + "\n"
@@ -103,3 +116,34 @@ describe "unit fn tail if join: no word defined into a void slot":
 
     it "unit fn with early return guard and tail if/else mixing print and unit call (skip_on_* shape)":
         expect(void_word_defs("fn active() -> bool:\n    false\n\nfn run_it(name: text):\n    print name\n\nfn a(name: text):\n    if active():\n        return\n    if name == \"linux\":\n        print \"skipped\"\n    else:\n        run_it(name)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+
+    it "tail else-less if of discarded i64 call (v_a_help shape) preserves call with zero void defs":
+        expect(void_word_defs("fn a(c: text, flag: bool):\n    if flag:\n        spawn(c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count > 0).to_equal(true)
+
+    it "tail if/else preceded by var init and statement if (p1_exact shape)":
+        expect(void_word_defs("fn a(c: text, cond: bool):\n    var z = 0\n    if cond:\n        z = 1\n    else:\n        z = 2\n    if cond:\n        spawn(c)\n    else:\n        spawn(c + c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 2).to_equal(true)
+
+    it "tail if/else mixing unit print arm and discarded i64 call arm":
+        expect(void_word_defs("fn a(c: text, cond: bool):\n    if cond:\n        print \"unit\"\n    else:\n        spawn(c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 1).to_equal(true)
+
+    it "tail if/elif/else mixing unit and discarded i64 call arms":
+        expect(void_word_defs("fn a(c: text, mode: i64):\n    if mode == 0:\n        spawn(c)\n    elif mode == 1:\n        print \"mid\"\n    else:\n        spawn(c + c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 2).to_equal(true)
+
+    it "tail match of discarded i64 calls in unit fn":
+        expect(void_word_defs("fn a(c: text, mode: i64):\n    match mode:\n        case 0:\n            spawn(c)\n        case _:\n            spawn(c + c)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_call_count >= 2).to_equal(true)
+
+    it "positive control: non-Unit value-returning if/else still yields its value":
+        expect(void_word_defs("fn a(flag: bool, x: text) -> i64:\n    if flag:\n        spawn(x)\n    else:\n        spawn(x + x)\n")).to_equal(0)
+        expect(last_fn_found).to_equal(true)
+        expect(last_value_ret_count > 0).to_equal(true)
