@@ -316,3 +316,14 @@ loaded, so slower, not faster); load_sources bulk closure 233 s -> 181 s of work
 at the third file. Per the coordinator, a further demotion (`CudaTypeMapper.map_tuple` CODEGEN-AMBIGUOUS-METHOD) still drops the whole
 worker closure to the interpreter; that fix is pending in lane d29-f. The worker's `[engine-demotion]` lines are invisible on
 Windows (stdout returned at exit only); consider teeing `[engine-demotion]` to the trace file too. No exe; todo 478 stays open.
+
+## Run with d29-f fixes (140bcf8350a) fails at the semantic check (2026-11-27, seed r)
+
+Cherry-picked the d29-f src fixes (llvm pin, CudaTypeMapper.map_tuple, dangling export) on this worktree's base (b46b620940e,
+39 commits behind origin) and reran the smoke. Cold init 1368 s, then `coordinator:shards parse=0 hir=1 mir_parallel=0` (the shards
+no longer run: the worker was handed everything) and the final worker returned rc=1 after 171 s:
+`error: semantic: private fn create_alias_guard_block of module ...\mir_opt\auto_vectorize_codegen.spl ... mark it pub or export it`,
+imported by `src/compiler/60.mir_opt/mir_opt/_AutoVectorize/rewrite.spl:50`. Every fn in `auto_vectorize_codegen.spl` is non-pub and
+origin/release/1.0.0 is identical there, so this is a tree defect that the now-compiling worker surfaces (previously the demoted
+interpreter did not enforce it). stage_parse was therefore NOT reached and no per-file parse timing was measured. Next: make the
+imported fns of auto_vectorize_codegen.spl `pub` (or fix the import), then rerun; expect ~25 min per attempt (cold init).
