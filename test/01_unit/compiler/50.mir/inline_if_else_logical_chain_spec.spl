@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Purpose: a value-producing inline `if/else` (or `match`) whose arm is a
+short-circuit `and`/`or` chain must yield the chain's value. These pin the
+shapes from bug seed_native_inline_if_else_or_chain_false_2026-11-27, whose
+real cause was an import ABI defect (C `bool` runtime return declared I64,
+caller read undefined RAX bits), not if/else lowering; see the Rust guard
+`runtime_h_bool_returns_use_i8_abi` in src/compiler_rust/.../runtime_sffi.rs.
+Audience: compiler engineers maintaining MIR lowering of expression-if and
+short-circuit operators.
+
+NOTE on verification: under `bin/simple test` these specs run in the
+interpreter, which was always correct, so they pin the language semantics
+only. The native (Cranelift) guard is the Rust test
+`src/compiler_rust/compiler/tests/inline_if_else_logical_chain_jit.rs`,
+which runs the same shapes through MIR + JIT and compares.
+"""
+
+use std.spec
+
+fn probe(pid: i64) -> bool:
+    pid > 100
+
+fn reap_shape(label: text, hir_stopped: bool, pid: i64, code: i64) -> bool:
+    var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not probe(pid))
+    owner_stopped
+
+fn else_or(c: bool, a: bool, b: bool) -> bool:
+    val r = if c: false else: a or b
+    r
+
+fn else_and(c: bool, a: bool, b: bool) -> bool:
+    val r = if c: false else: a and b
+    r
+
+fn then_or(c: bool, a: bool, b: bool) -> bool:
+    val r = if c: a or b else: false
+    r
+
+fn then_and(c: bool, a: bool, b: bool) -> bool:
+    val r = if c: a and b else: true
+    r
+
+fn else_not_call(c: bool, a: bool, pid: i64) -> bool:
+    val r = if c: false else: a or not probe(pid)
+    r
+
+fn nested(c: bool, a: bool, b: bool, d: bool) -> bool:
+    val r = if c: false else: (a and b) or (not a and d)
+    r
+
+fn match_arm(k: i64, a: bool, b: bool) -> bool:
+    val r = match k:
+        0: false
+        1: a or b
+        _: a and b
+    r
+
+describe "inline if/else with a logical-chain arm":
+    it "evaluates the reap-site shape (or of an and-chain with a negated call)":
+        expect(reap_shape("x", false, 5, 0)).to_equal(true)
+        expect(reap_shape("x", false, 0, 0)).to_equal(true)
+        expect(reap_shape("x", false, 500, 0)).to_equal(false)
+        expect(reap_shape("x", false, 5, -1)).to_equal(false)
+        expect(reap_shape("hir-shard", true, 500, -1)).to_equal(true)
+
+    it "evaluates or/and in the else arm":
+        expect(else_or(false, false, true)).to_equal(true)
+        expect(else_or(false, false, false)).to_equal(false)
+        expect(else_and(false, true, true)).to_equal(true)
+        expect(else_and(false, true, false)).to_equal(false)
+
+    it "evaluates or/and in the then arm":
+        expect(then_or(true, false, true)).to_equal(true)
+        expect(then_or(true, false, false)).to_equal(false)
+        expect(then_and(true, true, true)).to_equal(true)
+        expect(then_and(true, true, false)).to_equal(false)
+
+    it "evaluates not of a call inside the chain":
+        expect(else_not_call(false, false, 5)).to_equal(true)
+        expect(else_not_call(false, false, 500)).to_equal(false)
+
+    it "evaluates nested and/or groups with not":
+        expect(nested(false, false, false, true)).to_equal(true)
+        expect(nested(false, true, false, true)).to_equal(false)
+
+    it "evaluates logical chains in match arms":
+        expect(match_arm(1, false, true)).to_equal(true)
+        expect(match_arm(2, false, true)).to_equal(false)
+        expect(match_arm(2, true, true)).to_equal(true)
