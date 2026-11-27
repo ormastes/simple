@@ -17,7 +17,7 @@ doc/03_plan/platform/container/simple_container_remaining_work.md section 1).
 
 use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1, ViewFlagV1,
     storage_view_v1_create, storage_view_v1_save, storage_view_v1_destroy, storage_view_v1_base_entries}
-use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head,
+use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head, immutable_store_v1_retire_root,
     immutable_store_v1_list_owner_pins}
 use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_seal_readonly, file_write_bytes,
@@ -87,13 +87,14 @@ fn _native(path: text) -> text:
     path.replace("/", "\\")
 
 # Absolute System32 directory: process_run searches the working directory first, so a
-# bare tool name would let a planted attrib.cmd run instead of the system tool.
-fn _system32() -> text:
+# bare tool name would let a planted attrib.cmd run instead of the system tool. "" when the
+# environment gives no absolute drive-rooted SystemRoot: there is no fallback and callers refuse.
+pub fn container_system32_v1() -> text:
     var root = env_get("SystemRoot").trim()
     if root == "":
         root = env_get("windir").trim()
-    if root == "":
-        root = "C:\\Windows"
+    if root.byte_len() < 4 or root.substring(1, 3) != ":\\" or root.contains(".."):
+        return ""
     root + "\\System32"
 
 # Root name of a container's saved state. It lives in the store's root namespace, so
@@ -109,7 +110,9 @@ fn _read_only(path: text) -> bool:
 # prints `File ID is 0x<128-bit id>`; the id is unique per volume, so two names
 # with the same id are one file.
 pub fn container_file_id_v1(path: text) -> text:
-    val ran = process_run(_system32() + "\\fsutil.exe", ["file", "queryfileid", _native(path)])
+    if container_system32_v1() == "":
+        return ""
+    val ran =process_run(container_system32_v1() + "\\fsutil.exe", ["file", "queryfileid", _native(path)])
     if ran.2 != 0:
         return ""
     val out = ran.0.trim()
@@ -131,7 +134,9 @@ fn _seal_lower(view: StorageViewV1, paths: [text]) -> text:
         return ""
     if not host_is_windows_host():
         return "seal-failed"
-    val ran = process_run(_system32() + "\\attrib.exe", ["+R", _native(lower) + "\\*", "/S"])
+    if container_system32_v1() == "":
+        return "system-root-unavailable"
+    val ran =process_run(container_system32_v1() + "\\attrib.exe", ["+R", _native(lower) + "\\*", "/S"])
     if ran.2 != 0:
         return "attrib-failed"
     for rel in paths:
@@ -205,18 +210,23 @@ pub fn container_view_stop_v1(view: StorageViewV1) -> ContainerViewStopV1:
             generation: StoreGenerationV1(0))
     ContainerViewStopV1(status: "ok", reason: "", generation: saved.generation)
 
-# Remove: dematerialize (lower/ and the pin), destroy the view, delete the view
-# dir, then require zero residue.
+# Remove: dematerialize (lower/ and the pin), destroy the view, delete the view dir, retire
+# the container's saved root, then require zero residue. Idempotent: a view that is already
+# gone is ok. Used by destroy as well, so a destroyed container leaves no root behind.
 pub fn container_view_remove_v1(view: StorageViewV1) -> ContainerViewOpV1:
     val demat = rootfs_dematerialize_v1(view)
     if demat != "":
         return _op("rejected", "dematerialize: " + demat)
-    val destroyed = storage_view_v1_destroy(view)
-    if destroyed.status != "ok":
-        return _op("rejected", "destroy: " + destroyed.reason)
     val vdir = _view_dir(view)
-    if is_dir(vdir) and (not dir_remove_all(vdir) or is_dir(vdir)):
-        return _op("rejected", "view-dir-remove-failed")
+    if is_dir(vdir) or file_exists(vdir):
+        val destroyed = storage_view_v1_destroy(view)
+        if destroyed.status != "ok":
+            return _op("rejected", "destroy: " + destroyed.reason)
+        if is_dir(vdir) and (not dir_remove_all(vdir) or is_dir(vdir)):
+            return _op("rejected", "view-dir-remove-failed")
+    val retired = immutable_store_v1_retire_root(view.store, container_view_root_name_v1(view.view_id))
+    if retired != "" and retired != "root-missing":
+        return _op("rejected", "retire-root: " + retired)
     if container_view_residue_v1(view).value != 0:
         return _op("rejected", "residue-remains")
     _op("ok", "")
@@ -245,10 +255,11 @@ pub fn container_view_verify_share_v1(view: StorageViewV1) -> ContainerViewShare
         # already read-only, so an unsealed view can never be corrupted by the proof.
         if _read_only(lower) and _read_only(obj):
             ro = ro + 1
-            val before = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
+            val before = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES)
             val wrote = file_write_bytes(lower, "overwrite-attempt".bytes())
-            val after = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
-            if not wrote and before == after:
+            val after = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES)
+            # An unreadable object proves nothing: it never counts as a refused write.
+            if before.is_ok() and after.is_ok() and not wrote and before.unwrap() == after.unwrap():
                 refused = refused + 1
     ContainerViewShareProofV1(status: "ok", reason: "", entries: ShareCountV1(count),
         same_file_id: ShareCountV1(same), read_only: ShareCountV1(ro), write_refused: ShareCountV1(refused))

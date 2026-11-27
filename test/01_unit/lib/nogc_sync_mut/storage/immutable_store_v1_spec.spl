@@ -9,7 +9,7 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, immutable_store_v1_list_owner_pins, immutable_store_v1_reclaim_pin_tomb, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1,
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, immutable_store_v1_retire_root, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, immutable_store_v1_list_owner_pins, immutable_store_v1_reclaim_pin_tomb, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1,
     _isv1_publish_root_inner, _isv1_publish_root_prepare, _isv1_publish_root_commit, _isv1_root_compact,
     _isv1_root_head_begin, _isv1_root_head_finish, _isv1_root_scan, _isv1_root_floor_path,
     _isv1_root_claim_path, _isv1_doc_encode, _isv1_collect_inner, _isv1_publish, _isv1_object_path}
@@ -1129,4 +1129,27 @@ describe "immutable_store_v1 object publish lost race":
         expect(result.status).to_equal("ok")
         expect(result.object_key).to_equal(key + "_c1")
         expect(dir_list(root + "/staging").len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "retires a root: GC reclaims its objects, the name is publishable again from generation 0":
+        val root = _store_root("retire-root")
+        val kept = immutable_store_v1_ingest(root, "kept bytes".bytes(), HASH_POLICY_V1_XXH3_128)
+        val dropped = immutable_store_v1_ingest(root, "dropped bytes".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_publish_root(root, "keep", kept.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "drop", dropped.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        expect(immutable_store_v1_publish_root(root, "drop", dropped.object_key + "\n", StoreGenerationV1(1))).to_equal("")
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).unreachable.len()).to_equal(0)
+        expect(immutable_store_v1_retire_root(root, "drop")).to_equal("")
+        expect(immutable_store_v1_root_head(root, "drop").status).to_equal("missing")
+        expect(immutable_store_v1_retire_root(root, "drop")).to_equal("root-missing")
+        expect(dir_list(root + "/staging").len()).to_equal(0)
+        val gc = immutable_store_v1_collect(root, StoreFlagV1(false))
+        expect(gc.status).to_equal("ok")
+        expect(gc.unreachable.contains(dropped.object_key)).to_equal(true)
+        expect(gc.unreachable.contains(kept.object_key)).to_equal(false)
+        expect(immutable_store_v1_open(root, kept.object_key).status).to_equal("ok")
+        expect(immutable_store_v1_open(root, dropped.object_key).status).to_equal("missing")
+        expect(immutable_store_v1_publish_root(root, "drop", kept.object_key + "\n", StoreGenerationV1(0))).to_equal("")
+        expect(immutable_store_v1_root_head(root, "drop").generation.value).to_equal(1)
+        expect(immutable_store_v1_retire_root(root, "bad/name")).to_equal("root-name-invalid")
         _store_cleanup(root)

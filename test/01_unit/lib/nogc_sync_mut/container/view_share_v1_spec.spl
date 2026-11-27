@@ -9,7 +9,7 @@ use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, immut
 use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.container.view_share_v1.{container_view_create_v1, container_view_stop_v1,
-    container_view_remove_v1, container_view_verify_share_v1, container_view_residue_v1, container_view_root_name_v1}
+    container_view_remove_v1, container_view_verify_share_v1, container_view_residue_v1, container_view_root_name_v1, container_system32_v1}
 use std.nogc_sync_mut.container.view_commit_probe_v1.{container_commit_sample_shared_v1,
     container_commit_sample_private_v1}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_exists, file_read_regular_no_follow_bounded}
@@ -69,6 +69,8 @@ describe "view_share_v1":
         expect(gone.status).to_equal("ok")
         expect(is_dir(base + "/views/c1")).to_equal(false)
         expect(container_view_residue_v1(c.view).value).to_equal(0)
+        expect(immutable_store_v1_root_head(store, container_view_root_name_v1("c1")).status).to_equal("missing")
+        expect(container_view_remove_v1(c.view).status).to_equal("ok")
         # The store base is untouched by the remove.
         expect(immutable_store_v1_root_head(store, "main").status).to_equal("ok")
         _cleanup(base)
@@ -80,6 +82,8 @@ describe "view_share_v1":
         expect(c.status).to_equal("ok")
         expect(container_view_remove_v1(c.view).status).to_equal("ok")
         expect(container_view_residue_v1(c.view).value).to_equal(0)
+        expect(immutable_store_v1_root_head(store, container_view_root_name_v1("c1")).status).to_equal("missing")
+        expect(container_view_remove_v1(c.view).status).to_equal("ok")
         _cleanup(base)
 
     it "rejects a missing base root and leaves nothing behind":
@@ -112,7 +116,7 @@ describe "view_share_v1":
         expect(orphan.status).to_equal("ok")
         val dest = base + "/orphan-link.bin"
         expect(immutable_store_v1_link_object(store, orphan.object_key, dest, StoreFlagV1(false)).status).to_equal("linked")
-        val sealed = process_run("attrib", ["+R", dest.replace("/", "\\")])
+        val sealed = process_run(container_system32_v1() + "\\attrib.exe", ["+R", dest.replace("/", "\\")])
         expect(sealed.2).to_equal(0)
         val obj = store + "/objects/" + orphan.object_key.substring(0, 2) + "/" + orphan.object_key + ".obj"
         expect(file_exists(obj)).to_equal(true)
@@ -185,9 +189,9 @@ describe "view_share_v1":
         val net_shared = shared.commit_delta.value - control.commit_delta.value
         val net_private = private_copy.commit_delta.value - control_private.commit_delta.value
         print "MEASURE base_bytes={big.byte_len()}"
-        print "MEASURE control_tiny_shared commit_delta={control.commit_delta.value} control_tiny_private commit_delta={control_private.commit_delta.value}"
-        print "MEASURE shared_base status={shared.status} reason={shared.reason} commit_delta={shared.commit_delta.value} working_set_delta={shared.working_set_delta.value} net_commit={net_shared}"
-        print "MEASURE private_copy status={private_copy.status} reason={private_copy.reason} commit_delta={private_copy.commit_delta.value} working_set_delta={private_copy.working_set_delta.value} net_commit={net_private}"
+        print "MEASURE control mapped-readonly tiny-file commit_delta={control.commit_delta.value} control read-into-heap tiny-file commit_delta={control_private.commit_delta.value}"
+        print "MEASURE mapped_readonly_same_linked_file status={shared.status} reason={shared.reason} commit_delta={shared.commit_delta.value} working_set_delta={shared.working_set_delta.value} net_commit={net_shared}"
+        print "MEASURE read_into_heap_same_linked_file status={private_copy.status} reason={private_copy.reason} commit_delta={private_copy.commit_delta.value} working_set_delta={private_copy.working_set_delta.value} net_commit={net_private}"
         expect(shared.status).to_equal("ok")
         expect(private_copy.status).to_equal("ok")
         expect(control.status).to_equal("ok")

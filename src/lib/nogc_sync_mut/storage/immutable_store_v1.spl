@@ -1101,6 +1101,50 @@ pub fn immutable_store_v1_publish_root(root: text, name: text, manifest: text,
         generation: StoreGenerationV1) -> text:
     _isv1_publish_root_inner(root, name, manifest, generation, _ISV1_ROOT_FLOOR_INTERVAL)
 
+# Retire a root: tombstone every file of `name` under roots/ (pointer first, so GC stops
+# counting its keys at the first rename; then claims and floors, so the name can be
+# published again from generation 0) into staging/rootret-*/ and delete the tomb. Crash-safe
+# in the pin-release style: a crash leaves only the tomb (swept like any aged staging dir)
+# or a pointer-less remainder, and retrying finishes the job. "root-missing" = nothing of
+# `name` is left. The caller must be the root's only writer; a concurrent publish of the
+# same name is not arbitrated here.
+pub fn immutable_store_v1_retire_root(root: text, name: text) -> text:
+    if root == "":
+        return "store-root-empty"
+    if not _isv1_name_valid(name):
+        return "root-name-invalid"
+    val roots_dir = _isv1_join(root, "roots")
+    val entries = match _isv1_list_fail_closed(roots_dir):
+        case Ok(value): value
+        case Err(reason): return reason
+    val pointer = name + ".sdn"
+    var leaves: [text] = []
+    var has_pointer = false
+    for entry in entries:
+        val leaf = entry.trim()
+        if leaf == pointer:
+            has_pointer = true
+        elif _isv1_root_entry_number(leaf, name, ".f", ".floor") > 0 or _isv1_root_entry_number(leaf, name, ".g", ".claim") > 0:
+            leaves.push(leaf)
+    if not has_pointer and leaves.len() == 0:
+        return "root-missing"
+    val staging_root = _isv1_join(root, "staging")
+    if not dir_create_all(staging_root) and not is_dir(staging_root):
+        return "staging-dir-failed"
+    val tomb = secure_temp_dir_raw(staging_root, "rootret-")
+    if tomb.len() <= 0:
+        return "staging-create-failed"
+    if has_pointer and not rename_path(_isv1_join(roots_dir, pointer), tomb + "/" + pointer):
+        dir_remove_all(tomb)
+        return "root-retire-failed"
+    for leaf in leaves:
+        if not rename_path(_isv1_join(roots_dir, leaf), tomb + "/" + leaf):
+            return "root-retire-failed"
+    dir_remove_all(tomb)
+    dir_sync(roots_dir)
+    ""
+
+
 fn _isv1_root_head_result(status: text, reason: text, generation: i64, keys: [text]) -> StoreRootHeadV1:
     StoreRootHeadV1(status: status, reason: reason, generation: StoreGenerationV1(generation), keys: keys)
 
