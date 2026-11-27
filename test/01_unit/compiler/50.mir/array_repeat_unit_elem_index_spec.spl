@@ -1,0 +1,227 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+"""
+# MIR lowering: fixed array repeat `[0; N]` and `Unit` element placeholder guards
+
+Regression coverage for:
+- `lower_array_repeat` (`method_calls_literals.spl`): when the repeated value
+  carries a placeholder HIR type (`Unit`, `Any`, `Error`, `Infer`, `TypeParam`),
+  `elem_type` must stay `MirType.i64()` instead of lowering the placeholder to
+  `MirTypeKind.Unit`.
+- `try_lower_global_read` & `lower_index_expr` (`expr_dispatch.spl`): module-global
+  fixed arrays (`[u16; N] = [0; N]`, `[0; N]`) and indexed reads over arrays
+  whose base MIR/HIR type or `noted_runtime_elem_type` carries a `Unit`
+  placeholder must skip `Unit` and fall back to `MirType.i64()` before any
+  bootstrap text fallback, never producing a `MirTypeKind.Unit` index result.
+
+UNEXECUTED when written (Stage-4 P4 build owns the 24 GiB build slot on this
+host; codegen fix verified on `manual-successor-v21` passing
+`os.kernel.memory.pmm` with 0 `unsupported LLVM value conversion` errors).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct ArrayRepeatAudit:
+    errors: [text]
+    target_fns: i64
+    repeat_calls: i64
+    array_get_calls: i64
+    load_globals: i64
+    unit_locals: i64
+    unit_array_elems: i64
+    i64_repeat_elems: i64
+    unit_noted_elems: i64
+    unit_ret_locals: i64
+    i64_ret_locals: i64
+
+fn is_unit_mir_type(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.Unit: true
+        case _: false
+
+fn is_i64_mir_type(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.I64: true
+        case _: false
+
+fn find_local_type(locals: [MirLocal], target_id: i64) -> MirType?:
+    for loc in locals:
+        if loc.id.id == target_id:
+            return Some(loc.type_)
+    None
+
+fn audit_array_repeat_mir(source: text, target_fn: text) -> ArrayRepeatAudit:
+    val filename = "testdata/array_repeat_unit_elem_index.spl"
+    val ast = parse_full_frontend(source, filename, "array_repeat_unit_elem_index", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+
+    var errors: [text] = []
+    for e in hir_lowering.errors:
+        errors.push("hir: " + e.message)
+    for e in mir_lowering.errors:
+        errors.push("mir: " + e.message)
+
+    var target_fns = 0
+    var repeat_calls = 0
+    var array_get_calls = 0
+    var load_globals = 0
+    var unit_locals = 0
+    var unit_array_elems = 0
+    var i64_repeat_elems = 0
+    var unit_noted_elems = 0
+    var unit_ret_locals = 0
+    var i64_ret_locals = 0
+
+    for function in mir.functions.values():
+        if function.name != target_fn and not function.name.ends_with("." + target_fn) and not function.name.ends_with("::" + target_fn):
+            continue
+        target_fns = target_fns + 1
+
+        for loc in function.locals:
+            if is_unit_mir_type(loc.type_):
+                unit_locals = unit_locals + 1
+            match loc.type_.kind:
+                case MirTypeKind.Array(elem, _) | MirTypeKind.Slice(elem):
+                    if is_unit_mir_type(elem):
+                        unit_array_elems = unit_array_elems + 1
+                case _: ()
+            if val noted = mir_lowering.noted_runtime_elem_type(loc.id):
+                if is_unit_mir_type(noted):
+                    unit_noted_elems = unit_noted_elems + 1
+
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.LoadGlobal(_, _):
+                        load_globals = load_globals + 1
+                    case MirInstKind.Call(dest, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "rt_array_repeat":
+                                    repeat_calls = repeat_calls + 1
+                                    if val d = dest:
+                                        if val dt = find_local_type(function.locals, d.id):
+                                            match dt.kind:
+                                                case MirTypeKind.Array(elem, _):
+                                                    if is_i64_mir_type(elem):
+                                                        i64_repeat_elems = i64_repeat_elems + 1
+                                                case _: ()
+                                elif name == "rt_array_get":
+                                    array_get_calls = array_get_calls + 1
+                            case _: ()
+                    case _: ()
+            match block.terminator:
+                case MirTerminator.Ret(ret_op):
+                    if val op = ret_op:
+                        match op.kind:
+                            case MirOperandKind.Copy(id) | MirOperandKind.Move(id):
+                                if val rt = find_local_type(function.locals, id.id):
+                                    if is_unit_mir_type(rt):
+                                        unit_ret_locals = unit_ret_locals + 1
+                                    elif is_i64_mir_type(rt):
+                                        i64_ret_locals = i64_ret_locals + 1
+                            case _: ()
+                case _: ()
+
+    ArrayRepeatAudit(
+        errors: errors,
+        target_fns: target_fns,
+        repeat_calls: repeat_calls,
+        array_get_calls: array_get_calls,
+        load_globals: load_globals,
+        unit_locals: unit_locals,
+        unit_array_elems: unit_array_elems,
+        i64_repeat_elems: i64_repeat_elems,
+        unit_noted_elems: unit_noted_elems,
+        unit_ret_locals: unit_ret_locals,
+        i64_ret_locals: i64_ret_locals
+    )
+
+describe "MIR array repeat Unit placeholder and index element guards":
+    it "keeps i64 element type for `[0; N]` and avoids Unit index results":
+        val src =
+            "fn read_repeat(idx: i64) -> i64:\n" +
+            "    val arr = [0; 16]\n" +
+            "    arr[idx]\n"
+        val a = audit_array_repeat_mir(src, "read_repeat")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.repeat_calls).to_equal(1)
+        expect(a.i64_repeat_elems).to_equal(1)
+        expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
+        expect(a.unit_array_elems).to_equal(0)
+        expect(a.unit_noted_elems).to_equal(0)
+        expect(a.unit_ret_locals).to_equal(0)
+        expect(a.i64_ret_locals).to_equal(1)
+
+    it "lowers annotated `[u16; N] = [0; N]` and indexing without Unit element locals":
+        val src =
+            "fn read_u16_repeat(idx: i64) -> u16:\n" +
+            "    val arr: [u16; 16] = [0; 16]\n" +
+            "    arr[idx]\n"
+        val a = audit_array_repeat_mir(src, "read_u16_repeat")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.repeat_calls).to_equal(1)
+        expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
+        expect(a.unit_array_elems).to_equal(0)
+        expect(a.unit_noted_elems).to_equal(0)
+        expect(a.unit_ret_locals).to_equal(0)
+
+    it "guards global `[u16; N] = [0; N]` reads against Unit element placeholders":
+        val src =
+            "var g_bitmap: [u16; 8] = [0; 8]\n" +
+            "fn read_global_slot(idx: i64) -> u16:\n" +
+            "    g_bitmap[idx]\n"
+        val a = audit_array_repeat_mir(src, "read_global_slot")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.load_globals).to_equal(1)
+        expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
+        expect(a.unit_array_elems).to_equal(0)
+        expect(a.unit_noted_elems).to_equal(0)
+        expect(a.unit_ret_locals).to_equal(0)
+
+    it "guards unannotated global `[0; N]` reads against Unit element placeholders":
+        val src =
+            "var g_words = [0; 8]\n" +
+            "fn read_global_word(idx: i64) -> i64:\n" +
+            "    g_words[idx]\n"
+        val a = audit_array_repeat_mir(src, "read_global_word")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.load_globals).to_equal(1)
+        expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
+        expect(a.unit_array_elems).to_equal(0)
+        expect(a.unit_noted_elems).to_equal(0)
+        expect(a.unit_ret_locals).to_equal(0)
+        expect(a.i64_ret_locals).to_equal(1)
+
+    it "preserves tuple field MIR type when indexing `(text, i64)`":
+        val src =
+            "fn read_tuple_second(pair: (text, i64)) -> i64:\n" +
+            "    pair.1\n"
+        val a = audit_array_repeat_mir(src, "read_tuple_second")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.array_get_calls).to_equal(0)
+        expect(a.unit_locals).to_equal(0)
+        expect(a.unit_ret_locals).to_equal(0)
+        expect(a.i64_ret_locals).to_equal(1)
