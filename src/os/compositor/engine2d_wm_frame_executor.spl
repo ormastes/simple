@@ -32,7 +32,11 @@ use common.gpu.simpleos_host_gpu_stream_protocol.{
     SimpleOsHostGpuStreamHeader,
     simpleos_host_gpu_stream_checksum_step
 }
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DrawIrBatch, DrawIrComposition, draw_ir_batch_with_source, draw_ir_composition}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DrawIrBatch, DrawIrCommand,
+    DrawIrComposition, draw_ir_batch_with_source, draw_ir_composition
+}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.wm_chrome_theme.{active_wm_theme_id, wm_chrome_colors_css_override, wm_chrome_theme}
 use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_web_provenance_valid}
@@ -46,7 +50,9 @@ use common.ui.window_scene_draw_ir.{
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_batch_owner_with_images,
     engine2d_draw_ir_adv_composition_present_with_images,
+    engine2d_draw_ir_command_samples_parent,
     engine2d_draw_ir_render_composition_damaged_with_images,
     engine2d_resolved_draw_ir_image
 }
@@ -159,6 +165,325 @@ fn engine2d_wm_local_frame_key(scene: SharedWmScene, content_frames: [WmContentF
     for frame in content_frames:
         key = key + "|{frame.window_id}"
     key
+
+struct _WmRetainedParentReplay:
+    engine: Engine2D
+    ok: bool
+    ops_rendered: i32
+    ops_skipped: i32
+    reason: text
+
+fn _wm_rect_overlaps_bounds(
+    rx: i64, ry: i64, rw: i64, rh: i64,
+    bx: i64, by: i64, bw: i64, bh: i64
+) -> bool:
+    rw > 0 and rh > 0 and bw > 0 and bh > 0 and rx < bx + bw and bx < rx + rw and ry < by + bh and by < ry + rh
+
+fn _wm_rects_overlap_bounds(rects: [i64], bx: i64, by: i64, bw: i64, bh: i64) -> bool:
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        if _wm_rect_overlaps_bounds(rects[i], rects[i + 1], rects[i + 2], rects[i + 3], bx, by, bw, bh):
+            return true
+        i = i + 4
+    false
+
+fn _wm_batch_samples_parent(batch: DrawIrBatch) -> bool:
+    for command in batch.commands:
+        if engine2d_draw_ir_command_samples_parent(command):
+            return true
+    false
+
+fn _wm_command_style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _wm_parse_nonneg_i64_or(raw: text, fallback: i64) -> i64:
+    if raw.len() == 0:
+        return fallback
+    var value: i64 = 0
+    var seen = false
+    for b in raw.bytes():
+        if b >= 48 and b <= 57:
+            value = value * 10 + (b - 48).to_i64()
+            seen = true
+            if value > 64:
+                return 64
+        else:
+            break
+    if seen: value else: fallback
+
+fn _wm_batch_glass_padding(batch: DrawIrBatch) -> i64:
+    var total: i64 = 0
+    for command in batch.commands:
+        if engine2d_draw_ir_command_samples_parent(command):
+            val blur_raw = _wm_command_style_value(command, "backdrop-filter-realized-blur-radius-px")
+            val blur = _wm_parse_nonneg_i64_or(blur_raw, 4)
+            total = total + (if blur > 0: blur else: 4)
+    if total < 4: 4 elif total > 32: 32 else: total
+
+fn _wm_expand_and_coalesce_rects(rects: [i64], pad: i64, width: i64, height: i64) -> [i64]:
+    var expanded: [i64] = []
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        var x0 = rects[i] - pad
+        var y0 = rects[i + 1] - pad
+        var x1 = rects[i] + rects[i + 2] + pad
+        var y1 = rects[i + 1] + rects[i + 3] + pad
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > width: x1 = width
+        if y1 > height: y1 = height
+        if x1 > x0 and y1 > y0:
+            expanded.push(x0)
+            expanded.push(y0)
+            expanded.push(x1 - x0)
+            expanded.push(y1 - y0)
+        i = i + 4
+    var current = expanded
+    var merged = true
+    while merged:
+        merged = false
+        val n = current.len() / 4
+        var used: [bool] = [false; n.to_i32()]
+        var out: [i64] = []
+        var a: i64 = 0
+        while a < n:
+            if used[a.to_i32()]:
+                a = a + 1
+                continue
+            var ax0 = current[a * 4]
+            var ay0 = current[a * 4 + 1]
+            var ax1 = ax0 + current[a * 4 + 2]
+            var ay1 = ay0 + current[a * 4 + 3]
+            var b: i64 = a + 1
+            while b < n:
+                if not used[b.to_i32()]:
+                    val bx0 = current[b * 4]
+                    val by0 = current[b * 4 + 1]
+                    val bx1 = bx0 + current[b * 4 + 2]
+                    val by1 = by0 + current[b * 4 + 3]
+                    if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
+                        if bx0 < ax0: ax0 = bx0
+                        if by0 < ay0: ay0 = by0
+                        if bx1 > ax1: ax1 = bx1
+                        if by1 > ay1: ay1 = by1
+                        used[b.to_i32()] = true
+                        merged = true
+                b = b + 1
+            out.push(ax0)
+            out.push(ay0)
+            out.push(ax1 - ax0)
+            out.push(ay1 - ay0)
+            a = a + 1
+        current = out
+    current
+
+fn _wm_damage_rects_in_bounds(rects: [i64], width: i64, height: i64) -> bool:
+    if rects.len() == 0 or rects.len() % 4 != 0 or width <= 0 or height <= 0:
+        return false
+    var i: i64 = 0
+    while i < rects.len():
+        val rx = rects[i]
+        val ry = rects[i + 1]
+        val rw = rects[i + 2]
+        val rh = rects[i + 3]
+        if rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or rw > width or rh > height or rx > width - rw or ry > height - rh:
+            return false
+        i = i + 4
+    true
+
+fn _wm_prune_non_parent_batch_for_rects(batch: DrawIrBatch, rects: [i64]) -> DrawIrBatch:
+    if batch.embedding.opacity_milli != 1000 or batch.commands.len() == 0:
+        return batch
+    val ox = batch.embedding.x.to_i64()
+    val oy = batch.embedding.y.to_i64()
+    var kept: [DrawIrCommand] = []
+    for cmd in batch.commands:
+        if cmd.clip_rect.present:
+            if not _wm_rects_overlap_bounds(
+                rects,
+                ox + cmd.clip_rect.x.to_i64(),
+                oy + cmd.clip_rect.y.to_i64(),
+                cmd.clip_rect.width.to_i64(),
+                cmd.clip_rect.height.to_i64()
+            ):
+                continue
+        elif cmd.kind == DRAW_IR_COMMAND_TEXT:
+            if cmd.width > 0 and cmd.height > 0:
+                if not _wm_rects_overlap_bounds(
+                    rects,
+                    ox + cmd.x.to_i64() - 4,
+                    oy + cmd.y.to_i64() - 4,
+                    cmd.width.to_i64() + 8,
+                    cmd.height.to_i64() + 8
+                ):
+                    continue
+        elif (cmd.kind == DRAW_IR_COMMAND_RECT or cmd.kind == DRAW_IR_COMMAND_IMAGE) and cmd.computed_style.len() == 0 and cmd.width > 0 and cmd.height > 0:
+            if not _wm_rects_overlap_bounds(
+                rects,
+                ox + cmd.x.to_i64(),
+                oy + cmd.y.to_i64(),
+                cmd.width.to_i64(),
+                cmd.height.to_i64()
+            ):
+                continue
+        kept.push(cmd)
+    draw_ir_batch_with_source(batch.batch_id, batch.backend_target, batch.embedding, kept, batch.source)
+
+fn _wm_replay_parent_sampling_composition(
+    engine: Engine2D,
+    local_composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage],
+    damage_rects: [i64]
+) -> _WmRetainedParentReplay:
+    """Replay clipped local damage when batches include parent-sampling glass material.
+
+    Non-intersecting parent-sampling batches are culled directly; otherwise an
+    offscreen target paints the backdrop across damage rects padded by causal
+    blur radius, runs intersecting glass/foreground batches, and commits only the
+    unpadded damage rects back onto the retained target.
+    """
+    val w64 = engine.width().to_i64()
+    val h64 = engine.height().to_i64()
+    if not _wm_damage_rects_in_bounds(damage_rects, w64, h64):
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "invalid-damage-plan")
+    var any_intersecting_parent = false
+    var causal_pad: i64 = 0
+    for batch in local_composition.batches:
+        if _wm_batch_samples_parent(batch):
+            val emb = batch.embedding
+            if _wm_rects_overlap_bounds(damage_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                any_intersecting_parent = true
+                causal_pad = causal_pad + _wm_batch_glass_padding(batch)
+    if not any_intersecting_parent:
+        var non_parent_batches: [DrawIrBatch] = []
+        for batch in local_composition.batches:
+            if not _wm_batch_samples_parent(batch):
+                non_parent_batches.push(batch)
+        val filtered = draw_ir_composition(
+            local_composition.composition_id,
+            local_composition.scene_key,
+            local_composition.backend_target,
+            non_parent_batches
+        )
+        val outcome = engine2d_draw_ir_render_composition_damaged_with_images(engine, filtered, images, damage_rects, false)
+        return _WmRetainedParentReplay(
+            engine: outcome.engine,
+            ok: outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0,
+            ops_rendered: outcome.ops_rendered,
+            ops_skipped: outcome.ops_skipped,
+            reason: outcome.unsupported_kinds
+        )
+    if causal_pad < 4:
+        causal_pad = 4
+    elif causal_pad > 32:
+        causal_pad = 32
+    val padded_rects = _wm_expand_and_coalesce_rects(damage_rects, causal_pad, w64, h64)
+    if not _wm_damage_rects_in_bounds(padded_rects, w64, h64):
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "invalid-padded-damage-plan")
+    var first_parent_idx: i64 = -1
+    var bi: i64 = 0
+    while bi < local_composition.batches.len():
+        val b = local_composition.batches[bi]
+        if _wm_batch_samples_parent(b):
+            val emb = b.embedding
+            if _wm_rects_overlap_bounds(padded_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                first_parent_idx = bi
+                break
+        bi = bi + 1
+    if first_parent_idx < 0:
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "missing-parent-batch-index")
+    var pre_batches: [DrawIrBatch] = []
+    bi = 0
+    while bi < first_parent_idx:
+        val b = local_composition.batches[bi]
+        if not _wm_batch_samples_parent(b):
+            pre_batches.push(b)
+        bi = bi + 1
+    if pre_batches.len() == 0:
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "missing-backdrop-batches")
+    var scratch = engine
+    match engine.draw_ir_create_offscreen_engine(w64.to_i32(), h64.to_i32()):
+        Err(reason):
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "parent-material-offscreen-unavailable:{reason}")
+        Ok(created):
+            scratch = created
+    val active_font = engine.selected_font_identity()
+    if active_font != "":
+        val _font_ok = scratch.select_font_identity(active_font)
+    val pre_comp = draw_ir_composition(
+        local_composition.composition_id,
+        local_composition.scene_key,
+        local_composition.backend_target,
+        pre_batches
+    )
+    val pre_out = engine2d_draw_ir_render_composition_damaged_with_images(scratch, pre_comp, images, padded_rects, false)
+    scratch = pre_out.engine
+    if pre_out.unsupported_kinds != "none" or pre_out.ops_rendered <= 0:
+        scratch.shutdown()
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "backdrop-replay:{pre_out.unsupported_kinds}")
+    var total_ops = pre_out.ops_rendered
+    bi = first_parent_idx
+    while bi < local_composition.batches.len():
+        val b = local_composition.batches[bi]
+        val emb = b.embedding
+        if not _wm_rects_overlap_bounds(padded_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+            bi = bi + 1
+            continue
+        val batch_to_run = if _wm_batch_samples_parent(b): b else: _wm_prune_non_parent_batch_for_rects(b, padded_rects)
+        if batch_to_run.commands.len() == 0:
+            bi = bi + 1
+            continue
+        val b_res = engine2d_draw_ir_adv_batch_owner_with_images(scratch, batch_to_run, false, images)
+        scratch = b_res.engine
+        if b_res.result.fallback_required or b_res.result.skipped_command_count != 0 or b_res.result.rendered_command_count <= 0:
+            scratch.shutdown()
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "parent-batch-replay:{b_res.result.fallback_reason}")
+        total_ops = total_ops + b_res.result.rendered_command_count
+        bi = bi + 1
+    val is_vulkan = engine.backend_name() == "vulkan"
+    var patches_x: [i32] = []
+    var patches_y: [i32] = []
+    var patches_w: [i32] = []
+    var patches_h: [i32] = []
+    var patches_pixels: [[u32]] = []
+    var ri: i64 = 0
+    while ri + 3 < damage_rects.len():
+        val rx = damage_rects[ri].to_i32()
+        val ry = damage_rects[ri + 1].to_i32()
+        val rw = damage_rects[ri + 2].to_i32()
+        val rh = damage_rects[ri + 3].to_i32()
+        val patch_rb = scratch.read_pixels_region(rx, ry, rw, rh)
+        if patch_rb.pixels.len() != rw.to_i64() * rh.to_i64():
+            scratch.shutdown()
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "patch-readback-size-mismatch")
+        if is_vulkan and patch_rb.source != "device_readback":
+            scratch.shutdown()
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "patch-readback-not-device")
+        patches_x.push(rx)
+        patches_y.push(ry)
+        patches_w.push(rw)
+        patches_h.push(rh)
+        patches_pixels.push(patch_rb.pixels)
+        ri = ri + 4
+    scratch.shutdown()
+    var eng = engine
+    if is_vulkan and not eng.stage_present_damage(damage_rects):
+        return _WmRetainedParentReplay(engine: eng, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "vulkan-damage-stage-rejected")
+    var pi: i64 = 0
+    while pi < patches_x.len():
+        eng.draw_image(patches_x[pi], patches_y[pi], patches_w[pi], patches_h[pi], patches_pixels[pi])
+        pi = pi + 1
+    if is_vulkan:
+        if val Some(vk) = eng.vulkan_backend:
+            if vk.cpu_fallback_used or vk.completion_unknown:
+                val vk_reason = if vk.cpu_fallback_reason != "": vk.cpu_fallback_reason else: "vulkan-draw-image-fallback"
+                return _WmRetainedParentReplay(engine: eng, ok: false, ops_rendered: 0, ops_skipped: 0, reason: vk_reason)
+    if not eng.finalize_compute_frame_no_readback():
+        eng.present()
+    _WmRetainedParentReplay(engine: eng, ok: true, ops_rendered: total_ops, ops_skipped: 0, reason: "none")
 
 class Engine2dWmFrameExecutor:
     engine: Engine2D
@@ -770,12 +1095,33 @@ class Engine2dWmFrameExecutor:
         val clock_rect = engine2d_wm_clock_rect(local_composition)
         val retained_plan = self.retained_scene_damage_plan(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
         if retained_plan.mode == DAMAGE_PLAN_LOCAL and retained_plan.rects.len() > 0:
-            val outcome = engine2d_draw_ir_render_composition_damaged_with_images(self.engine, local_composition, images, retained_plan.rects, false)
-            self.engine = outcome.engine
-            if outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0:
-                if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=retained-present rects={retained_plan.output_rect_count} ops={outcome.ops_rendered}")
+            var has_parent_material = false
+            for batch in local_composition.batches:
+                if _wm_batch_samples_parent(batch):
+                    has_parent_material = true
+                    break
+            var replay_ok = false
+            var replay_ops_rendered: i32 = 0
+            var replay_ops_skipped: i32 = 0
+            var replay_reason = "none"
+            if has_parent_material:
+                val parent_outcome = _wm_replay_parent_sampling_composition(self.engine, local_composition, images, retained_plan.rects)
+                self.engine = parent_outcome.engine
+                replay_ok = parent_outcome.ok
+                replay_ops_rendered = parent_outcome.ops_rendered
+                replay_ops_skipped = parent_outcome.ops_skipped
+                replay_reason = parent_outcome.reason
+            else:
+                val outcome = engine2d_draw_ir_render_composition_damaged_with_images(self.engine, local_composition, images, retained_plan.rects, false)
+                self.engine = outcome.engine
+                replay_ok = outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0
+                replay_ops_rendered = outcome.ops_rendered
+                replay_ops_skipped = outcome.ops_skipped
+                replay_reason = outcome.unsupported_kinds
+            if replay_ok:
+                if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=retained-present rects={retained_plan.output_rect_count} ops={replay_ops_rendered}")
                 if degraded_window_count > 0:
-                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={outcome.ops_skipped} rendered={outcome.ops_rendered} scene_revision={scene_revision} reason=retained-damage")
+                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={replay_ops_skipped} rendered={replay_ops_rendered} scene_revision={scene_revision} reason=retained-damage")
                 for frame in good_content_frames:
                     _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                 self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
@@ -783,7 +1129,7 @@ class Engine2dWmFrameExecutor:
                 return scene_revision
             # Fail closed: an unsupported or empty retained replay must not
             # be presented; repaint everything through the full lane instead.
-            _engine2d_wm_log("[wm-frame] retained-damage-fallback reason={outcome.unsupported_kinds} rendered={outcome.ops_rendered} scene_revision={scene_revision}")
+            _engine2d_wm_log("[wm-frame] retained-damage-fallback reason={replay_reason} rendered={replay_ops_rendered} scene_revision={scene_revision}")
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)
         if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
         # A partially-unsupported composition (e.g. one taskbar icon whose

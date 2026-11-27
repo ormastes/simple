@@ -1,0 +1,195 @@
+"""
+Unit specification for WM retained damage replay when window chrome/surfaces
+sample the parent backdrop (`fluid_light` and `aetheric_dark` glass materials).
+
+Verifies on CPU Engine2D without Vulkan hardware dependencies that:
+1. Clock ticks over focused glass windows replay via `software-retained-damage`
+   and match a fresh full-frame render pixel-for-pixel everywhere while keeping
+   pixels outside the old+new clock boxes identical to the prior frame.
+2. Content updates inside an unfocused glass window replay via
+   `software-retained-damage` with exact full-frame parity (including padded
+   backdrop sampling across blur margins).
+3. Moving a window across an overlapping glass window replays via
+   `software-retained-damage` with exact full-frame parity.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.color.{rgb}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.window_scene.{
+    SharedWmScene, WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame,
+    simple_gui_internal_window, shared_wm_background_color, wm_content_frame_checksum
+}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome, reset_wm_chrome_theme}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.desktop.shell.{simpleos_runtime_taskbar_revision}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+
+val REV: i64 = 7
+
+fn _clock_scene() -> SharedWmScene:
+    val window = simple_gui_internal_window("surf", "win", 1u64, "app", "One", 10, 36, 140, 84, "", false, true, 1)
+    SharedWmScene(width: 160, height: 120, backend: "cpu", windows: [window], background: shared_wm_background_color(0xff101010u32))
+
+fn _taskbar(clock: text) -> TaskbarModel:
+    TaskbarModel(
+        pinned: [AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")],
+        running: [WindowRef(window_id: "win", app_id: "app", title: "One", minimized: false)],
+        tray: [TrayItem(item_id: "clock", label: clock, icon: "clock")])
+
+fn _clock_frames() -> [WmContentFrame]:
+    val pixels: [u32] = [rgb(0, 160, 0); 132 * 48]
+    [WmContentFrame(window_id: "win", scene_revision: REV, content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE, width: 132, height: 48,
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)]
+
+fn _render_clock(executor: Engine2dWmFrameExecutor, clock: text) -> i64:
+    var e = executor
+    val taskbar = _taskbar(clock)
+    e.render(_clock_scene(), taskbar, _clock_frames(), REV, simpleos_runtime_taskbar_revision(taskbar, clock), clock)
+
+fn _in_any(i: i32, width: i64, rects: [i64]) -> bool:
+    val x = (i.to_i64() % width)
+    val y = (i.to_i64() / width)
+    var r: i64 = 0
+    while r + 3 < rects.len():
+        if x >= rects[r] and x < rects[r] + rects[r + 2] and y >= rects[r + 1] and y < rects[r + 1] + rects[r + 3]:
+            return true
+        r = r + 4
+    false
+
+fn _assert_glass_clock_tick(theme: text):
+    reset_wm_chrome_theme()
+    if theme == "fluid_light": apply_theme_render_snapshot_to_wm_chrome(fluid_light_theme_render_snapshot())
+    if theme == "aetheric_dark": apply_theme_render_snapshot_to_wm_chrome(aetheric_dark_theme_render_snapshot())
+
+    var reference = Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(160, 120, "cpu"), FramebufferDriver.empty(), 160, 120)
+    expect(_render_clock(reference, "09:42")).to_equal(REV)
+    val fresh_b = reference.engine.read_pixels_with_source().pixels
+    reference.engine.shutdown()
+
+    var executor = Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(160, 120, "cpu"), FramebufferDriver.empty(), 160, 120)
+    expect(_render_clock(executor, "09:41")).to_equal(REV)
+    expect(executor.last_present_path).to_equal("software")
+    val first = executor.engine.read_pixels_with_source().pixels
+    val boxes = executor.last_successful_clock_rect
+    expect(boxes.len()).to_equal(8)
+
+    expect(_render_clock(executor, "09:42")).to_equal(REV)
+    expect(executor.last_present_path).to_equal("software-retained-damage")
+    val second = executor.engine.read_pixels_with_source().pixels
+    expect(second).to_equal(fresh_b)
+
+    val all_boxes = boxes + executor.last_successful_clock_rect
+    var changed = 0
+    var window_px = 0
+    var i = 0
+    while i < 160 * 120:
+        if not _in_any(i, 160, all_boxes):
+            expect(second[i]).to_equal(first[i])
+        if second[i] != first[i]:
+            changed = changed + 1
+        if first[i] == rgb(0, 160, 0):
+            window_px = window_px + 1
+        i = i + 1
+    expect(changed).to_be_greater_than(0)
+    expect(window_px).to_be_greater_than(1000)
+    executor.engine.shutdown()
+    reset_wm_chrome_theme()
+
+fn _content_frame(id: text, revision: i64, content_rev: i64, w: i64, h: i64, color: u32) -> WmContentFrame:
+    val pixels: [u32] = [color; w * h]
+    WmContentFrame(window_id: id, scene_revision: revision, content_revision: content_rev,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE, width: w.to_i32(), height: h.to_i32(),
+        pixels: pixels, checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)
+
+describe "WM retained damage parent-sampling replay":
+    it "replays fluid_light glass chrome clock ticks with full pixel parity":
+        step("fluid_light clock tick reuses retained frame and matches fresh full render")
+        _assert_glass_clock_tick("fluid_light")
+
+    it "replays aetheric_dark glass chrome clock ticks with full pixel parity":
+        step("aetheric_dark clock tick reuses retained frame and matches fresh full render")
+        _assert_glass_clock_tick("aetheric_dark")
+
+    it "replays content updates inside an unfocused fluid_light glass window":
+        reset_wm_chrome_theme()
+        apply_theme_render_snapshot_to_wm_chrome(fluid_light_theme_render_snapshot())
+        val win = simple_gui_internal_window("surf", "win", 1u64, "app", "Glass", 24, 36, 120, 72, "", false, false, 1)
+        val scene = SharedWmScene(width: 320, height: 240, backend: "cpu", windows: [win], background: shared_wm_background_color(0xff203050u32))
+        val taskbar = _taskbar("09:41")
+        val tb_rev = simpleos_runtime_taskbar_revision(taskbar, "09:41")
+
+        val frame1 = [_content_frame("win", REV, 1, 112, 36, rgb(0, 160, 0))]
+        val frame2 = [_content_frame("win", REV, 2, 112, 36, rgb(20, 90, 210))]
+
+        var reference = Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(320, 240, "cpu"), FramebufferDriver.empty(), 320, 240)
+        expect(reference.render(scene, taskbar, frame2, REV, tb_rev, "09:41")).to_equal(REV)
+        val fresh_b = reference.engine.read_pixels_with_source().pixels
+        reference.engine.shutdown()
+
+        var executor = Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(320, 240, "cpu"), FramebufferDriver.empty(), 320, 240)
+        expect(executor.render(scene, taskbar, frame1, REV, tb_rev, "09:41")).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+        val first = executor.engine.read_pixels_with_source().pixels
+
+        expect(executor.render(scene, taskbar, frame2, REV, tb_rev, "09:41")).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software-retained-damage")
+        val second = executor.engine.read_pixels_with_source().pixels
+        expect(second).to_equal(fresh_b)
+
+        val win_rect = [24i64, 36i64, 120i64, 72i64]
+        var i = 0
+        while i < 320 * 240:
+            if not _in_any(i, 320, win_rect):
+                expect(second[i]).to_equal(first[i])
+            i = i + 1
+        executor.engine.shutdown()
+        reset_wm_chrome_theme()
+
+    it "replays overlapping window moves over an aetheric_dark glass window":
+        reset_wm_chrome_theme()
+        apply_theme_render_snapshot_to_wm_chrome(aetheric_dark_theme_render_snapshot())
+        val bg_win = simple_gui_internal_window("surf_bg", "win_bg", 1u64, "app", "Backdrop", 100, 32, 120, 96, "", false, false, 1)
+        val fg_win1 = simple_gui_internal_window("surf_fg", "win_fg", 2u64, "app2", "Mover", 24, 48, 80, 60, "", false, true, 2)
+        val fg_win2 = simple_gui_internal_window("surf_fg", "win_fg", 2u64, "app2", "Mover", 64, 60, 80, 60, "", false, true, 2)
+        val scene1 = SharedWmScene(width: 320, height: 240, backend: "cpu", windows: [bg_win, fg_win1], background: shared_wm_background_color(0xff142038u32))
+        val scene2 = SharedWmScene(width: 320, height: 240, backend: "cpu", windows: [bg_win, fg_win2], background: shared_wm_background_color(0xff142038u32))
+        val taskbar = TaskbarModel(
+            pinned: [],
+            running: [
+                WindowRef(window_id: "win_bg", app_id: "app", title: "Backdrop", minimized: false),
+                WindowRef(window_id: "win_fg", app_id: "app2", title: "Mover", minimized: false)
+            ],
+            tray: [TrayItem(item_id: "clock", label: "09:41", icon: "clock")])
+        val tb_rev = simpleos_runtime_taskbar_revision(taskbar, "09:41")
+
+        val frames1 = [
+            _content_frame("win_bg", REV, 1, 112, 60, rgb(30, 140, 90)),
+            _content_frame("win_fg", REV, 1, 72, 24, rgb(180, 60, 40))
+        ]
+        val frames2 = [
+            _content_frame("win_bg", REV + 1, 1, 112, 60, rgb(30, 140, 90)),
+            _content_frame("win_fg", REV + 1, 1, 72, 24, rgb(180, 60, 40))
+        ]
+
+        var reference = Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(320, 240, "cpu"), FramebufferDriver.empty(), 320, 240)
+        expect(reference.render(scene2, taskbar, frames2, REV + 1, tb_rev, "09:41")).to_equal(REV + 1)
+        val fresh_b = reference.engine.read_pixels_with_source().pixels
+        reference.engine.shutdown()
+
+        var executor = Engine2dWmFrameExecutor.create(Engine2D.create_with_backend(320, 240, "cpu"), FramebufferDriver.empty(), 320, 240)
+        expect(executor.render(scene1, taskbar, frames1, REV, tb_rev, "09:41")).to_equal(REV)
+        expect(executor.last_present_path).to_equal("software")
+
+        expect(executor.render(scene2, taskbar, frames2, REV + 1, tb_rev, "09:41")).to_equal(REV + 1)
+        expect(executor.last_present_path).to_equal("software-retained-damage")
+        val second = executor.engine.read_pixels_with_source().pixels
+        expect(second).to_equal(fresh_b)
+        executor.engine.shutdown()
+        reset_wm_chrome_theme()

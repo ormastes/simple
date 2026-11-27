@@ -12,7 +12,7 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WM_CONTENT_ORIGIN_GUI, WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
+use common.ui.window_scene.{WM_CONTENT_DAMAGE_NONE, WM_CONTENT_DAMAGE_LOCAL, WM_CONTENT_DAMAGE_FULL, WM_CONTENT_ORIGIN_SIMPLE_WEB, WM_CONTENT_ORIGIN_GUI, WM_CONTENT_ORIGIN_PIXEL_SURFACE, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_damage_plan_valid, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
@@ -446,6 +446,37 @@ fn _host_copy_wm_content_pixels(pixels: [u32]) -> [u32]:
     # contiguous backing-store copy on native/bare targets, rather than
     # repeatedly growing a new array one boxed pixel at a time.
     pixels.copy()
+
+fn _host_external_damage_incremental_valid(
+    previous: WmContentFrame,
+    current: WmContentFrame
+) -> bool:
+    if not wm_content_frame_damage_plan_valid(current):
+        return false
+    if current.damage_mode == WM_CONTENT_DAMAGE_FULL:
+        return false
+    if (previous.content_revision <= 0 or
+        previous.window_id != current.window_id or
+        previous.width != current.width or
+        previous.height != current.height or
+        previous.origin_kind != current.origin_kind or
+        previous.theme_id != current.theme_id or
+        previous.theme_source_manifest_sha256 !=
+            current.theme_source_manifest_sha256 or
+        previous.pixels.len() != current.pixels.len() or
+        previous.producer_revision < 0 or
+        current.producer_revision < 0 or
+        not current.damage_resources_accepted or
+        current.content_revision < previous.content_revision):
+        return false
+    if current.damage_mode == WM_CONTENT_DAMAGE_NONE:
+        val rev_ok = (
+            current.producer_revision == previous.producer_revision or
+            current.producer_revision == previous.producer_revision + 1)
+        return rev_ok and previous.checksum == current.checksum and previous.pixels == current.pixels
+    if current.damage_mode == WM_CONTENT_DAMAGE_LOCAL:
+        return current.producer_revision == previous.producer_revision + 1
+    false
 
 fn host_taskbar_clock_label(now_micros: i64) -> text:
     """Return a stable UTC HH:MM label from the host wall clock."""
@@ -996,9 +1027,11 @@ class HostCompositor:
         val window_index = self._find_window_index(window_id)
         if frame_index < 0 or window_index < 0:
             return false
-        if frame.damage_rects.len() > 0:
-            return self._apply_external_web_frame_damage(
-                frame_index, window_index, window_id, frame, transfer_owned)
+        if frame.base_content_revision != 0 or frame.damage_pixels.len() != 0:
+            if frame.damage_rects.len() > 0:
+                return self._apply_external_web_frame_damage(
+                    frame_index, window_index, window_id, frame, transfer_owned)
+            return false
         val window = self.windows[window_index]
         val expected_width = window.w - 8
         val expected_height = window.h - 36 -
@@ -1024,8 +1057,6 @@ class HostCompositor:
             frame.checksum != wm_content_frame_checksum(frame.pixels) or
             frame.parent_window_id != "" or
             frame.offset_x != 0 or frame.offset_y != 0 or
-            frame.base_content_revision != 0 or
-            frame.damage_rects.len() != 0 or frame.damage_pixels.len() != 0 or
             theme_mismatch or
             not wm_content_frame_web_provenance_valid(frame)):
             return false
@@ -1038,6 +1069,8 @@ class HostCompositor:
             i = i + 1
         if aggregate_pixels > HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS:
             return false
+        val previous = self.external_web_frames[frame_index]
+        val current = frame
         var retained = frame
         if not transfer_owned:
             # The normal public setter accepts borrowed values.  Isolate their
@@ -1051,8 +1084,38 @@ class HostCompositor:
             updated_window.app_id, frame.origin_kind
         )
         self.windows[window_index] = updated_window
-        self.dirty.add_full_screen(self.width, self.height)
+        if not _host_external_damage_incremental_valid(previous, current):
+            self.dirty.add_full_screen(self.width, self.height)
+            return true
+        if current.damage_mode == WM_CONTENT_DAMAGE_LOCAL:
+            self._add_external_content_damage_rects(window, current.damage_rects)
         true
+
+    me _add_external_content_damage_rects(window: HostedWindow, rects: [i64]):
+        """Translate child-content damage rects to clipped screen coordinates in i64."""
+        val content_x = window.x.to_i64() + 4
+        val content_y = window.y.to_i64() + 32 +
+            shared_wm_browser_content_extra_height(window.app_id).to_i64()
+        val screen_w = self.width.to_i64()
+        val screen_h = self.height.to_i64()
+        var ri = 0
+        while ri < rects.len():
+            val rx = rects[ri]
+            val ry = rects[ri + 1]
+            val rw = rects[ri + 2]
+            val rh = rects[ri + 3]
+            var left = content_x + rx
+            var top = content_y + ry
+            var right = left + rw
+            var bottom = top + rh
+            if left < 0: left = 0
+            if top < 0: top = 0
+            if right > screen_w: right = screen_w
+            if bottom > screen_h: bottom = screen_h
+            if right > left and bottom > top:
+                self.dirty.add_rect(left.to_i32(), top.to_i32(),
+                    (right - left).to_i32(), (bottom - top).to_i32())
+            ri += 4
 
     me _apply_external_web_frame_damage(
         frame_index: i32,
@@ -1169,29 +1232,7 @@ class HostCompositor:
         # full-screen here forces the retained CPU/Vulkan compositor to lose
         # its raster and transfer locality. Clip to the desktop because a
         # partially off-screen window is still a valid content owner.
-        val content_x = window.x.to_i64() + 4
-        val content_y = window.y.to_i64() + 32 +
-            shared_wm_browser_content_extra_height(window.app_id).to_i64()
-        val screen_w = self.width.to_i64()
-        val screen_h = self.height.to_i64()
-        ri = 0
-        while ri < frame.damage_rects.len():
-            val rx = frame.damage_rects[ri]
-            val ry = frame.damage_rects[ri + 1]
-            val rw = frame.damage_rects[ri + 2]
-            val rh = frame.damage_rects[ri + 3]
-            var left = content_x + rx
-            var top = content_y + ry
-            var right = left + rw
-            var bottom = top + rh
-            if left < 0: left = 0
-            if top < 0: top = 0
-            if right > screen_w: right = screen_w
-            if bottom > screen_h: bottom = screen_h
-            if right > left and bottom > top:
-                self.dirty.add_rect(left.to_i32(), top.to_i32(),
-                    (right - left).to_i32(), (bottom - top).to_i32())
-            ri += 4
+        self._add_external_content_damage_rects(window, frame.damage_rects)
         true
 
     me set_external_content_frame(
@@ -1199,6 +1240,9 @@ class HostCompositor:
         frame: WmContentFrame
     ) -> bool:
         self.set_external_web_frame(window_id, frame)
+
+    fn has_pending_damage() -> bool:
+        self.dirty.has_any
 
     me set_external_child_frame(frame: WmContentFrame) -> bool:
         if (frame.window_id == "" or frame.parent_window_id == "" or

@@ -300,6 +300,10 @@ val WM_CONTENT_ORIGIN_SIMPLE_WEB: text = "simple_web"
 pub val WM_CONTENT_ORIGIN_GUI: text = "gui"
 val WM_CONTENT_ORIGIN_PIXEL_SURFACE: text = "pixel_surface"
 
+val WM_CONTENT_DAMAGE_NONE: i64 = 0
+val WM_CONTENT_DAMAGE_LOCAL: i64 = 1
+val WM_CONTENT_DAMAGE_FULL: i64 = 2
+
 fn wm_content_frame_origin_valid(origin_kind: text) -> bool:
     origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB or origin_kind == WM_CONTENT_ORIGIN_GUI or origin_kind == WM_CONTENT_ORIGIN_PIXEL_SURFACE
 
@@ -344,6 +348,77 @@ struct WmContentFrame:
     base_content_revision: i64 = 0
     damage_rects: [i64] = []
     damage_pixels: [u32] = []
+    producer_revision: i64 = 0
+    damage_mode: i64 = WM_CONTENT_DAMAGE_FULL
+    damage_resources_accepted: bool = false
+
+fn _wm_content_damage_rects_overlap(
+    ax: i64, ay: i64, aw: i64, ah: i64,
+    bx: i64, by: i64, bw: i64, bh: i64
+) -> bool:
+    ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+
+fn _wm_content_damage_rect_in_bounds(
+    rx: i64, ry: i64, rw: i64, rh: i64,
+    w64: i64, h64: i64
+) -> bool:
+    if rx < 0 or ry < 0 or rw <= 0 or rh <= 0:
+        return false
+    if rw > w64 or rh > h64:
+        return false
+    rx <= w64 - rw and ry <= h64 - rh
+
+fn wm_content_frame_damage_plan_valid(frame: WmContentFrame) -> bool:
+    if frame.width <= 0 or frame.height <= 0:
+        return false
+    if frame.damage_mode == WM_CONTENT_DAMAGE_NONE:
+        return (frame.producer_revision >= 0 and
+            frame.damage_resources_accepted and
+            frame.damage_rects.len() == 0)
+    val w64 = frame.width.to_i64()
+    val h64 = frame.height.to_i64()
+    if frame.damage_mode == WM_CONTENT_DAMAGE_FULL:
+        if frame.damage_rects.len() == 0:
+            return true
+        if frame.damage_rects.len() % 4 != 0 or frame.damage_rects.len() > 1024:
+            return false
+        var offset: i64 = 0
+        while offset < frame.damage_rects.len():
+            if not _wm_content_damage_rect_in_bounds(
+                frame.damage_rects[offset], frame.damage_rects[offset + 1],
+                frame.damage_rects[offset + 2], frame.damage_rects[offset + 3],
+                w64, h64
+            ):
+                return false
+            offset += 4
+        return true
+    if frame.damage_mode != WM_CONTENT_DAMAGE_LOCAL:
+        return false
+    if (frame.producer_revision < 0 or
+        not frame.damage_resources_accepted or
+        frame.damage_rects.len() == 0 or
+        frame.damage_rects.len() % 4 != 0 or
+        frame.damage_rects.len() > 1024):
+        return false
+    var offset: i64 = 0
+    while offset < frame.damage_rects.len():
+        val rx = frame.damage_rects[offset]
+        val ry = frame.damage_rects[offset + 1]
+        val rw = frame.damage_rects[offset + 2]
+        val rh = frame.damage_rects[offset + 3]
+        if not _wm_content_damage_rect_in_bounds(rx, ry, rw, rh, w64, h64):
+            return false
+        var prior: i64 = 0
+        while prior < offset:
+            if _wm_content_damage_rects_overlap(
+                frame.damage_rects[prior], frame.damage_rects[prior + 1],
+                frame.damage_rects[prior + 2], frame.damage_rects[prior + 3],
+                rx, ry, rw, rh
+            ):
+                return false
+            prior += 4
+        offset += 4
+    true
 
 fn _wm_lower_hex_sha256_valid(value: text) -> bool:
     if value.len() != 64:
@@ -1175,3 +1250,5 @@ fn shared_wm_translate_pointer_event_cached(scene: SharedWmScene, taskbar: Taskb
         translation: fresh,
         cache: SharedWmEventTargetTranslationCache(scene_key: scene_key, input_key: input_key, translation: fresh)
     )
+
+export WM_CONTENT_DAMAGE_NONE, WM_CONTENT_DAMAGE_LOCAL, WM_CONTENT_DAMAGE_FULL, wm_content_frame_damage_plan_valid
