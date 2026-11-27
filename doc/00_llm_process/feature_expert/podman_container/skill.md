@@ -261,7 +261,32 @@ Traps hit while doing it:
   latched). The transfer `close_v2` attempts the same settle, so cleanup can
   settle after a refused `destroy`. Measured on this host (own uid): conmon,
   `podman container cleanup` and runc last seen 143 to 169 ms after `start`
-  returned for `/bin/true`; the rootless pause process (`catatonit`) never
-  leaves, and such a process keeps the census refusing by design.
+  returned for `/bin/true`. The developer's own rootless pause process
+  (`catatonit`, in its `podman-pause-*.scope`) never leaves; the route's does,
+  see the next item.
+- The rootless pause process does not block the exited-start census, and nothing
+  is excluded for it. `catatonit -P` runs as the service uid (not a subuid), pid
+  in `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid`. Without a user bus podman cannot
+  move it into a `podman-pause-*.scope`, so it stays in the cgroup of the helper
+  that created it, and that group is killed (`cgroup.kill`) when the helper
+  leader is reaped. Each later helper makes a new one. Pinned by
+  `machine_fresh_engine_residue_containment_v3_spec.spl`; if helper containment
+  changes, revisit the census decision first.
+- The same kill removes `conmon`: rootless cgroupfs podman cannot move conmon to
+  `<cgroup-parent>/conmon` (`open /sys/fs/cgroup/cgroup.subtree_control:
+  permission denied`, logged at info level only). A workload still running when
+  its start helper is reaped then breaks every later engine command with
+  `invalid internal status, try resetting the pause process`. Open:
+  `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
+- To emulate the route's engine on a developer host: private `--root`,
+  `--runroot` (50 characters at most) and `--tmpdir`, `XDG_RUNTIME_DIR` set to
+  the run root, and an unusable `DBUS_SESSION_BUS_ADDRESS`. `env -i` alone is
+  not "no user bus": podman finds `/run/user/<uid>/bus` by uid. `HOME` must
+  exist; `/nonexistent` makes podman exit 1 (`cannot resolve /nonexistent`).
+- `simple_container_fresh_cleanup_v2` reports a refusal (a stage that kept its
+  owner) for that attempt only; it keeps, first one wins, only the error of a
+  stage that gave up its owner, and the open's own error. Decided per stage by
+  the pure `container_fresh_cleanup_stage_v2`. A closed cleanup with a non-empty
+  error is therefore a real failure.
 - `host_agent_workspace_extraction_v2_spec.spl` pins two lines of the transfer
   `close_v2` and exactly one `close_native_v2()` in it; add lines around them.
