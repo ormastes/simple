@@ -6204,3 +6204,22 @@ pins the border-box form, the default-UA gap is unfiled.
     html 4x +3.2 / +1.7 / +1.9 / +8.9 % (mean +3.9 %, median ~+2.5 %).
     In-process on css-paint: gray raster 0.97 -> 1.61 s, atlas insert
     0.34 -> 0.19 s, net +0.48 s (~2.4 %). Still at or just over the 2 % line.
+
+## 2026-11-28 — tab bar: a row of auto-width `<button>` flex items on Chrome's exact edges and label pens (`work/webrender-tabbar-20261128`)
+
+- **Symptom.** tab-bar was the one catalog page the 4x glyph work did not move (0.13 at 4x, 0.23 at 1x). Not raster: split by layout vs paint, every difference above AA level was one of three geometry causes, all in "auto-width `<button>` items of a row flex container".
+- **How it was split.** Row scans of the two frames for runs of the exact border colour give the 14 box edges; per-label ink boxes with a -3..3 px shift search give the label pen. 1x boxes were already equal; 4x boxes differed on 8 of 14 edges; labels whose exact left edge is whole (`Overview` 57.0, `CSS Paint` 297.97) had only AA-level deltas, every other label was 1..2 px off.
+- **Chrome 159 (`getBoundingClientRect`, same CSS as the catalog):** tab lefts 0 / 81.5625 / 143.855 / 241.004 / 328.512 / 444.895 / 530.18 CSS px at k = 4, label left = tab left + 9 exactly. k = 1 widths 73.547 / 54.297 / 89.125 / 79.5 / 108.359 / 77.281 / 72.844, k = 4 widths 73.5625 / 54.293 / 89.148 / 79.508 / 108.383 / 77.285 / 72.848: the label is shaped at the DEVICE font size (13.3333 px x k, FreeType 26.6 size), so the k = 4 width is not the k = 1 width.
+- **Cause 1 (1x and 4x, most of the pixels): label pen.** The flex row already carried each button's fractional left (`frac_adj_milli`) but only snapped the box; the label started at the whole-px pen. `run_pen_origin` also refuses any centred line, and a button is `text-align:center`. An auto-width button has no centring slack, so its label starts at the box's exact left + border + padding. Fix: the row now places a button through `box_x_snap` at every k (records `box_line_start_err`), and `flex_row_button_label_at_edge` lets the label take that error as its pen origin.
+- **Cause 2 (k > 1): item edges were k x the whole-CSS-px edges.** The device records were gated off for form controls in the flex row, and the button's own layout reset `box_device_extra_w` to 0 (`button_device_extra_w` returns 0 under a flex parent). Fix: a button item records round(k x exact right) - round(k x exact left) in the row, and its own layout leaves that record alone (`button_in_flex_row`).
+- **Cause 3 (k > 1): label width.** `form_control_label_width_milli_px` measured at an oversampled size and floored to 1/64 CSS px, i.e. the k = 1 width. At k > 1 it now resolves the label at the device font size (`resolve_font_metrics_with_language_milli`, `num x 1000 x k / den`) and ceils to a LayoutUnit of a device px. This applies to every button label at k > 1, not only flex items; the existing button specs (`button_follower_*`, `button_label_width`, `form_control_width_dpr`) are unchanged.
+- **Result (base 4b3a7b2f457 -> head, seed1126b):** tab-bar 1x 0.23 -> 0.02, 4x 0.13 -> 0.01. The other seven 4x frames are byte-identical to base and the other 1x rows measure the same; matrix 77. Perf, 4 alternated rounds, median ms: tab-bar 4x 5620 -> 5397, tab-bar 1x 2520 -> 2537, forms-media 4x 20866 -> 20766; RSS equal.
+- **Spec:** `test/01_unit/browser_engine/flex_row_button_tabs_chrome159_spec.spl` (14 border columns and 14 label ink columns at k = 1 and k = 4; red 1/4 on base, green 4/4).
+- **Traps.**
+  - A label-ink threshold of 128 put Chrome's `F` stem column (113, 118, 130) on one side and Simple's (109, 114, 126) on the other. That is 4 levels of AA, not geometry; the spec uses 160 like the other button specs.
+  - On a 33 px tall button with a 5 px radius, row 28 is already inside the corner at k = 1; scan edges on row 26.
+  - 1x "LCD raster" attribution on this page was wrong for 5 of 7 labels: check the pen (ink first/last column) before blaming coverage.
+- **Open (not done here).**
+  - Label of an INLINE (non-flex) auto-width button still starts at the whole pen; only flex-row items got the exact pen.
+  - Reversed and wrapped flex rows keep the old button placement (the new paths are gated to a plain `nowrap` row), as does a button with a `min-width` (centring slack) and a centred row (`justify-content:center` is a whole-px offset).
+  - What is left on tab-bar is AA level (max delta 72): glyph edge coverage at 53.33 px and the 5 px corner arcs.
