@@ -4356,6 +4356,25 @@ impl Lowerer {
             _ => return Ok(None),
         };
 
+        // A DSL name the module being lowered declares itself (`fn context(v)`
+        // in a spec) is that module's function: lower it as an ordinary call,
+        // the interpreter twin of `evaluate_call`'s caller-shadowing gate.
+        // Bug: seed_same_name_fn_binding_2026-11-27 (form 2).
+        // Flattened units know each definition's owner; the non-flattened
+        // (native/AOT) lane only knows this file's own declarations.
+        let framework_owner = self
+            .current_function_owner
+            .as_deref()
+            .is_some_and(crate::interpreter::interpreter_call::bdd::is_spec_framework_owner);
+        let declared_here = !framework_owner && if self.flatten_fn_owners.is_empty() {
+            self.own_declared_function_names.contains(name)
+        } else {
+            self.flatten_owner_defines(self.current_function_owner.as_deref(), name)
+        };
+        if declared_here {
+            return Ok(None);
+        }
+
         match name {
             "describe" | "context" | "feature" | "scenario" => {
                 // describe "name": body

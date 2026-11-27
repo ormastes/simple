@@ -1,6 +1,6 @@
 # Seed binds a call to the wrong same-named function (2026-11-27)
 
-Status: open. Found while wiring the phase-3 Hello matrix twin to the
+Status: verification-pending (fix in the seed + pure-Simple interpreter; see Fix). Found while wiring the phase-3 Hello matrix twin to the
 BuildRunner lane twin (PR #12220). Reproduced on the Rust seed
 `C:/dev/wt/bound3x-target/release/simple.exe` (sha256
 `9c509c621f2cc69fbeb1e4c5df8db6b2e0620ea3c9f6ef9cfc4ef671e37c117f`), Windows.
@@ -71,3 +71,34 @@ types, compilation must fail. Never a silent nil or reinterpreted argument.
 
 PR #12220 renamed its entry to `matrix_buildrunner_run_lane` and the spec helper
 to `spec_matrix_ctx`; both are tagged here so they can be reverted once fixed.
+
+## Fix (2026-11-28, verification-pending)
+
+Root cause, form 1: HIR `flatten_owned_callable` rule 1 returned the calling
+module's own definition by name alone, before its selective import was even
+consulted, so the JIT/native lanes ran `beta`'s `(i64)` body. The Rust
+interpreter was already right (it scores overloads by value). Root cause,
+form 2: the interpreter's spec-DSL arm (`eval_bdd_builtin`) ran before user
+lookup for every DSL word, including a spec file's own `fn context`.
+
+Rule now, on every engine: when a module declares `f` AND selectively imports
+another `f`, both are visible and the call's arguments choose (arity, then
+argument type; an exact match outranks an untyped slot). Identical signatures
+keep the own-definition tie-break. Two different signatures that fit equally
+well are a compile error tagged `[compiler_cross_module_private_symbol_collision]`.
+A DSL word the calling module declares itself is that module's function.
+
+- Seed HIR: `select_flatten_call_candidate` (`hir/lower/expr/calls.rs`),
+  `flatten_call_site_candidates` (`hir/lower/lowerer.rs`); DSL statement gate
+  in `try_lower_bdd_statement` (`stmt_lowering.rs`).
+- Seed interpreter: `own_vs_import_bound` and the `BDD_DSL_NAMES` caller gate
+  (`interpreter_call/{mod,bdd}.rs`).
+- Pure Simple: `func_resolve_for_call` (`eval_tables.spl`, arity only; a
+  same-arity, different-signature pair is an error rather than type-ranked).
+- Tests: `src/compiler_rust/compiler/tests/same_name_fn_binding.rs`,
+  `test/01_unit/compiler/pipeline/same_name_fn_binding_spec.spl`,
+  `test/01_unit/compiler/pipeline/local_fn_shadows_spec_dsl_spec.spl`.
+
+**The two renames from PR #12220 (`matrix_buildrunner_run_lane`,
+`spec_matrix_ctx`) can be reverted once the seed carrying this fix is
+redeployed.** Until then the deployed seed still has the bug.

@@ -13,6 +13,140 @@ use crate::hir::types::*;
 use crate::value::{BUILTIN_JOIN, BUILTIN_REPLY, BUILTIN_SPAWN};
 
 impl Lowerer {
+    /// Pick which of the two visible definitions of `name`
+    /// (`flatten_call_site_candidates`: [own, imported]) a call's arguments
+    /// select. Arity (declared defaults honoured) first, then each argument's
+    /// inferred type: an exact parameter match outranks an
+    /// untyped/`Any`/generic slot; named arguments do not rank. A unique best wins; identical signatures keep the
+    /// module's own definition (the documented own-wins tie-break); anything
+    /// else -- two distinct viable signatures, or none -- is a compile error,
+    /// never a silent wrong-body call. Bug: seed_same_name_fn_binding_2026-11-27.
+    fn select_flatten_call_candidate(
+        &mut self,
+        name: &str,
+        candidates: &[String; 2],
+        args: &[ast::Argument],
+        ctx: &FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // `infer_type` types an argument without lowering it (the call's
+        // args are lowered once, after the callee); Any/unknown fits any slot.
+        // Named arguments can be reordered/defaulted, so they do not rank:
+        // two arity-fitting candidates with different signatures then tie.
+        let named = args.iter().any(|a| a.name.is_some());
+        let arg_tys: Vec<Option<TypeId>> = args
+            .iter()
+            .map(|a| self.infer_type(&a.value, ctx).ok().filter(|t| *t != TypeId::ANY))
+            .collect();
+        let mut scored: Vec<(usize, String, TypeId, Vec<TypeId>)> = Vec::new();
+        let mut sigs: Vec<String> = Vec::new();
+        for symbol in candidates {
+            let Some(fn_ty) = self.named_callable_value_type(symbol) else {
+                continue;
+            };
+            let Some(HirType::Function { params, .. }) = self.module.types.get(fn_ty).cloned() else {
+                continue;
+            };
+            sigs.push(format!("({})", params.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>().join(", ")));
+            let required = self
+                .fn_param_defaults
+                .get(symbol)
+                .filter(|d| d.len() == params.len())
+                .map_or(params.len(), |d| d.iter().filter(|slot| slot.is_none()).count());
+            if args.len() < required || args.len() > params.len() {
+                continue;
+            }
+            let mut score = 0usize;
+            let mut fits = true;
+            if !named {
+                for (arg_ty, param) in arg_tys.iter().zip(params.iter()) {
+                    match arg_ty {
+                        Some(a) if a == param && !self.type_has_any(*param, 0) => score += 2,
+                        Some(a) if self.arg_fits_slot(*a, *param, 0) => score += 1,
+                        Some(_) => fits = false,
+                        None => score += 1,
+                    }
+                }
+            }
+            if fits {
+                scored.push((score, symbol.clone(), fn_ty, params));
+            }
+        }
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        let pick = match scored.as_slice() {
+            [] => None,
+            [only] => Some(only),
+            [best, next, ..] if best.0 > next.0 || best.3 == next.3 => {
+                // Equal signatures: [own, imported] order puts own first.
+                Some(if best.0 > next.0 { best } else if best.1 == candidates[0] { best } else { next })
+            }
+            _ => None,
+        };
+        let Some((_, symbol, ty, _)) = pick else {
+            let render = |t: &Option<TypeId>| t.map_or("?".to_string(), |t| format!("{t:?}"));
+            return Err(LowerError::AmbiguousCallable(format!(
+                "{} call to `{name}`: this module defines `{name}` and also imports one ({}); the argument types ({}) {}. Rename one definition or import the other under an alias. [compiler_cross_module_private_symbol_collision]",
+                if scored.is_empty() { "unresolvable" } else { "ambiguous" },
+                sigs.join(" vs "),
+                arg_tys.iter().map(render).collect::<Vec<_>>().join(", "),
+                if scored.is_empty() { "fit neither definition" } else { "fit both definitions equally" },
+            )));
+        };
+        self.gate_private_fn_ref(name);
+        Ok(HirExpr {
+            kind: HirExprKind::Global(symbol.clone()),
+            ty: *ty,
+        })
+    }
+
+    /// An argument of type `arg` can bind a parameter slot of type `param`
+    /// without being an exact match: Any/generic (generic params resolve to
+    /// Any, also inside `[T]`/tuples) or an int-to-int literal widening.
+    fn arg_fits_slot(&self, arg: TypeId, param: TypeId, depth: usize) -> bool {
+        if arg == param || param == TypeId::ANY || arg == TypeId::ANY {
+            return true;
+        }
+        if Self::is_int_type(arg) && Self::is_int_type(param) {
+            return true;
+        }
+        if depth > 8 {
+            return false;
+        }
+        match (self.module.types.get(arg), self.module.types.get(param)) {
+            (Some(HirType::Array { element: a, .. }), Some(HirType::Array { element: p, .. })) => {
+                let (a, p) = (*a, *p);
+                self.arg_fits_slot(a, p, depth + 1)
+            }
+            (Some(HirType::Tuple(a)), Some(HirType::Tuple(p))) if a.len() == p.len() => {
+                let pairs: Vec<(TypeId, TypeId)> = a.iter().copied().zip(p.iter().copied()).collect();
+                pairs.into_iter().all(|(a, p)| self.arg_fits_slot(a, p, depth + 1))
+            }
+            _ => false,
+        }
+    }
+
+    /// True when `ty` is, or contains, Any (a generic slot): such a slot
+    /// never counts as an exact match, so it ranks like Any.
+    fn type_has_any(&self, ty: TypeId, depth: usize) -> bool {
+        if ty == TypeId::ANY {
+            return true;
+        }
+        if depth > 8 {
+            return false;
+        }
+        match self.module.types.get(ty) {
+            Some(HirType::Array { element, .. }) => self.type_has_any(*element, depth + 1),
+            Some(HirType::Tuple(elems)) => elems.iter().any(|e| self.type_has_any(*e, depth + 1)),
+            _ => false,
+        }
+    }
+
+    fn is_int_type(ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64
+        )
+    }
+
     /// Lower a function call expression to HIR
     ///
     /// Handles:
@@ -265,8 +399,19 @@ impl Lowerer {
             }
         }
 
-        // Regular function call
-        let func_hir = Box::new(self.lower_expr(callee, ctx)?);
+        // Regular function call. A bare name the module both declares and
+        // selectively imports is chosen by the arguments, not by name alone.
+        let call_site_pick = match callee {
+            Expr::Identifier(name) if ctx.lookup(name).is_none() => self
+                .flatten_call_site_candidates(name)
+                .map(|candidates| self.select_flatten_call_candidate(name, &candidates, args, ctx))
+                .transpose()?,
+            _ => None,
+        };
+        let func_hir = Box::new(match call_site_pick {
+            Some(picked) => picked,
+            None => self.lower_expr(callee, ctx)?,
+        });
         // Preserve the resolved symbol even before its body has been lowered:
         // forward and recursive callees can still carry a scalar return type.
         let ret_ty = match (&func_hir.kind, callee) {

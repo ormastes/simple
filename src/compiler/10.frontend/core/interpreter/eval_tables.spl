@@ -669,6 +669,43 @@ fn func_resolve_for_caller_depth(caller: text, name: text, depth: i64) -> i64:
 pub fn func_resolve_for_caller(caller: text, name: text) -> i64:
     func_resolve_for_caller_depth(caller, name, 0)
 
+# Bare CALL `name(args)` from `caller` that both declares `name` and
+# selectively imports another module's `name` (`use alpha.{same_name}` beside
+# a local `fn same_name(n: i64)`): both definitions are visible and the call's
+# arguments choose (`eval_pick_own_or_import`, eval_calls.spl).
+# `func_resolve_for_caller` alone returned the local one by name, so a
+# two-text call ran the `(i64)` body. Returns (own, imported) decl ids, or
+# (-1, -1) when the caller sees only one definition. Rust seed twins:
+# `select_flatten_call_candidate` (HIR) and `own_vs_import_bound`
+# (interpreter). Bug: seed_same_name_fn_binding_2026-11-27.
+pub val FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS: i64 = -3
+
+@allow(primitive_api) # reason: core-interpreter dense decl_id arena index pair
+pub fn func_own_import_pair(caller: text, name: text) -> (i64, i64):
+    val own = func_table_lookup_owned(caller, name)
+    if own < 0:
+        return (-1, -1)
+    val route = func_import_binding_route(caller, name)
+    if route.0 == "" or route.0 == caller:
+        return (-1, -1)
+    val imported = func_resolve_for_caller_depth(route.0, route.1, 1)
+    if imported < 0 or imported == own:
+        return (-1, -1)
+    (own, imported)
+
+pub fn func_own_import_ambiguous_message(name: text) -> text:
+    "ambiguous call to '{name}': this module defines '{name}' and also imports one with the same arity but a different signature. Rename one definition or import the other under an alias. [compiler_cross_module_private_symbol_collision]"
+
+fn _param_types_equal(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 fn func_table_remove(name: text) -> bool:
     val bucket = hm_hash_text(name) % HM_SIZE
     var prev: i64 = -1
