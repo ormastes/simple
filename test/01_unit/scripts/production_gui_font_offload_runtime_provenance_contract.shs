@@ -7,6 +7,17 @@ trap 'rm -rf "$fixture_root"' EXIT HUP INT TERM
 
 runtime_env="$fixture_root/runtime.env"
 output_dir="$fixture_root/out"
+mock_simple="$fixture_root/mock-simple"
+
+cat >"$mock_simple" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "Simple v1.0.0 pure-Simple"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "$mock_simple"
 
 cat >"$runtime_env" <<'EOF'
 production_gui_font_runtime_status=pass
@@ -14,7 +25,7 @@ production_gui_font_runtime_selected_backend=cuda
 EOF
 
 set +e
-SIMPLE_BIN=/bin/true \
+SIMPLE_BIN="$mock_simple" \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_env" \
 BUILD_DIR="$output_dir" REPORT_PATH="$output_dir/report.md" \
@@ -32,10 +43,14 @@ production_gui_font_runtime_font_module_or_queue_handle=102
 production_gui_font_runtime_font_kernel_or_pipeline_handle=103
 production_gui_font_runtime_font_fence_handle=104
 production_gui_font_runtime_font_readback_checksum=105
+production_gui_font_runtime_vector_expected_checksum=201
+production_gui_font_runtime_vector_actual_checksum=201
+production_gui_font_runtime_bitmap_expected_checksum=105
+production_gui_font_runtime_bitmap_actual_checksum=105
 production_gui_font_runtime_font_parity_status=pass
 EOF
 
-SIMPLE_BIN=/bin/true \
+SIMPLE_BIN="$mock_simple" \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_env" \
 BUILD_DIR="$output_dir" REPORT_PATH="$output_dir/report.md" \
@@ -43,13 +58,35 @@ sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$f
 grep -qx 'production_gui_font_offload_status=pass' "$output_dir/evidence.env"
 grep -qx 'production_gui_font_offload_fence_handle=104' "$output_dir/evidence.env"
 grep -qx 'production_gui_font_offload_parity_status=pass' "$output_dir/evidence.env"
-grep -qx 'production_gui_font_offload_vector_expected_checksum=105' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_vector_expected_checksum=201' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_vector_actual_checksum=201' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_bitmap_expected_checksum=105' "$output_dir/evidence.env"
 grep -qx 'production_gui_font_offload_bitmap_actual_checksum=105' "$output_dir/evidence.env"
+grep -qx 'production_gui_font_offload_font_readback_checksum=105' "$output_dir/evidence.env"
+
+if [ -x /bin/true ]; then
+    set +e
+    SIMPLE_BIN=/bin/true \
+    PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
+    PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_env" \
+    BUILD_DIR="$output_dir/bin-true" REPORT_PATH="$output_dir/bin-true/report.md" \
+    sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$fixture_root/bin-true.out" 2>&1
+    true_offload_status=$?
+    SIMPLE_BIN=/bin/true \
+    BUILD_DIR="$output_dir/runtime-bin-true" REPORT_PATH="$output_dir/runtime-bin-true/report.md" \
+    sh "$ROOT_DIR/scripts/check/check-production-gui-font-runtime-evidence.shs" >"$fixture_root/runtime-bin-true.out" 2>&1
+    true_runtime_status=$?
+    set -e
+    [ "$true_offload_status" -ne 0 ]
+    [ "$true_runtime_status" -ne 0 ]
+    grep -qx 'production_gui_font_offload_reason=simple-bin-forbidden' "$output_dir/bin-true/evidence.env"
+    grep -qx 'production_gui_font_runtime_reason=simple-bin-forbidden' "$output_dir/runtime-bin-true/evidence.env"
+fi
 
 runtime_cpu="$fixture_root/runtime-cpu.env"
 sed 's/^production_gui_font_runtime_selected_backend=cuda$/production_gui_font_runtime_selected_backend=cpu/; s/^production_gui_font_runtime_font_backend=cuda$/production_gui_font_runtime_font_backend=cpu/' "$runtime_env" >"$runtime_cpu"
 set +e
-SIMPLE_BIN=/bin/true \
+SIMPLE_BIN="$mock_simple" \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_AUTO=0 \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV="$runtime_cpu" \
 BUILD_DIR="$output_dir/cpu" REPORT_PATH="$output_dir/cpu/report.md" \
@@ -66,7 +103,7 @@ cp "$runtime_env" "$auto_output/runtime/evidence.env"
 printf '#!/bin/sh\nexit 17\n' >"$fixture_root/failing-runtime.sh"
 chmod +x "$fixture_root/failing-runtime.sh"
 set +e
-SIMPLE_BIN=/bin/true \
+SIMPLE_BIN="$mock_simple" \
 PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_SCRIPT="$fixture_root/failing-runtime.sh" \
 BUILD_DIR="$auto_output" REPORT_PATH="$auto_output/report.md" \
 sh "$ROOT_DIR/scripts/check/check-production-gui-font-offload-evidence.shs" >"$fixture_root/auto.out" 2>&1
@@ -78,8 +115,8 @@ grep -qx 'production_gui_font_offload_reason=runtime-evidence-generator-failed' 
 grep -qx 'production_gui_font_offload_runtime_evidence_source=auto' "$auto_output/evidence.env"
 grep -qx 'production_gui_font_offload_runtime_evidence_producer_exit=17' "$auto_output/evidence.env"
 
-# CUDA provenance must come from the runtime's opaque handles and the actual
-# font readback, never fixture constants or an invented fence identifier.
+# CUDA, Metal, and OpenCL provenance must come from each runtime's opaque handles
+# and real straight-ARGB font readback, never fixture constants.
 cuda_source="$ROOT_DIR/scripts/check/check-cuda-generated-2d-readback.shs"
 grep -Fq 'cuDriverGetVersion(&driver_version)' "$cuda_source"
 grep -Fq '(uint64_t)(uintptr_t)ctx' "$cuda_source"
@@ -89,5 +126,18 @@ grep -Fq 'cuEventRecord(font_event, 0)' "$cuda_source"
 grep -Fq 'cuEventSynchronize(font_event)' "$cuda_source"
 grep -Fq 'cuda_generated_2d_readback_font_readback_checksum=%llu' "$cuda_source"
 grep -Fq 'cuda_generated_2d_readback_font_fence_handle_kind=cuevent-recorded-after-font-launch' "$cuda_source"
+
+metal_gate="$ROOT_DIR/scripts/check/check-metal-generated-2d-readback.shs"
+metal_harness="$ROOT_DIR/scripts/check/metal_generated_2d_readback_harness.spl"
+grep -Fq 'emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Metal)' "$metal_harness"
+grep -Fq 'font_fence_handle={font_fence_handle}' "$metal_harness"
+grep -Fq 'metal_generated_2d_readback_font_readback_checksum=' "$metal_gate"
+grep -Fq 'mtl-command-buffer-wait-completed' "$metal_gate"
+
+opencl_source="$ROOT_DIR/scripts/check/check-opencl-generated-2d-readback.shs"
+grep -Fq 'simple_font_atlas_composite_v1_u32' "$opencl_source"
+grep -Fq '(uint64_t)(uintptr_t)font_event' "$opencl_source"
+grep -Fq 'opencl_generated_2d_readback_font_readback_checksum=%llu' "$opencl_source"
+grep -Fq 'opencl_generated_2d_readback_font_fence_handle_kind=clevent-wait-for-events' "$opencl_source"
 
 echo "production GUI font runtime provenance contract: PASS"

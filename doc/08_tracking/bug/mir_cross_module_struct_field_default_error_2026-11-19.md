@@ -1,6 +1,6 @@
 # MIR lowering rejects a cross-module struct field default `= None` as `HirExprKind.Error`
 
-- Status: fixed (2026-11-22; caller workaround removed)
+- Status: fix-implemented-verification-pending (root MIR fix landed in `0393bef2378`; caller workaround retained at `src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl:1363` for pinned Phase 2 producers)
 - Found: 2026-11-19 (native Stage 2 full-CLI build, "Phase 4", go-to-end mode)
 - Component: `src/compiler/50.mir` (struct-literal lowering of omitted defaulted fields)
 
@@ -77,3 +77,11 @@ Remove the extra arguments once MIR lowers these defaults.
   2. **Declaration-repository struct default keys (`declaration_inventory_barriers_v1.spl`, `declaration_providers_v1.spl`):** Struct field defaults in declaration-repository mode are now registered under both `composite_layout_key` (`owner::StructName`) and bare `StructName` (and re-installed per module via `install_declaration_local_composite_defaults_v1` and `register_provider_struct_from_declarations_v1`), matching class field defaults.
 - **Workaround removed:** Removed `@workaround bug=mir_cross_module_struct_field_default_error_2026-11-19` and all 24 redundant defaulted field arguments at `src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl` (`host_agent_attach_archived_v4`).
 - **Spec:** Extended `test/01_unit/compiler/mir/provider_default_builtin_none_spec.spl`.
+
+
+## Phase 2 Producer Workaround Retention & Shard Registration (2026-11-27)
+
+- **Workaround site:** `src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl:1363-1379` (`host_agent_attach_archived_v4`, tagged `# @workaround bug=mir_cross_module_struct_field_default_error_2026-11-19 reason=phase2_producer_predates_mir_default_fix`).
+- **Context:** Although the root MIR/HIR fix landed in `0393bef2378` (2026-11-22), commits `c7ad6adc672` and `763e6662d05` retained the explicit 24-field `HostAgentAttachmentV4` defaults because pinned Phase 2 producers (`rc-1.0.0-rc.58` / `rc-1.0.0-rc.63`) predate `0393bef2378`.
+- **Verification (`wa3_shared_bin/simple.exe --mode=interpreter`):** `test/01_unit/compiler/mir/provider_default_builtin_none_spec.spl` 11/11 PASS, `test/01_unit/compiler/50.mir/wa_src_lane2_workaround_audit_spec.spl` 8/8 PASS.
+- **Shard:** `doc/08_tracking/bug/db/mir_cross_module_struct_field_default_error_2026-11-19.sdn` (`status=fix-implemented-verification-pending`, waiting for Phase 2 producer rebuild past `0393bef2378` before retiring the workaround).

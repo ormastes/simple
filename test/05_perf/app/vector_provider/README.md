@@ -36,8 +36,14 @@ duration. Failed samples stop the cohort and retain partial evidence.
 
 ## Input manifest and invocation
 
-`scripts/check/run-item5-matched-app-performance.py --manifest FILE --output
-FRESH_DIRECTORY --samples 30` requires schema
+From p3 on (after a verified bootstrap) run the pure-Simple twin:
+`bin/simple run src/app/item5_perf/main.spl --runner-sha256 SHA256 --manifest FILE
+--output FRESH_DIRECTORY --samples 30`, where `SHA256` is the hash of the
+verified stage binary running it; a missing or mismatched pin exits 2 before
+any side effect. Pre-p2 lanes keep
+`scripts/check/run-item5-matched-app-performance.py` (same flags, no pin).
+`sh scripts/check/check-item5-matched-perf-parity.shs --simple BIN` proves the
+two agree. Both require schema
 `item5-matched-app-performance-v1`, mode `production`, exact 40-character
 `app_source_commit`, `app_source_tree`, `producer_source_commit`,
 `functional_app_source_commit`, local `source_repository`, decimal

@@ -1,0 +1,216 @@
+"""
+## Purpose and audience
+Purpose: Host-independent unit and Draw-IR verification for the 5 Wave 5 W5-5
+Chrome 159 layout engine fixes:
+1. 4x textarea fractional numeric `line-height` device height propagated through
+   wrapping block ancestors (`device-extra-height`, `device-clip`, `device-y-offset`).
+2. Fractional `min-width` / `min-inline-size` (e.g. `87.5px`) preserved as milli-px
+   during flex shrink clamping at both 1x and 4x device scale.
+3. `white-space:nowrap` leading collapsible space dropped after an emitted
+   preceding collapsible space or at line start, while preserved without a
+   preceding space.
+4. Right-aligned trailing collapsible space still hangs across a moving empty
+   inline (`margin-right` / `margin-left` / `border-left`).
+5. Space advance fractional remainder rounded up to Chrome's `1/64` px
+   `LayoutUnit` before inline pen tie-breaking (`layout_unit_ceil_milli(4445) = 4454`).
+
+Audience: browser-engine layout maintainers on any host (does not require Linux
+Liberation/DejaVu TTF fonts).
+"""
+
+"""
+Traceability: textarea_4x_device_height_not_in_ancestor_2026-11-27, web_fractional_min_width_parsed_whole_px_2026-11-27, web_render_nowrap_lead_space_after_space_not_collapsed_2026-11-27, web_render_space_hang_before_moving_empty_inline_2026-11-27, web_render_space_layoutunit_tie_2026-11-27.
+"""
+# @tag: unit, browser_engine, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_element_geometry_lines,
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{
+    layout_device_scale_set,
+    layout_unit_ceil_milli,
+    inline_pen_err_carry_px
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+fn _geom_x_at(lines: [text], path: text) -> i32:
+    for line in lines:
+        val parts = line.split("|")
+        if parts.len() >= 7 and parts[1] == path:
+            return parts[3].to_int()
+    -1
+
+fn _blue_runs_on_row(px: [u32], img_w: i32, y: i32, x0: i32, x1: i32) -> text:
+    var out = ""
+    var x = x0
+    var in_run = false
+    var start = 0
+    while x <= x1:
+        var is_blue = false
+        if x < x1:
+            val v = px[y * img_w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val g = ((v >> 8u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            is_blue = b > 180 and r < 80 and g < 80
+        if is_blue and not in_run:
+            in_run = true
+            start = x
+        if not is_blue and in_run:
+            in_run = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+describe "W5-5 Chrome 159 layout engine fixes (host-independent)":
+    it "Bug 1: propagates 4x textarea fractional line-height extra height to wrapper and clip":
+        val html = "<!doctype html><html><head><style>body{{margin:0}}</style></head><body><div id=\"w\" style=\"background:#ff0;overflow:hidden\"><textarea id=\"t\" rows=\"10\" style=\"margin:0;border:0;padding:0;width:60px;font-size:14px;line-height:1.2;display:block\">alpha beta gamma delta epsilon zeta eta theta</textarea><div id=\"inside\" style=\"height:2px;background:#00f\"></div></div></body></html>"
+        layout_device_scale_set(4)
+        val comp = simple_web_layout_render_html_draw_ir(html, 400, 300)
+        layout_device_scale_set(1)
+        var t_extra = "missing"
+        var w_extra = "missing"
+        var in_clip = "missing"
+        var l1_dy = "missing"
+        var l2_dy = "missing"
+        for batch in comp.batches:
+            for cmd in batch.commands:
+                if cmd.component_id == "t":
+                    for p in cmd.computed_style:
+                        if p.key == "device-extra-height":
+                            t_extra = p.value
+                if cmd.component_id == "w":
+                    for p in cmd.computed_style:
+                        if p.key == "device-extra-height":
+                            w_extra = p.value
+                if cmd.component_id == "inside":
+                    for p in cmd.computed_style:
+                        if p.key == "device-clip":
+                            in_clip = p.value
+                if cmd.kind == "text" and cmd.component_id.ends_with("_line1"):
+                    for p in cmd.computed_style:
+                        if p.key == "device-y-offset":
+                            l1_dy = p.value
+                if cmd.kind == "text" and cmd.component_id.ends_with("_line2"):
+                    for p in cmd.computed_style:
+                        if p.key == "device-y-offset":
+                            l2_dy = p.value
+        expect(t_extra).to_equal("30")
+        expect(w_extra).to_equal("30")
+        expect(in_clip.ends_with(",30")).to_equal(true)
+        expect(l1_dy).to_equal("3")
+        expect(l2_dy).to_equal("6")
+
+    it "Bug 2: preserves fractional min-width across cascade phases and min-inline-size (87.5px) at 1x and 4x":
+        val page = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}.r{{display:flex;width:100px;height:10px}}.r div{{height:10px}}</style></head><body><div class=r><div style=\"flex:0 1 auto;width:88px;min-width:87.5px;background:#00f\"></div><div style=\"flex:0 1 auto;width:100px;background:#f00\"></div></div><div class=r><div style=\"flex:0 1 auto;width:88px;min-inline-size:87.5px;background:#00f\"></div><div style=\"flex:0 1 auto;width:100px;background:#f00\"></div></div></body></html>"
+        val px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, 120, 40, 1, "cpu_simd")
+        expect(_blue_runs_on_row(px1, 120, 5, 0, 120)).to_equal(" 0..87")
+        expect(_blue_runs_on_row(px1, 120, 15, 0, 120)).to_equal(" 0..87")
+        val px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, 120, 40, 4, "cpu_simd")
+        expect(_blue_runs_on_row(px4, 480, 20, 0, 480)).to_equal(" 0..349")
+        expect(_blue_runs_on_row(px4, 480, 60, 0, 480)).to_equal(" 0..349")
+        val cascade_page = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}.w{{display:flex;margin-left:40px;width:200px;height:30px}}.a{{min-width:87.5px;width:88px;margin:0 3.3%;height:20px}}</style></head><body><div class=w><div class=a style=\"background:#00f\"></div><div class=a></div></div><div class=w><div class=a style=\"min-width:85px;background:#00f\"></div><div class=a></div></div><div class=w><div class=a style=\"min-width:auto;background:#00f\"></div><div class=a></div></div></body></html>"
+        val cpx4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(cascade_page, 300, 100, 4, "cpu_simd")
+        expect(_blue_runs_on_row(cpx4, 1200, 40, 0, 1200)).to_equal(" 186..535")
+        expect(_blue_runs_on_row(cpx4, 1200, 160, 0, 1200)).to_equal(" 186..530")
+        expect(_blue_runs_on_row(cpx4, 1200, 280, 0, 1200)).to_equal(" 186..530")
+
+    it "Bug 3: collapses nowrap leading space without culling Draw IR or Engine2D text at x=0":
+        val head = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.b{{display:inline-block;width:10px;height:10px}}</style></head><body><div>"
+        val tail = "<span class=b></span></div></body></html>"
+        val after_sp = head + "<span>x </span><span style=\"white-space:nowrap\"> y</span>" + tail
+        val no_lead = head + "<span>x </span><span style=\"white-space:nowrap\">y</span>" + tail
+        val no_prev_sp = head + "<span>x</span><span style=\"white-space:nowrap\"> y</span>" + tail
+        val no_any_sp = head + "<span>x</span><span style=\"white-space:nowrap\">y</span>" + tail
+        val at_start = head + "<span style=\"white-space:nowrap\"> y</span>" + tail
+        val at_start_nosp = head + "<span style=\"white-space:nowrap\">y</span>" + tail
+        val nested_after_sp = head + "<span>x </span><span><span style=\"white-space:nowrap\"> y</span></span>" + tail
+
+        val x_after_sp = _geom_x_at(simple_web_layout_element_geometry_lines(after_sp, 400, 100), "path:0/2")
+        val x_no_lead = _geom_x_at(simple_web_layout_element_geometry_lines(no_lead, 400, 100), "path:0/2")
+        val x_no_prev_sp = _geom_x_at(simple_web_layout_element_geometry_lines(no_prev_sp, 400, 100), "path:0/2")
+        val x_no_any_sp = _geom_x_at(simple_web_layout_element_geometry_lines(no_any_sp, 400, 100), "path:0/2")
+        val x_at_start = _geom_x_at(simple_web_layout_element_geometry_lines(at_start, 400, 100), "path:0/1")
+        val x_at_start_nosp = _geom_x_at(simple_web_layout_element_geometry_lines(at_start_nosp, 400, 100), "path:0/1")
+        val x_nested = _geom_x_at(simple_web_layout_element_geometry_lines(nested_after_sp, 400, 100), "path:0/2")
+
+        expect(x_after_sp).to_be_greater_than(0)
+        expect(x_after_sp).to_equal(x_no_lead)
+        expect(x_nested).to_equal(x_no_lead)
+        expect(x_at_start).to_equal(x_at_start_nosp)
+        expect(x_no_prev_sp).to_be_greater_than(x_no_any_sp)
+
+        val nw_x0 = "<!doctype html><html><head><style>body{{margin:0;background:#fff;color:#000;font:16px/20px sans-serif}}</style></head><body><div style=\"white-space:nowrap\">   x</div></body></html>"
+        val nw_ref = "<!doctype html><html><head><style>body{{margin:0;background:#fff;color:#000;font:16px/20px sans-serif}}</style></head><body><div style=\"white-space:nowrap\">x</div></body></html>"
+        val ir_nw = simple_web_layout_render_html_draw_ir(nw_x0, 120, 40)
+        var text_cmds = 0
+        for batch in ir_nw.batches:
+            for cmd in batch.commands:
+                if cmd.kind == "text" and cmd.text_value.contains("x"):
+                    text_cmds = text_cmds + 1
+        expect(text_cmds).to_be_greater_than(0)
+        val e2d_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(nw_x0, 120, 40, 1, "cpu_simd")
+        val sw_px = simple_web_layout_render_html_software_pixels(nw_x0, 120, 40)
+        val ref_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(nw_ref, 120, 40, 1, "cpu_simd")
+        var e2d_ink = 0
+        var sw_ink = 0
+        var ref_ink = 0
+        var idx = 0
+        while idx < e2d_px.len():
+            if e2d_px[idx] != 0xFFFFFFFFu32:
+                e2d_ink = e2d_ink + 1
+            if sw_px[idx] != 0xFFFFFFFFu32:
+                sw_ink = sw_ink + 1
+            if ref_px[idx] != 0xFFFFFFFFu32:
+                ref_ink = ref_ink + 1
+            idx = idx + 1
+        expect(e2d_ink).to_be_greater_than(0)
+        expect(e2d_ink).to_equal(sw_ink)
+        expect(e2d_ink).to_equal(ref_ink)
+
+    it "Bug 4: right-aligned trailing space hangs across empty margin or border inlines":
+        val margined = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:300px;text-align:right}}.m{{margin-right:5px}}</style></head><body><div class=r><span>ab </span><span class=m></span></div></body></html>"
+        val margined_nosp = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:300px;text-align:right}}.m{{margin-right:5px}}</style></head><body><div class=r><span>ab</span><span class=m></span></div></body></html>"
+        val bordered = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:300px;text-align:right}}.bd{{border-left:1px solid #000}}</style></head><body><div class=r><span>ab </span><span class=bd></span></div></body></html>"
+        val bordered_nosp = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:300px;text-align:right}}.bd{{border-left:1px solid #000}}</style></head><body><div class=r><span>ab</span><span class=bd></span></div></body></html>"
+        val two_empty = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:400px;text-align:right}}.ml{{margin-left:5px}}.bd{{border-left:1px solid #000}}</style></head><body><div class=r><span>ab </span><span class=ml></span><span class=bd></span></div></body></html>"
+        val two_empty_nosp = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:400px;text-align:right}}.ml{{margin-left:5px}}.bd{{border-left:1px solid #000}}</style></head><body><div class=r><span>ab</span><span class=ml></span><span class=bd></span></div></body></html>"
+        val ib_m = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:300px;text-align:right}}.ib{{display:inline-block;width:10px;height:10px}}.m{{margin-right:5px}}</style></head><body><div class=r><span class=ib></span> <span class=m></span></div></body></html>"
+        val ib_bd = "<!doctype html><html><head><style>body{{margin:0;font:16px/20px sans-serif}}.r{{width:300px;text-align:right}}.ib{{display:inline-block;width:10px;height:10px}}.bd{{border-left:1px solid #000}}</style></head><body><div class=r><span class=ib></span> <span class=bd></span></div></body></html>"
+
+        val gm = simple_web_layout_element_geometry_lines(margined, 500, 100)
+        val gm0 = simple_web_layout_element_geometry_lines(margined_nosp, 500, 100)
+        val gb = simple_web_layout_element_geometry_lines(bordered, 500, 100)
+        val gb0 = simple_web_layout_element_geometry_lines(bordered_nosp, 500, 100)
+        val gt = simple_web_layout_element_geometry_lines(two_empty, 500, 100)
+        val gt0 = simple_web_layout_element_geometry_lines(two_empty_nosp, 500, 100)
+        val gibm = simple_web_layout_element_geometry_lines(ib_m, 500, 100)
+        val gibbd = simple_web_layout_element_geometry_lines(ib_bd, 500, 100)
+
+        expect(_geom_x_at(gm, "path:0/0")).to_equal(_geom_x_at(gm0, "path:0/0"))
+        expect(_geom_x_at(gb, "path:0/0")).to_equal(_geom_x_at(gb0, "path:0/0"))
+        expect(_geom_x_at(gt, "path:0/0")).to_equal(_geom_x_at(gt0, "path:0/0"))
+        expect(_geom_x_at(gm, "path:0/1")).to_equal(295)
+        expect(_geom_x_at(gb, "path:0/1")).to_equal(299)
+        expect(_geom_x_at(gt, "path:0/2")).to_equal(399)
+        expect(_geom_x_at(gibm, "path:0/0")).to_equal(285)
+        expect(_geom_x_at(gibm, "path:0/1")).to_equal(295)
+        expect(_geom_x_at(gibbd, "path:0/0")).to_equal(289)
+        expect(_geom_x_at(gibbd, "path:0/1")).to_equal(299)
+
+    it "Bug 5: space fractional remainder rounds up to 1/64 LayoutUnit before pen tie":
+        expect(layout_unit_ceil_milli(0)).to_equal(0)
+        expect(layout_unit_ceil_milli(-500)).to_equal(0)
+        expect(layout_unit_ceil_milli(4445)).to_equal(4454)
+        expect(layout_unit_ceil_milli(4000)).to_equal(4000)
+        expect(layout_unit_ceil_milli(4015)).to_equal(4016)
+        val sp_err = layout_unit_ceil_milli(4445) - 4000
+        expect(sp_err).to_equal(454)
+        expect(inline_pen_err_carry_px(593 + 2 * (4445 - 4000))).to_equal(1)
+        expect(inline_pen_err_carry_px(593 + 2 * sp_err)).to_equal(2)
+        expect(inline_pen_err_carry_px(578 + 2 * sp_err)).to_equal(1)

@@ -45,7 +45,7 @@ use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_get_attr, be_dom_get_text_content, be_dom_serialize_children,
-    be_dom_set_children, be_dom_path_for_route
+    be_dom_serialize_html, be_dom_set_children, be_dom_path_for_route
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.script.form_api.{form_capture_defaults}
@@ -1436,22 +1436,27 @@ impl BrowserRuntimeState:
         next
 
     me _retire_dom_objects():
+        self._retire_dom_objects_except({})
+
+    me _retire_dom_objects_except(keep_ids: Dict<text, bool>):
         var retired: Dict<text, bool> = {}
         for object_id in self.dom_element_ids:
-            if object_id != self.body_id:
+            if object_id != self.body_id and not (keep_ids.get(object_id.to_text()) ?? false):
                 retired[object_id.to_text()] = true
         for style_id in self.dom_style_ids:
-            retired[style_id.to_text()] = true
-        if self.dom_element_list_id >= 0:
+            if not (keep_ids.get(style_id.to_text()) ?? false):
+                retired[style_id.to_text()] = true
+        if self.dom_element_list_id >= 0 and not (keep_ids.get(self.dom_element_list_id.to_text()) ?? false):
             retired[self.dom_element_list_id.to_text()] = true
         var runtime = self.runtime
         var interpreter = runtime.interpreter
         for object_id in interpreter.host_dom_element_ids:
-            if object_id != self.body_id:
+            if object_id != self.body_id and not (keep_ids.get(object_id.to_text()) ?? false):
                 retired[object_id.to_text()] = true
         for style_id in interpreter.host_dom_style_ids:
-            retired[style_id.to_text()] = true
-        if interpreter.host_dom_element_list_id >= 0:
+            if not (keep_ids.get(style_id.to_text()) ?? false):
+                retired[style_id.to_text()] = true
+        if interpreter.host_dom_element_list_id >= 0 and not (keep_ids.get(interpreter.host_dom_element_list_id.to_text()) ?? false):
             retired[interpreter.host_dom_element_list_id.to_text()] = true
         var store = interpreter.object_store
         var object_ids: [i64] = []
@@ -1824,9 +1829,269 @@ impl BrowserRuntimeState:
         interpreter.host_dom_style_snapshots = self.dom_style_snapshots
         if replaces_document:
             interpreter.host_dom_mutation_generation = 0
+            interpreter.host_dom_mutation_dirty = false
         runtime.interpreter = interpreter
         self.runtime = runtime
         true
+
+    me adopt_host_body_bridge(
+        next_dom: BeDomNode, next_generation: DomDocumentGeneration
+    ) -> bool:
+        val interpreter_ro = self.runtime.interpreter
+        var host_body_idx: i64 = -1
+        var hi = 0
+        while hi < interpreter_ro.host_dom_element_ids.len():
+            if interpreter_ro.host_dom_element_ids[hi] == self.body_id:
+                host_body_idx = hi
+                break
+            hi = hi + 1
+        if host_body_idx < 0:
+            return false
+        val host_count = interpreter_ro.host_dom_element_ids.len()
+        if (
+            host_count != interpreter_ro.host_dom_style_ids.len() or
+            host_count != interpreter_ro.host_dom_id_snapshots.len() or
+            host_count != interpreter_ro.host_dom_class_snapshots.len() or
+            host_count != interpreter_ro.host_dom_value_snapshots.len() or
+            host_count != interpreter_ro.host_dom_style_snapshots.len()
+        ):
+            return false
+
+        var elements: [BeDomNode] = []
+        var stack: [BeDomNode] = [next_dom]
+        var dom_body_idx: i64 = -1
+        while stack.len() > 0:
+            val node = stack.pop()
+            if node.tag_name != "#document" and node.tag_name != "#text":
+                if node.tag_name == "body" and dom_body_idx < 0:
+                    dom_body_idx = elements.len()
+                elements.push(node)
+            var ci = node.children.len() - 1
+            while ci >= 0:
+                stack.push(node.children[ci])
+                ci = ci - 1
+        if dom_body_idx < 0:
+            return false
+        if (host_count - host_body_idx) != (elements.len() - dom_body_idx):
+            return false
+
+        val old_element_index_by_route = self.dom_element_index_by_route
+        val old_element_ids = self.dom_element_ids
+        val old_style_ids = self.dom_style_ids
+        val old_id_snapshots = self.dom_id_snapshots
+        val old_class_snapshots = self.dom_class_snapshots
+        val old_value_snapshots = self.dom_value_snapshots
+        val old_style_snapshots = self.dom_style_snapshots
+        val old_gen = self.dom_generation
+
+        var keep_ids: Dict<text, bool> = {}
+        keep_ids[self.body_id.to_text()] = true
+        if interpreter_ro.host_dom_element_list_id >= 0:
+            keep_ids[interpreter_ro.host_dom_element_list_id.to_text()] = true
+        var ki = host_body_idx
+        while ki < host_count:
+            keep_ids[interpreter_ro.host_dom_element_ids[ki].to_text()] = true
+            keep_ids[interpreter_ro.host_dom_style_ids[ki].to_text()] = true
+            ki = ki + 1
+        if val Some(og) = old_gen:
+            var di: i64 = 0
+            while di < dom_body_idx:
+                val old_key = _browser_dom_route_key(
+                    DomNodeRoute(generation: og, node_id: elements[di].node_id)
+                )
+                val old_idx = old_element_index_by_route.get(old_key) ?? -1
+                if (
+                    old_idx >= 0 and
+                    old_idx < old_element_ids.len() and
+                    old_idx < old_style_ids.len()
+                ):
+                    keep_ids[old_element_ids[old_idx].to_text()] = true
+                    keep_ids[old_style_ids[old_idx].to_text()] = true
+                di = di + 1
+        self._retire_dom_objects_except(keep_ids)
+
+        val root_route = DomNodeRoute(
+            generation: next_generation, node_id: next_dom.node_id
+        )
+        self.dom_generation = Some(next_generation)
+        self.document_route = Some(root_route)
+        self.dom_routes = []
+        self.dom_element_ids = []
+        self.dom_style_ids = []
+        self.dom_id_snapshots = []
+        self.dom_class_snapshots = []
+        self.dom_value_snapshots = []
+        self.dom_style_snapshots = []
+        self.dom_route_index_by_object_id = {}
+        self.dom_element_index_by_route = {}
+
+        var runtime = self.runtime
+        var element_list_id = runtime.interpreter.host_dom_element_list_id
+        if element_list_id < 0:
+            element_list_id = runtime.create_host_object()
+        if element_list_id < 0:
+            return false
+        self.dom_element_list_id = element_list_id
+        val post_host_element_ids = runtime.interpreter.host_dom_element_ids
+        val post_host_style_ids = runtime.interpreter.host_dom_style_ids
+        val post_host_id_snaps = runtime.interpreter.host_dom_id_snapshots
+        val post_host_class_snaps = runtime.interpreter.host_dom_class_snapshots
+        val post_host_value_snaps = runtime.interpreter.host_dom_value_snapshots
+        val post_host_style_snaps = runtime.interpreter.host_dom_style_snapshots
+
+        var idx: i64 = 0
+        while idx < elements.len() and idx < BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
+            val node = elements[idx]
+            val route = DomNodeRoute(
+                generation: next_generation, node_id: node.node_id
+            )
+            var element_id: i64 = -1
+            var style_id: i64 = -1
+            var snap_id = be_dom_get_attr(node, "id")
+            var snap_class = be_dom_get_attr(node, "class")
+            var snap_value = be_dom_get_attr(node, "value")
+            var snap_style = ""
+            if idx < dom_body_idx:
+                var old_idx = -1
+                if val Some(og) = old_gen:
+                    val old_key = _browser_dom_route_key(
+                        DomNodeRoute(generation: og, node_id: node.node_id)
+                    )
+                    old_idx = old_element_index_by_route.get(old_key) ?? -1
+                if (
+                    old_idx >= 0 and
+                    old_idx < old_element_ids.len() and
+                    old_idx < old_style_ids.len()
+                ):
+                    element_id = old_element_ids[old_idx]
+                    style_id = old_style_ids[old_idx]
+                    snap_id = old_id_snapshots[old_idx]
+                    snap_class = old_class_snapshots[old_idx]
+                    snap_value = old_value_snapshots[old_idx]
+                    snap_style = old_style_snapshots[old_idx]
+                else:
+                    element_id = runtime.create_host_object()
+                    style_id = runtime.create_host_object()
+                    runtime.set_host_property(
+                        style_id, "cssText", JsValue.String(v: "")
+                    )
+                    runtime.set_host_property(
+                        element_id, "style", JsValue.Object(id: style_id)
+                    )
+                    runtime.set_host_property(
+                        element_id, "tagName",
+                        JsValue.String(v: node.tag_name.upper())
+                    )
+                    runtime.set_host_property(
+                        element_id, "id", JsValue.String(v: snap_id)
+                    )
+                    runtime.set_host_property(
+                        element_id, "className", JsValue.String(v: snap_class)
+                    )
+                    runtime.set_host_property(
+                        element_id, "value", JsValue.String(v: snap_value)
+                    )
+                    runtime.set_host_property(
+                        element_id, "textContent",
+                        JsValue.String(v: be_dom_get_text_content(node))
+                    )
+                    runtime.set_host_property(
+                        element_id, "innerHTML",
+                        JsValue.String(v: be_dom_serialize_children(node))
+                    )
+            else:
+                val h_idx = host_body_idx + (idx - dom_body_idx)
+                element_id = post_host_element_ids[h_idx]
+                style_id = post_host_style_ids[h_idx]
+                snap_id = post_host_id_snaps[h_idx]
+                snap_class = post_host_class_snaps[h_idx]
+                snap_value = post_host_value_snaps[h_idx]
+                snap_style = post_host_style_snaps[h_idx]
+            if strict_equals(
+                runtime.get_host_property(element_id, "addEventListener"),
+                JsValue.Undefined
+            ):
+                runtime = self._bind_event_target(runtime, element_id)
+            runtime.set_host_property(
+                element_list_id, "{idx}", JsValue.Object(id: element_id)
+            )
+            val route_index = self.dom_routes.len()
+            self.dom_routes.push(route)
+            self.dom_element_ids.push(element_id)
+            self.dom_style_ids.push(style_id)
+            self.dom_id_snapshots.push(snap_id)
+            self.dom_class_snapshots.push(snap_class)
+            self.dom_value_snapshots.push(snap_value)
+            self.dom_style_snapshots.push(snap_style)
+            self.dom_route_index_by_object_id[element_id.to_text()] = route_index
+            self.dom_element_index_by_route[
+                _browser_dom_route_key(route)
+            ] = route_index
+            idx = idx + 1
+
+        runtime.set_host_property(
+            element_list_id, "length",
+            JsValue.Number(v: self.dom_element_ids.len().to_f64())
+        )
+        runtime.set_host_property(
+            self.document_id, "__simple_elements",
+            JsValue.Array(id: element_list_id)
+        )
+        var interpreter = runtime.interpreter
+        interpreter.host_dom_element_list_id = self.dom_element_list_id
+        interpreter.host_dom_element_ids = self.dom_element_ids
+        interpreter.host_dom_style_ids = self.dom_style_ids
+        interpreter.host_dom_id_snapshots = self.dom_id_snapshots
+        interpreter.host_dom_class_snapshots = self.dom_class_snapshots
+        interpreter.host_dom_value_snapshots = self.dom_value_snapshots
+        interpreter.host_dom_style_snapshots = self.dom_style_snapshots
+        runtime.interpreter = interpreter
+        self.runtime = runtime
+        true
+
+    fn clone() -> BrowserRuntimeState:
+        var cloned_listeners: [BrowserDomCallableListener] = []
+        var li = 0
+        while li < self.dom_callable_listeners.len():
+            val item = self.dom_callable_listeners[li]
+            cloned_listeners.push(BrowserDomCallableListener(
+                target_object_id: item.target_object_id,
+                target_route: item.target_route,
+                event_type: item.event_type,
+                callback: item.callback,
+                capture: item.capture,
+                once: item.once
+            ))
+            li = li + 1
+        BrowserRuntimeState(
+            runtime: self.runtime.clone(),
+            window_id: self.window_id,
+            document_id: self.document_id,
+            body_id: self.body_id,
+            location_id: self.location_id,
+            history_id: self.history_id,
+            navigator_id: self.navigator_id,
+            chrome_id: self.chrome_id,
+            session_storage_id: self.session_storage_id,
+            local_storage_id: self.local_storage_id,
+            dom_generation: self.dom_generation,
+            document_route: self.document_route,
+            dom_routes: self.dom_routes,
+            dom_element_ids: self.dom_element_ids,
+            dom_route_index_by_object_id: self.dom_route_index_by_object_id,
+            dom_element_index_by_route: self.dom_element_index_by_route,
+            dom_element_list_id: self.dom_element_list_id,
+            dom_style_ids: self.dom_style_ids,
+            dom_id_snapshots: self.dom_id_snapshots,
+            dom_class_snapshots: self.dom_class_snapshots,
+            dom_value_snapshots: self.dom_value_snapshots,
+            dom_style_snapshots: self.dom_style_snapshots,
+            dom_callable_listeners: cloned_listeners,
+            dom_listener_indices_by_target_event: self.dom_listener_indices_by_target_event,
+            event_prevent_default_fn_id: self.event_prevent_default_fn_id,
+            event_stop_propagation_fn_id: self.event_stop_propagation_fn_id,
+            event_stop_immediate_propagation_fn_id: self.event_stop_immediate_propagation_fn_id
+        )
 
     me _apply_dom_element(node: BeDomNode, index: i32) -> BeDomNode:
         var next = node
@@ -3034,10 +3299,85 @@ impl BrowserSession:
                     )
         Ok(true)
 
+    me _update_history(
+        url: text, html: text, target_index: i32, push_history: bool,
+        request_method: text = "GET", request_body: text = "",
+        request_content_type: text = ""
+    ):
+        var entry = BrowserHistoryEntry.create_with_request(
+            url: self.current_url,
+            title: self.current_title,
+            source_html: html,
+            policy: self.content_security_policy,
+            request_method: request_method,
+            request_body: request_body,
+            request_content_type: request_content_type
+        )
+
+        if target_index >= 0 and target_index < self.history.len():
+            entry.persisted_html = self.history[target_index].persisted_html
+            self.history[target_index] = entry
+            self.current_index = target_index
+            return
+
+        if push_history:
+            self.history = browser_history_push_bounded(
+                self.history, self.current_index, entry
+            )
+            self.current_index = self.history.len() - 1
+
+    fn _current_history_entry_is_committed() -> bool:
+        (
+            not self.is_loading and self.active_load.is_none() and
+            self.current_index >= 0 and
+            self.current_index < self.history.len() and
+            self.document_url == self.current_url and
+            self.history[self.current_index].url == self.current_url
+        )
+
+    me _refresh_current_history():
+        if self._current_history_entry_is_committed():
+            val current = self.history[self.current_index]
+            var entry = BrowserHistoryEntry.create_with_request(
+                url: self.current_url,
+                title: self.current_title,
+                source_html: current.source_html,
+                policy: self.content_security_policy,
+                request_method: current.request_method,
+                request_body: current.request_body,
+                request_content_type: current.request_content_type
+            )
+            entry.persisted_html = current.persisted_html
+            self.history[self.current_index] = entry
+
+    me _snapshot_current_history_for_departure():
+        if self._current_history_entry_is_committed():
+            val current = self.history[self.current_index]
+            val persisted_html = be_dom_serialize_html(self.current_dom)
+            var entry = BrowserHistoryEntry.create_with_request(
+                url: self.current_url,
+                title: self.current_title,
+                source_html: current.source_html,
+                policy: self.content_security_policy,
+                request_method: current.request_method,
+                request_body: current.request_body,
+                request_content_type: current.request_content_type
+            )
+            if (
+                current.source_html.len() <= BROWSER_MAX_RESOURCE_BYTES and
+                persisted_html.len() <= (
+                    BROWSER_MAX_RESOURCE_BYTES - current.source_html.len()
+                )
+            ):
+                entry.persisted_html = persisted_html
+            self.history[self.current_index] = entry
+
     me _flush_runtime_side_effects_and_pump_history() -> Result<bool, text>:
         # Preserve state changed while draining before _sync_from_runtime owns
         # the metadata/DOM transaction. eval_script rolls back one step farther.
-        val previous_runtime_state = self.runtime_state
+        var previous_runtime_state: BrowserRuntimeState? = None
+        if val Some(state) = self.runtime_state:
+            previous_runtime_state = Some(state.clone())
         val previous_pending_requests = self.pending_requests
         val previous_pending_request_head = self.pending_request_head
         val previous_inflight_requests = self.inflight_requests

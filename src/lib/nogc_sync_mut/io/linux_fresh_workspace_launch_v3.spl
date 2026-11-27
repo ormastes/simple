@@ -10,6 +10,7 @@ use std.common.contracts.container.linux_fresh_workspace_inspect_v3.linux_fresh_
 use std.common.contracts.container.configuration_inspect_query_v1.*
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+use std.common.build_manager.group_process_stream_profile_v3.GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3
 
 pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, workspace: LinuxWorkspaceInstalledProfileV1,
         primary: LinuxWorkspacePrimaryV3, invocation_digest: text, uid: i64, gid: i64,
@@ -17,8 +18,8 @@ pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, 
     linux_fresh_workspace_command_validate_v3(value, workspace, primary, invocation_digest, uid, gid)?
     val command = value.command
     if base.profile_v3.is_none(): return Err("fresh-workspace-helper-profile-required")
-    val profile = base.profile_v3.unwrap()
-    if profile.helper_cpu.cpu_millis != command.helper_cpu_millis or base.memory_limit_bytes != command.helper_memory_bytes:
+    var resource = base.profile_v3.unwrap()
+    if resource.helper_cpu.cpu_millis != command.helper_cpu_millis or base.memory_limit_bytes != command.helper_memory_bytes:
         return Err("fresh-workspace-helper-subcharge-mismatch")
     val cpu = epoch.number_v1("partitionCpuMillis")? - epoch.number_v1("reservedCpuMillis")?
     val memory = epoch.number_v1("partitionMemoryBytes")? - epoch.number_v1("reservedMemoryBytes")?
@@ -32,6 +33,12 @@ pub fn linux_fresh_workspace_project_launch_v3(epoch: LinuxFreshEpochProfileV1, 
     request.timeout_ms = command.timeout_ms # CLI budget; never primary lifetime.
     request.child_argv_digest = group_process_child_argv_digest_v2(request.program, args)
     result.request = request
+    # Start only, exactly as linux_fresh_workload_project_launch_v2: the engine forks the container's monitor
+    # from this helper whatever arm built the container (TTY or not), so what its reaped leader left is moved
+    # into the owner-held engine group. Every other action clears it, whatever the base carried; the primary
+    # attach and every read are built on the Inspect projection and therefore never ask.
+    resource.leader_residue_mode = if command.action == LinuxFreshWorkloadActionV2.Start: GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3 else: ""
+    result.profile_v3 = Some(resource)
     Ok(result)
 
 pub fn linux_fresh_workspace_argv_v3(epoch: LinuxFreshEpochProfileV1, workspace: LinuxWorkspaceInstalledProfileV1,
