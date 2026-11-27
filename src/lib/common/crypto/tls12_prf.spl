@@ -29,6 +29,54 @@ mod crypto.hmac
 use std.crypto.types.{crypto_text_to_bytes}
 use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes}
 
+# Byte-level HMAC is [u8]-native and returns a byte-packed [u8]. Positional
+# `list` inputs (integer byte values) are narrowed to [u8] once at entry, and
+# every PRF output is returned as [u8] so it never lands in a word-array slot.
+fn _prf_list_to_u8(src: list) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < src.len():
+        out.push(((src[i] as i64) & 255).to_u8())
+        i = i + 1
+    out
+
+# Shared RFC 5246 §5 P_hash A-chain over [u8]; use_sha384 selects the HMAC.
+fn _p_hash_u8(secret: [u8], seed: [u8], output_len: i64, use_sha384: bool) -> [u8]:
+    var output: [u8] = []
+    if output_len <= 0:
+        return output
+    # A(0) = seed
+    var a: [u8] = []
+    var k = 0
+    while k < seed.len():
+        a.push(seed[k])
+        k = k + 1
+    while output.len() < output_len:
+        # A(i) = HMAC_hash(secret, A(i-1))
+        a = if use_sha384: hmac_sha384_bytes(secret, a) else: hmac_sha256_bytes(secret, a)
+        # block_i = HMAC_hash(secret, A(i) || seed)
+        var hmac_input: [u8] = []
+        var j = 0
+        while j < a.len():
+            hmac_input.push(a[j])
+            j = j + 1
+        j = 0
+        while j < seed.len():
+            hmac_input.push(seed[j])
+            j = j + 1
+        val block: [u8] = if use_sha384: hmac_sha384_bytes(secret, hmac_input) else: hmac_sha256_bytes(secret, hmac_input)
+        j = 0
+        while j < block.len():
+            output.push(block[j])
+            j = j + 1
+    # Truncate to exact output_len
+    var result: [u8] = []
+    var i = 0
+    while i < output_len:
+        result.push(output[i])
+        i = i + 1
+    result
+
 # =============================================================================
 # P_hash with HMAC-SHA-256 (RFC 5246 §5)
 # =============================================================================
@@ -43,42 +91,8 @@ use std.crypto.hmac.{hmac_sha256_bytes, hmac_sha384_bytes}
 #                          HMAC_SHA256(secret, A(2) || seed) || ...
 #
 # reason: positional crypto tls12 prf API
-fn p_hash_sha256(secret: list, seed: list, output_len: i64) -> list:
-    if output_len <= 0:
-        []
-    else:
-        var output = []
-        # A(0) = seed
-        var a = []
-        var k = 0
-        while k < seed.len():
-            a.push(seed.get(k))
-            k = k + 1
-        while output.len() < output_len:
-            # A(i) = HMAC_SHA256(secret, A(i-1))
-            a = hmac_sha256_bytes(secret, a)
-            # block_i = HMAC_SHA256(secret, A(i) || seed)
-            var hmac_input = []
-            var j = 0
-            while j < a.len():
-                hmac_input.push(a.get(j))
-                j = j + 1
-            j = 0
-            while j < seed.len():
-                hmac_input.push(seed.get(j))
-                j = j + 1
-            val block = hmac_sha256_bytes(secret, hmac_input)
-            j = 0
-            while j < block.len():
-                output.push(block.get(j))
-                j = j + 1
-        # Truncate to exact output_len
-        var result = []
-        var i = 0
-        while i < output_len:
-            result.push(output.get(i))
-            i = i + 1
-        result
+fn p_hash_sha256(secret: list, seed: list, output_len: i64) -> [u8]:
+    _p_hash_u8(_prf_list_to_u8(secret), _prf_list_to_u8(seed), output_len, false)
 
 # =============================================================================
 # P_hash with HMAC-SHA-384 (RFC 5246 §5, used by *_SHA384 cipher suites)
@@ -88,42 +102,8 @@ fn p_hash_sha256(secret: list, seed: list, output_len: i64) -> list:
 # Same construction as P_SHA256 but uses HMAC-SHA-384 (48-byte blocks).
 #
 # reason: positional crypto tls12 prf API
-fn p_hash_sha384(secret: list, seed: list, output_len: i64) -> list:
-    if output_len <= 0:
-        []
-    else:
-        var output = []
-        # A(0) = seed
-        var a = []
-        var k = 0
-        while k < seed.len():
-            a.push(seed.get(k))
-            k = k + 1
-        while output.len() < output_len:
-            # A(i) = HMAC_SHA384(secret, A(i-1))
-            a = hmac_sha384_bytes(secret, a)
-            # block_i = HMAC_SHA384(secret, A(i) || seed)
-            var hmac_input = []
-            var j = 0
-            while j < a.len():
-                hmac_input.push(a.get(j))
-                j = j + 1
-            j = 0
-            while j < seed.len():
-                hmac_input.push(seed.get(j))
-                j = j + 1
-            val block = hmac_sha384_bytes(secret, hmac_input)
-            j = 0
-            while j < block.len():
-                output.push(block.get(j))
-                j = j + 1
-        # Truncate to exact output_len
-        var result = []
-        var i = 0
-        while i < output_len:
-            result.push(output.get(i))
-            i = i + 1
-        result
+fn p_hash_sha384(secret: list, seed: list, output_len: i64) -> [u8]:
+    _p_hash_u8(_prf_list_to_u8(secret), _prf_list_to_u8(seed), output_len, true)
 
 # =============================================================================
 # TLS 1.2 PRF wrapper — RFC 5246 §5
@@ -140,38 +120,34 @@ fn p_hash_sha384(secret: list, seed: list, output_len: i64) -> list:
 # a different hash.
 # =============================================================================
 
-# Internal: build (label || seed) byte list once for P_hash.
-fn _label_seed(label: text, seed: list) -> list:
-    val label_bytes = crypto_text_to_bytes(label)
-    var combined = []
+# Internal: build (label || seed) bytes once for P_hash.
+fn _label_seed(label: text, seed: [u8]) -> [u8]:
+    val label_bytes: [u8] = crypto_text_to_bytes(label)
+    var combined: [u8] = []
     var i = 0
     while i < label_bytes.len():
-        combined.push(label_bytes.get(i))
+        combined.push(label_bytes[i])
         i = i + 1
     i = 0
     while i < seed.len():
-        combined.push(seed.get(i))
+        combined.push(seed[i])
         i = i + 1
     combined
 
 # RFC 5246 §5 PRF wrapper.
 # reason: positional crypto tls12 prf API
-fn tls12_prf(secret: list, label: text, seed: list, output_len: i64, use_sha384: bool) -> list:
-    val combined = _label_seed(label, seed)
-    if use_sha384:
-        p_hash_sha384(secret, combined, output_len)
-    else:
-        p_hash_sha256(secret, combined, output_len)
+fn tls12_prf(secret: list, label: text, seed: list, output_len: i64, use_sha384: bool) -> [u8]:
+    _p_hash_u8(_prf_list_to_u8(secret), _label_seed(label, _prf_list_to_u8(seed)), output_len, use_sha384)
 
 # Convenience: TLS 1.2 PRF defaulting to SHA-256.
 # reason: positional crypto tls12 prf API
-fn tls12_prf_sha256(secret: list, label: text, seed: list, output_len: i64) -> list:
-    p_hash_sha256(secret, _label_seed(label, seed), output_len)
+fn tls12_prf_sha256(secret: list, label: text, seed: list, output_len: i64) -> [u8]:
+    tls12_prf(secret, label, seed, output_len, false)
 
 # Convenience: TLS 1.2 PRF using SHA-384 (for *_SHA384 cipher suites).
 # reason: positional crypto tls12 prf API
-fn tls12_prf_sha384(secret: list, label: text, seed: list, output_len: i64) -> list:
-    p_hash_sha384(secret, _label_seed(label, seed), output_len)
+fn tls12_prf_sha384(secret: list, label: text, seed: list, output_len: i64) -> [u8]:
+    tls12_prf(secret, label, seed, output_len, true)
 
 # =============================================================================
 # TLS 1.2 master_secret derivation — RFC 5246 §8.1
@@ -185,17 +161,14 @@ fn tls12_prf_sha384(secret: list, label: text, seed: list, output_len: i64) -> l
 # =============================================================================
 
 # reason: positional crypto tls12 prf API
-fn tls12_master_secret(pre_master: list, client_random: list, server_random: list, use_sha384: bool) -> list:
-    var seed = []
+fn tls12_master_secret(pre_master: list, client_random: list, server_random: list, use_sha384: bool) -> [u8]:
+    var seed: [u8] = _prf_list_to_u8(client_random)
+    val server_u8 = _prf_list_to_u8(server_random)
     var i = 0
-    while i < client_random.len():
-        seed.push(client_random.get(i))
+    while i < server_u8.len():
+        seed.push(server_u8[i])
         i = i + 1
-    i = 0
-    while i < server_random.len():
-        seed.push(server_random.get(i))
-        i = i + 1
-    tls12_prf(pre_master, "master secret", seed, 48, use_sha384)
+    _p_hash_u8(_prf_list_to_u8(pre_master), _label_seed("master secret", seed), 48, use_sha384)
 
 # =============================================================================
 # TLS 1.2 key_block derivation — RFC 5246 §6.3
@@ -207,20 +180,19 @@ fn tls12_master_secret(pre_master: list, client_random: list, server_random: lis
 # Note the order is server_random || client_random for "key expansion"
 # (opposite of "master secret"). The caller specifies output_len based on
 # the negotiated MAC + cipher key + IV sizes.
+#
+# `master_secret` is the [u8] returned by tls12_master_secret.
 # =============================================================================
 
 # reason: positional crypto tls12 prf API
-fn tls12_key_block(master_secret: list, server_random: list, client_random: list, output_len: i64, use_sha384: bool) -> list:
-    var seed = []
+fn tls12_key_block(master_secret: [u8], server_random: list, client_random: list, output_len: i64, use_sha384: bool) -> [u8]:
+    var seed: [u8] = _prf_list_to_u8(server_random)
+    val client_u8 = _prf_list_to_u8(client_random)
     var i = 0
-    while i < server_random.len():
-        seed.push(server_random.get(i))
+    while i < client_u8.len():
+        seed.push(client_u8[i])
         i = i + 1
-    i = 0
-    while i < client_random.len():
-        seed.push(client_random.get(i))
-        i = i + 1
-    tls12_prf(master_secret, "key expansion", seed, output_len, use_sha384)
+    _p_hash_u8(master_secret, _label_seed("key expansion", seed), output_len, use_sha384)
 
 # =============================================================================
 # TLS 1.2 Finished verify_data — RFC 5246 §7.4.9
@@ -235,12 +207,12 @@ fn tls12_key_block(master_secret: list, server_random: list, client_random: list
 # SHA-384(handshake_messages).
 #
 # `is_client=true` uses the "client finished" label, `false` uses
-# "server finished".
+# "server finished". `master_secret` is the [u8] from tls12_master_secret.
 # =============================================================================
 
 # reason: positional crypto tls12 prf API
-fn tls12_finished_verify_data(master_secret: list, transcript_hash: list, is_client: bool, use_sha384: bool) -> list:
+fn tls12_finished_verify_data(master_secret: [u8], transcript_hash: list, is_client: bool, use_sha384: bool) -> [u8]:
     var label = "server finished"
     if is_client:
         label = "client finished"
-    tls12_prf(master_secret, label, transcript_hash, 12, use_sha384)
+    _p_hash_u8(master_secret, _label_seed(label, _prf_list_to_u8(transcript_hash)), 12, use_sha384)

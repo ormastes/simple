@@ -102,18 +102,6 @@ fn _other_salt() -> [u8]:
 fn _empty_bytes() -> [u8]:
     []
 
-fn _u8_to_i64_bytes(src: [u8]) -> [i64]:
-    var out: [i64] = []
-    var i = 0
-    val n = src.len().to_i64()
-    while i < n:
-        out.push(src[i].to_i64())
-        i = i + 1
-    out
-
-fn _hex(src: [u8]) -> text:
-    bytes_to_hex(_u8_to_i64_bytes(src))
-
 fn _error_code(res: Result<Sqlcipher4KeySession, Sqlcipher4KeyError>) -> text:
     # Public surface only: variant -> safe structured code. Never touches key
     # material, so rendering for assertions cannot leak secrets.
@@ -150,7 +138,7 @@ describe "sqlcipher4 key session — exact derivation shape":
         var page_hex = ""
         match opened:
             Ok(session):
-                page_hex = _hex(session.page_key)
+                page_hex = bytes_to_hex(session.page_key)
                 session.close()
             Err(e):
                 page_hex = sqlcipher4_key_error_text(e)
@@ -163,19 +151,19 @@ describe "sqlcipher4 key session — exact derivation shape":
         var session_hex = ""
         match opened:
             Ok(session):
-                session_hex = _hex(session.hmac_key)
+                session_hex = bytes_to_hex(session.hmac_key)
                 # Independent leg: re-derive hmac_key through the PURE-SIMPLE
                 # canonical reference from the session's own page_key and the
                 # module's masked salt. Two independent implementations must
                 # agree byte-for-byte.
-                val page_i64 = _u8_to_i64_bytes(session.page_key)
+                val page_bytes = session.page_key
                 val masked = sqlcipher4_hmac_salt_from_file_salt(_file_salt())
                 var pure_hex = "mask-error"
                 match masked:
                     Ok(masked_bytes):
                         pure_hex = bytes_to_hex(
                             pbkdf2_sha512_bytes(
-                                page_i64, _u8_to_i64_bytes(masked_bytes),
+                                page_bytes, masked_bytes,
                                 SQLCIPHER4_HMAC_KDF_ITER, SQLCIPHER4_HMAC_KEY_BYTES))
                     Err(e):
                         pure_hex = sqlcipher4_key_error_text(e)
@@ -191,10 +179,10 @@ describe "sqlcipher4 key session — exact derivation shape":
         val masked = sqlcipher4_hmac_salt_from_file_salt(_file_salt())
         var mask_hex = ""
         match masked:
-            Ok(masked_bytes): mask_hex = _hex(masked_bytes)
+            Ok(masked_bytes): mask_hex = bytes_to_hex(masked_bytes)
             Err(e): mask_hex = sqlcipher4_key_error_text(e)
         expect(mask_hex).to_equal("3a3b38393e3f3c3d3233303136373435")
-        expect(mask_hex != _hex(_file_salt())).to_equal(true)
+        expect(mask_hex != bytes_to_hex(_file_salt())).to_equal(true)
 
 # ============================================================================
 # Strict rejection — typed errors, never silent adaptation
@@ -263,14 +251,14 @@ describe "sqlcipher4 key session — determinism and separation":
         var second_hmac = ""
         match first:
             Ok(a):
-                first_page = _hex(a.page_key)
-                first_hmac = _hex(a.hmac_key)
+                first_page = bytes_to_hex(a.page_key)
+                first_hmac = bytes_to_hex(a.hmac_key)
                 a.close()
             Err(e): first_page = sqlcipher4_key_error_text(e)
         match second:
             Ok(b):
-                second_page = _hex(b.page_key)
-                second_hmac = _hex(b.hmac_key)
+                second_page = bytes_to_hex(b.page_key)
+                second_hmac = bytes_to_hex(b.hmac_key)
                 b.close()
             Err(e): second_page = sqlcipher4_key_error_text(e)
         expect(first_page).to_equal(second_page)
@@ -286,14 +274,14 @@ describe "sqlcipher4 key session — determinism and separation":
         var other_hmac = ""
         match base:
             Ok(a):
-                base_page = _hex(a.page_key)
-                base_hmac = _hex(a.hmac_key)
+                base_page = bytes_to_hex(a.page_key)
+                base_hmac = bytes_to_hex(a.hmac_key)
                 a.close()
             Err(e): base_page = sqlcipher4_key_error_text(e)
         match other:
             Ok(b):
-                other_page = _hex(b.page_key)
-                other_hmac = _hex(b.hmac_key)
+                other_page = bytes_to_hex(b.page_key)
+                other_hmac = bytes_to_hex(b.hmac_key)
                 b.close()
             Err(e): other_page = sqlcipher4_key_error_text(e)
         expect(base_page != other_page).to_equal(true)

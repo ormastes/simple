@@ -187,22 +187,22 @@ fn _zeroize_i64(buf: [i64]) -> bool:
         i = i + 1
     residual == 0
 
-# Append src[0,n) onto dst (both [i64] byte lists).
-fn _append_i64(dst: [i64], src: [i64], n: i64) -> [i64]:
+# Append src[0,n) onto dst (both [u8] byte buffers).
+fn _append_u8(dst: [u8], src: [u8], n: i64) -> [u8]:
     var i = 0
     while i < n:
-        dst.push(src[i] & 0xFF)
+        dst.push(src[i])
         i = i + 1
     dst
 
 # 1-based page number as 4 bytes LITTLE-endian (SQLCipher CIPHER_FLAG_LE_PGNO).
 # Explicitly NOT the big-endian order used by SQLite structure fields.
-fn _page_number_le32(page_no: i64) -> [i64]:
-    var out: [i64] = []
-    out.push(page_no & 0xFF)
-    out.push((page_no >> 8) & 0xFF)
-    out.push((page_no >> 16) & 0xFF)
-    out.push((page_no >> 24) & 0xFF)
+fn _page_number_le32(page_no: i64) -> [u8]:
+    var out: [u8] = []
+    out.push((page_no & 0xFF).to_u8())
+    out.push(((page_no >> 8) & 0xFF).to_u8())
+    out.push(((page_no >> 16) & 0xFF).to_u8())
+    out.push(((page_no >> 24) & 0xFF).to_u8())
     out
 
 # True when page[0,16) equals the plaintext SQLite magic "SQLite format 3\0".
@@ -227,22 +227,20 @@ fn _has_plaintext_sqlite_magic(page: [u8]) -> bool:
 #   HMAC-SHA512(hmac_key, ciphertext || IV || page_number_le32)
 # ciphertext is the encrypted page body extent (4000 bytes for page 1,
 # 4016 bytes for pages >= 2), NOT including the plaintext salt. Returns the
-# 64-byte MAC as an [i64] byte list.
-fn sqlcipher4_page_hmac(ciphertext: [u8], iv16: [u8], page: Sqlcipher4PageNo, hmac_key32: [u8]) -> [i64]:
-    var input: [i64] = []
-    _append_i64(input, _u8_to_i64(ciphertext), ciphertext.len())
-    _append_i64(input, _u8_to_i64(iv16), iv16.len())
-    _append_i64(input, _page_number_le32(page.value), 4)
-    val key_i64 = _u8_to_i64(hmac_key32)
-    val mac = hmac_sha512_bytes(key_i64, input)
-    _zeroize_i64(key_i64)
-    _zeroize_i64(input)
+# 64-byte MAC as a [u8] buffer.
+fn sqlcipher4_page_hmac(ciphertext: [u8], iv16: [u8], page: Sqlcipher4PageNo, hmac_key32: [u8]) -> [u8]:
+    var input: [u8] = []
+    _append_u8(input, ciphertext, ciphertext.len())
+    _append_u8(input, iv16, iv16.len())
+    _append_u8(input, _page_number_le32(page.value), 4)
+    val mac = hmac_sha512_bytes(hmac_key32, input)
+    _zeroize_u8(input)
     mac
 
 # Constant-time equality for two byte lists. Returns true only for exact
 # matches (same length, same bytes); never branches on content. The length
 # difference itself is not secret.
-fn sqlcipher4_constant_time_eq(a: [i64], b: [i64]) -> bool:
+fn sqlcipher4_constant_time_eq(a: [u8], b: [u8]) -> bool:
     val la = a.len()
     val lb = b.len()
     if la != lb:
@@ -250,7 +248,7 @@ fn sqlcipher4_constant_time_eq(a: [i64], b: [i64]) -> bool:
     var diff = 0
     var i = 0
     while i < la:
-        diff = diff | ((a[i] & 0xFF) ^ (b[i] & 0xFF))
+        diff = diff | ((a[i] as i64) ^ (b[i] as i64))
         i = i + 1
     # The black_box barrier stops the compiler from rewriting the accumulate
     # loop into an early-exit compare (see std.common.crypto.constant_time).
@@ -350,9 +348,9 @@ fn sqlcipher4_encode_page(page: Sqlcipher4PageNo, plaintext_page: [u8], iv16: [u
             _zeroize_i64(ct)
             var m = 0
             while m < SQLCIPHER4_HMAC_BYTES:
-                page[SQLCIPHER4_HMAC_OFFSET + m] = (mac[m] & 0xFF).to_u8()
+                page[SQLCIPHER4_HMAC_OFFSET + m] = mac[m]
                 m = m + 1
-            _zeroize_i64(mac)
+            _zeroize_u8(mac)
             Ok(page)
 
 # Decode and authenticate one 4096-byte page.
@@ -388,16 +386,16 @@ fn sqlcipher4_decode_page(page_no: i64, page: [u8], aes_key32: [u8], hmac_key32:
             while v < SQLCIPHER4_IV_BYTES:
                 iv.push(page[SQLCIPHER4_IV_OFFSET + v])
                 v = v + 1
-            var stored_mac: [i64] = []
+            var stored_mac: [u8] = []
             var m = 0
             while m < SQLCIPHER4_HMAC_BYTES:
-                stored_mac.push(page[SQLCIPHER4_HMAC_OFFSET + m].to_i64() & 0xFF)
+                stored_mac.push(page[SQLCIPHER4_HMAC_OFFSET + m])
                 m = m + 1
             # AUTHENTICATE BEFORE DECRYPT — a mismatch returns here and the
             # ciphertext is never decrypted.
             val expected_mac = sqlcipher4_page_hmac(ct, iv, Sqlcipher4PageNo(value: page_no), hmac_key32)
             val authentic = sqlcipher4_constant_time_eq(expected_mac, stored_mac)
-            _zeroize_i64(expected_mac)
+            _zeroize_u8(expected_mac)
             if not authentic:
                 _zeroize_u8(ct)
                 _zeroize_u8(iv)
