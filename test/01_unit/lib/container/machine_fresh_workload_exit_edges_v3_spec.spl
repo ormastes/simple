@@ -1,0 +1,182 @@
+# Pure DATA fixtures over the two exited-start edge reducers and the shape of their stateful callers:
+#   1. the bounded cohort re-sample that lets an exited-start settle outlast the engine's own transient
+#      helpers, and the cleanup path that drives the same settle;
+#   2. the classification of a workload that exits during association.
+# This does not prove installed custody, the native cohort census or a live Podman run; the stateful
+# paths are exercised only in the guest.
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.{MachineFreshWorkloadInspectV2,
+    MachineFreshWorkloadStartEvidenceV3, machine_fresh_workload_exited_start_confirmed_v3}
+use std.nogc_sync_mut.container.machine_fresh_workload_exit_edges_v3.*
+use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
+
+val EDGE_OCCUPIED = "fresh-epoch-native-preexisting-service-or-subuid-process"
+val EDGE_CHANGED = "fresh-epoch-native-uid-census-process-changed"
+val EDGE_PARTITION = "fresh-population-preexisting-partition-occupant"
+val EDGE_RETRYABLE = "machine-fresh-workload-exited-settlement-cohort-retryable:"
+val EDGE_START_NS = 1000000000
+
+# One text per decision so a case compares exact values, never only a variant.
+fn edge_retry_text_v3(reason: text, attempt: i64, started_ns: i64, now_ns: i64) -> text:
+    match machine_fresh_workload_exited_cohort_retry_v3(reason, attempt, started_ns, now_ns):
+        case MachineFreshWorkloadCohortRetryV3.Resample(delay_ms): "resample:" + str(delay_ms)
+        case MachineFreshWorkloadCohortRetryV3.Exhausted(named): "exhausted:" + named
+        case MachineFreshWorkloadCohortRetryV3.Refuse(named): "refuse:" + named
+
+fn edge_running_v3() -> MachineFreshWorkloadStartEvidenceV3:
+    MachineFreshWorkloadStartEvidenceV3.Running(MachineFreshWorkloadInspectV2(4242, "/machine.slice/libpod-" + "3".repeat(64) + ".scope"))
+
+fn edge_exit_text_v3(first: MachineFreshWorkloadStartEvidenceV3, confirmed: MachineFreshWorkloadStartEvidenceV3,
+        capture_error: text, held: MachineFreshWorkloadHeldSubjectV3) -> text:
+    val decided = machine_fresh_workload_association_exit_v3(first, confirmed, capture_error, held)
+    if decided.is_ok(): "ran-then-exited" else: decided.unwrap_err()
+
+fn edge_body_v3(source: text, anchor: text) -> text:
+    val at = source.index_of(anchor)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of("\n\n")
+    if stop >= 0: tail.substring(0, stop) else: tail
+
+describe "Machine fresh workload exited-start edges V3":
+    it "re-samples the cohort only on a census refusal, on a short growing delay":
+        for reason in [EDGE_OCCUPIED, EDGE_CHANGED, EDGE_PARTITION]:
+            expect(edge_retry_text_v3(reason, 1, EDGE_START_NS, EDGE_START_NS)).to_equal("resample:25")
+            expect(edge_retry_text_v3(reason, 2, EDGE_START_NS, EDGE_START_NS + 30000000)).to_equal("resample:50")
+            expect(edge_retry_text_v3(reason, 3, EDGE_START_NS, EDGE_START_NS + 90000000)).to_equal("resample:100")
+            expect(edge_retry_text_v3(reason, 4, EDGE_START_NS, EDGE_START_NS + 200000000)).to_equal("resample:200")
+            expect(edge_retry_text_v3(reason, 7, EDGE_START_NS, EDGE_START_NS + 900000000)).to_equal("resample:200")
+        step("The last delay never outlives the window")
+        expect(edge_retry_text_v3(EDGE_OCCUPIED, 5, EDGE_START_NS, EDGE_START_NS + 1900000000)).to_equal("resample:100")
+
+    it "ends in a named retryable state that keeps the census reason":
+        for reason in [EDGE_OCCUPIED, EDGE_CHANGED, EDGE_PARTITION]:
+            step("attempt bound")
+            expect(edge_retry_text_v3(reason, 8, EDGE_START_NS, EDGE_START_NS + 500000000)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            expect(edge_retry_text_v3(reason, 9, EDGE_START_NS, EDGE_START_NS)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            step("window bound")
+            expect(edge_retry_text_v3(reason, 2, EDGE_START_NS, EDGE_START_NS + 2000000000)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            expect(edge_retry_text_v3(reason, 2, EDGE_START_NS, EDGE_START_NS + 9000000000)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            step("an unusable clock or attempt count never loops")
+            expect(edge_retry_text_v3(reason, 1, 0, EDGE_START_NS)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            expect(edge_retry_text_v3(reason, 1, EDGE_START_NS, 0)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            expect(edge_retry_text_v3(reason, 1, EDGE_START_NS, EDGE_START_NS - 1)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+            expect(edge_retry_text_v3(reason, 0, EDGE_START_NS, EDGE_START_NS)).to_equal("exhausted:" + EDGE_RETRYABLE + reason)
+
+    it "never re-samples any other refusal, and returns it unchanged":
+        for reason in ["machine-fresh-workload-exited-start-unproven", "machine-fresh-workload-absence-unproven",
+                "machine-fresh-workload-exited-absence-request-binding", "machine-fresh-workload-exited-settlement-uncertain",
+                "machine-fresh-workload-exited-settlement-native-held", "fresh-probe-cohort-host-incarnation-changed",
+                "fresh-probe-cohort-partition-changed", "fresh-probe-population-cleanup-retained",
+                "fresh-epoch-native-uid-census-incomplete", "fresh-epoch-native-uid-census-bound",
+                EDGE_OCCUPIED + "-other", "x" + EDGE_OCCUPIED, EDGE_RETRYABLE + EDGE_OCCUPIED, ""]:
+            expect(edge_retry_text_v3(reason, 1, EDGE_START_NS, EDGE_START_NS)).to_equal("refuse:" + reason)
+            expect(edge_retry_text_v3(reason, 8, EDGE_START_NS, EDGE_START_NS + 9000000000)).to_equal("refuse:" + reason)
+
+    it "classifies a workload that ran and exited during association as a proven exited start":
+        val exited = MachineFreshWorkloadStartEvidenceV3.Exited
+        step("captured subject, the owner's own descriptor shows it empty")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, "", MachineFreshWorkloadHeldSubjectV3.Empty)).to_equal("ran-then-exited")
+        step("captured subject no longer observable: no information, never a contradiction")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, "", MachineFreshWorkloadHeldSubjectV3.Unobservable)).to_equal("ran-then-exited")
+        step("the pid was gone before capture")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, "machine-fresh-workload-native-capture:containment-capture-refused:-3",
+            MachineFreshWorkloadHeldSubjectV3.NotCaptured)).to_equal("ran-then-exited")
+        step("the two-sample predicate agrees, and the exited-exited predicate is unchanged")
+        expect(machine_fresh_workload_ran_then_exited_confirmed_v3(edge_running_v3(), exited)).to_equal(true)
+        expect(machine_fresh_workload_exited_start_confirmed_v3(edge_running_v3(), exited)).to_equal(false)
+
+    it "keeps every ambiguous association failure refused by name":
+        val exited = MachineFreshWorkloadStartEvidenceV3.Exited
+        val never = MachineFreshWorkloadStartEvidenceV3.NeverStarted
+        val capture = "machine-fresh-workload-native-capture:containment-capture-refused:-3"
+        step("the kernel still shows the captured cgroup populated")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, "", MachineFreshWorkloadHeldSubjectV3.Populated)).to_equal(
+            "machine-fresh-workload-exited-during-association-populated")
+        step("still running: a failed capture keeps its own refusal, a clean one is not this path")
+        expect(edge_exit_text_v3(edge_running_v3(), edge_running_v3(), capture, MachineFreshWorkloadHeldSubjectV3.NotCaptured)).to_equal(capture)
+        expect(edge_exit_text_v3(edge_running_v3(), edge_running_v3(), "", MachineFreshWorkloadHeldSubjectV3.Empty)).to_equal(
+            "machine-fresh-workload-association-exit-not-exited")
+        step("the confirmation went backwards")
+        expect(edge_exit_text_v3(edge_running_v3(), never, "", MachineFreshWorkloadHeldSubjectV3.Empty)).to_equal(
+            "machine-fresh-workload-start-evidence-changed")
+        expect(edge_exit_text_v3(edge_running_v3(), never, capture, MachineFreshWorkloadHeldSubjectV3.NotCaptured)).to_equal(
+            "machine-fresh-workload-start-evidence-changed")
+        step("the first sample was not a running one")
+        expect(edge_exit_text_v3(exited, exited, "", MachineFreshWorkloadHeldSubjectV3.NotCaptured)).to_equal(
+            "machine-fresh-workload-association-exit-first-sample")
+        expect(edge_exit_text_v3(never, exited, "", MachineFreshWorkloadHeldSubjectV3.NotCaptured)).to_equal(
+            "machine-fresh-workload-association-exit-first-sample")
+        step("capture outcome and retained subject disagree")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, "", MachineFreshWorkloadHeldSubjectV3.NotCaptured)).to_equal(
+            "machine-fresh-workload-association-exit-inconsistent")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, capture, MachineFreshWorkloadHeldSubjectV3.Empty)).to_equal(
+            "machine-fresh-workload-association-exit-inconsistent")
+        expect(edge_exit_text_v3(edge_running_v3(), exited, capture, MachineFreshWorkloadHeldSubjectV3.Populated)).to_equal(
+            "machine-fresh-workload-exited-during-association-populated")
+        step("the two-sample predicate refuses every other pair")
+        for pair in [(exited, exited), (exited, edge_running_v3()), (edge_running_v3(), edge_running_v3()),
+                (edge_running_v3(), never), (never, exited), (never, never)]:
+            expect(machine_fresh_workload_ran_then_exited_confirmed_v3(pair.0, pair.1)).to_equal(false)
+
+    it "reads the retained subject's population as empty, populated or unobservable":
+        expect(machine_fresh_workload_held_subject_v3(false, None) == MachineFreshWorkloadHeldSubjectV3.NotCaptured).to_equal(true)
+        expect(machine_fresh_workload_held_subject_v3(false, Some(LinuxContainerContainmentPopulationV1.EmptySnapshot)) ==
+            MachineFreshWorkloadHeldSubjectV3.NotCaptured).to_equal(true)
+        expect(machine_fresh_workload_held_subject_v3(true, None) == MachineFreshWorkloadHeldSubjectV3.Unobservable).to_equal(true)
+        expect(machine_fresh_workload_held_subject_v3(true, Some(LinuxContainerContainmentPopulationV1.EmptySnapshot)) ==
+            MachineFreshWorkloadHeldSubjectV3.Empty).to_equal(true)
+        expect(machine_fresh_workload_held_subject_v3(true, Some(LinuxContainerContainmentPopulationV1.Populated)) ==
+            MachineFreshWorkloadHeldSubjectV3.Populated).to_equal(true)
+
+    it "wires the bounded settle and the cleanup settle without a new sample path or a latch":
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        val authority = file_read_text("src/lib/nogc_sync_mut/container/machine_authority_v1.spl")
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        step("Every attempt is the whole unchanged settle; the wrapper samples nothing itself and never latches")
+        val bounded = edge_body_v3(effects, "fn machine_fresh_workload_settle_exited_start_bounded_v3(")
+        expect(bounded).to_contain("machine_fresh_workload_settle_exited_start_v3(storage, custody, state)")
+        expect(bounded).to_contain("machine_fresh_workload_exited_cohort_retry_v3(")
+        expect(bounded.contains("observe_probe_absence_v3")).to_equal(false)
+        expect(bounded.contains("unknown_v2")).to_equal(false)
+        expect(bounded.contains("mark_settled_v2")).to_equal(false)
+        step("Destroy reaches the bounded settle through the transfer")
+        val transfer = edge_body_v3(authority, "pub fn settle_exited_start_v3(")
+        expect(transfer).to_contain("machine_fresh_workload_settle_exited_start_bounded_v3(")
+        step("Cleanup attempts the same settle before the native close, only when the owner's own cleanup is complete")
+        val close = edge_body_v3(authority, "pub fn close_v2() -> MachineFreshWorkloadCloseTurnV2:")
+        val attempt = close.index_of("retained.settle_exited_pending_v3()")
+        expect(attempt >= 0 and attempt < close.index_of("retained.state.close_native_v2()")).to_equal(true)
+        val pending = edge_body_v3(authority, "fn settle_exited_pending_v3(")
+        expect(pending).to_contain("self.state.exited_settlement_pending_v3()")
+        expect(pending).to_contain("self.settle_exited_start_v3()")
+        expect(pending.contains("retain_diagnostic_v1")).to_equal(false)
+        expect(pending.contains("unknown_v2")).to_equal(false)
+        val eligible = edge_body_v3(lifecycle, "fn exited_settlement_pending_v3(")
+        expect(eligible).to_contain("self.exited_start_v3()?")
+        for name in ["\"stop\"", "\"remove\"", "\"absence\""]: expect(eligible).to_contain(name)
+
+    it "wires the association exit through the reducer and keeps a latched owner out of the exited path":
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        val lifecycle = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_lifecycle_v2.spl")
+        step("The exit branch decides in the reducer and releases only on its Ok")
+        val exit = edge_body_v3(effects, "fn workload_association_exit_v3(")
+        expect(exit).to_contain("machine_fresh_workload_association_exit_v3(")
+        expect(exit.index_of("machine_fresh_workload_association_exit_v3(") < exit.index_of("state.release_exited_containment_v3()")).to_equal(true)
+        expect(exit.contains("associated_v2")).to_equal(false)
+        step("Association runs the confirmation once on each path and never associates an exited workload")
+        val associate = edge_body_v3(effects, "fn machine_fresh_workload_associate_v3(")
+        expect(associate).to_contain("workload_association_exit_v3(storage, custody, state, custody_generation, captured.unwrap_err())")
+        expect(associate).to_contain("workload_association_exit_v3(storage, custody, state, custody_generation, \"\")")
+        step("The running-then-exited arm is false for a latched owner or one still holding a descriptor")
+        val proven = edge_body_v3(lifecycle, "pub fn exited_start_v3(")
+        expect(proven).to_contain("machine_fresh_workload_ran_then_exited_confirmed_v3(")
+        expect(proven).to_contain("not state.outcome_unknown")
+        expect(proven).to_contain("state.captured_subject.is_none()")
+        expect(proven).to_contain("state.extra_containment.len() == 0")
+        step("The release drains every retained descriptor and refuses an associated owner")
+        val release = edge_body_v3(lifecycle, "fn release_exited_containment_v3(")
+        expect(release).to_contain("extra_containment")
+        expect(release).to_contain("linux_container_containment_close_v1(")
+        expect(release).to_contain("machine-fresh-workload-exited-release-associated")

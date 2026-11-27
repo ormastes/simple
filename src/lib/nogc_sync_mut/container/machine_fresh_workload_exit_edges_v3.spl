@@ -1,0 +1,86 @@
+# Pure DATA reducers for the two exited-start edges (CPU V2 records only). Neither is authority and
+# neither is a release ground: the charge of an exited start is still released only by
+# machine_fresh_workload_prepare_exited_settlement_v3 on one whole-cohort-empty custody sample.
+#
+# Decisions (2026-11-27, doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md):
+#
+# Edge 1, the census refuses while the engine's own helpers are still exiting. The settle is repeated,
+# whole, on a short bounded schedule, and only for the census refusals named here. Every attempt takes
+# a new full census; nothing is excluded from it, by name or otherwise, because the owner retains no
+# kernel identity for an engine helper. When the bound is reached the caller gets one named retryable
+# refusal that keeps the last census reason. A process that never goes away keeps blocking.
+#
+# Edge 2, the workload exits during association. A first sample `running` followed by a confirmation
+# `exited` is the same two retained owner samples an exited start already rests on, in the other order
+# a container can reach them. It is classified as a proven exited start once the owner has released
+# every descriptor it took, unless the owner's own retained descriptor still shows the cgroup
+# populated. Anything else stays an association failure and is latched by the caller.
+use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.MachineFreshWorkloadStartEvidenceV3
+use std.nogc_sync_mut.io.linux_container_containment_v1.LinuxContainerContainmentPopulationV1
+
+pub enum MachineFreshWorkloadCohortRetryV3:
+    Resample(delay_ms: i64)
+    Exhausted(reason: text)
+    Refuse(reason: text)
+
+# What the owner's own retained captured subject shows. `Unobservable` is no information: the retained
+# descriptors of a subject whose process and cgroup are gone may no longer answer.
+pub enum MachineFreshWorkloadHeldSubjectV3:
+    NotCaptured
+    Empty
+    Populated
+    Unobservable
+
+# The refusals of custody's cohort census that mean "something is still alive in the cohort" or "the
+# process table moved under the scan". Exact names only; every other refusal is returned unchanged.
+# At most 8 settle attempts inside a 2 second window, sleeping 25, 50, 100, then 200 ms between them.
+# @allow(primitive_api) reason: reason is the settle's own refusal text; attempt and the two monotonic stamps are the caller's loop counter and clock samples
+pub fn machine_fresh_workload_exited_cohort_retry_v3(reason: text, attempt: i64, started_ns: i64,
+        now_ns: i64) -> MachineFreshWorkloadCohortRetryV3:
+    if not ["fresh-epoch-native-preexisting-service-or-subuid-process", "fresh-epoch-native-uid-census-process-changed",
+            "fresh-population-preexisting-partition-occupant"].contains(reason):
+        return MachineFreshWorkloadCohortRetryV3.Refuse(reason)
+    val exhausted = MachineFreshWorkloadCohortRetryV3.Exhausted("machine-fresh-workload-exited-settlement-cohort-retryable:" + reason)
+    if attempt < 1 or attempt >= 8 or started_ns <= 0 or now_ns < started_ns: return exhausted
+    val remaining_ms = 2000 - (now_ns - started_ns) / 1000000
+    if remaining_ms <= 0: return exhausted
+    var delay_ms = 200
+    if attempt == 1: delay_ms = 25
+    elif attempt == 2: delay_ms = 50
+    elif attempt == 3: delay_ms = 100
+    MachineFreshWorkloadCohortRetryV3.Resample(if delay_ms < remaining_ms: delay_ms else: remaining_ms)
+
+# @allow(primitive_api) reason: captured says whether the owner retains a captured subject; population is its own observation of it, None when it did not answer
+pub fn machine_fresh_workload_held_subject_v3(captured: bool,
+        population: Option<LinuxContainerContainmentPopulationV1>) -> MachineFreshWorkloadHeldSubjectV3:
+    if not captured: return MachineFreshWorkloadHeldSubjectV3.NotCaptured
+    if population.is_none(): return MachineFreshWorkloadHeldSubjectV3.Unobservable
+    if population.unwrap() == LinuxContainerContainmentPopulationV1.Populated: return MachineFreshWorkloadHeldSubjectV3.Populated
+    MachineFreshWorkloadHeldSubjectV3.Empty
+
+# The other order of the two retained post-Start samples: running, then exited.
+# @allow(primitive_api) reason: predicate over two typed evidence values; bool is the predicate result
+pub fn machine_fresh_workload_ran_then_exited_confirmed_v3(first: MachineFreshWorkloadStartEvidenceV3,
+        confirmed: MachineFreshWorkloadStartEvidenceV3) -> bool:
+    val ran = match first:
+        case MachineFreshWorkloadStartEvidenceV3.Running(_): true
+        case _: false
+    ran and confirmed == MachineFreshWorkloadStartEvidenceV3.Exited
+
+# Ok: the workload ran and exited during association, and the caller may release its descriptors.
+# Err: the association failure to latch. `capture_error` is "" when the subject was captured.
+# @allow(primitive_api) reason: capture_error is the owner's own capture refusal text, empty when the capture succeeded
+pub fn machine_fresh_workload_association_exit_v3(first: MachineFreshWorkloadStartEvidenceV3,
+        confirmed: MachineFreshWorkloadStartEvidenceV3, capture_error: text,
+        held: MachineFreshWorkloadHeldSubjectV3) -> Result<(), text>:
+    val ran = match first:
+        case MachineFreshWorkloadStartEvidenceV3.Running(_): true
+        case _: false
+    if not ran: return Err("machine-fresh-workload-association-exit-first-sample")
+    if confirmed == MachineFreshWorkloadStartEvidenceV3.NeverStarted: return Err("machine-fresh-workload-start-evidence-changed")
+    if confirmed != MachineFreshWorkloadStartEvidenceV3.Exited:
+        return Err(if capture_error != "": capture_error else: "machine-fresh-workload-association-exit-not-exited")
+    if held == MachineFreshWorkloadHeldSubjectV3.Populated: return Err("machine-fresh-workload-exited-during-association-populated")
+    if (capture_error == "") == (held == MachineFreshWorkloadHeldSubjectV3.NotCaptured):
+        return Err("machine-fresh-workload-association-exit-inconsistent")
+    Ok(())

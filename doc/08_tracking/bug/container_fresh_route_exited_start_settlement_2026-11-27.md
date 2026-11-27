@@ -1,7 +1,9 @@
 # Container fresh route: an exited start cannot be settled
 
 - **Status:** FIXED IN SOURCE 2026-11-27 (option 2, decision below). Not live-verified: this host
-  has no installed machine policy. One related timing case stays OPEN, see the last section.
+  has no installed machine policy. The two edge cases left open by that fix (the census refusing on
+  lingering engine helpers, and an exit during association) were decided and fixed in source the same
+  day; see the last two sections. What is still open is listed at the end.
 - **Component:** Simple Container shared API, Linux Podman fresh install route
   (`src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl`,
   `machine_fresh_workload_settlement_v2.spl`,
@@ -102,8 +104,8 @@ caller input. Engine "no such container" is still only a precondition, never the
   Inside custody, a refused census is a plain `Err`; only a descriptor-close failure moves the
   native slot to `cleanup`, which fails that custody closed. That is the existing behaviour of
   the observation, unchanged here.
-- `simple_container_fresh_cleanup_v2` does not settle. If `destroy` was refused, cleanup reports
-  the owner retained until a later `destroy` settles.
+- `simple_container_fresh_cleanup_v2` did not settle when this was written. It now attempts the same
+  settle; see "Edge 1" below.
 - `outcome_unknown`, `uncertain`, any held containment, an unretired helper or a non-idle permit
   refuse by name. Workspace and probe records are refused; they keep their own settles.
 
@@ -126,24 +128,105 @@ caller input. Engine "no such container" is still only a precondition, never the
 dispatch shape. The lifecycle, effects, transfer and provider changes need installed custody and
 are unverified beyond loading.
 
-## Still OPEN: the workload exits during association
+## Edge 1 (decided and fixed in source 2026-11-27): the census refuses on lingering processes
 
-Not fixed here, on purpose. Two sub-cases, both from source:
+**Observed on this host** (rootless podman 4.9.3, the developer's own uid, systemd cgroup manager;
+not the service-uid route). For `busybox /bin/true`, after `podman start` returned, `conmon`,
+`podman container cleanup` and `runc` naming the container id were still alive and were last seen
+143 to 169 ms later (three runs). None was seen after `podman rm`. The rootless pause process
+(`catatonit`, the user's uid, parent 1, its own `podman-pause-*.scope`) was 27 hours old and stayed.
+
+**Chosen:** repeat the whole settle on a short bound, report a named retryable state at the bound,
+and let cleanup drive the same settle.
+
+- `machine_fresh_workload_settle_exited_start_bounded_v3` calls the unchanged
+  `machine_fresh_workload_settle_exited_start_v3` at most 8 times inside 2 seconds, sleeping 25, 50,
+  100, then 200 ms. Every attempt takes a new full cohort census. The release still needs one
+  whole-cohort-empty sample bound to the record; nothing is excluded from the census.
+- Only three refusals are repeated, by exact name, decided by the pure reducer
+  `machine_fresh_workload_exited_cohort_retry_v3`:
+  `fresh-epoch-native-preexisting-service-or-subuid-process`,
+  `fresh-epoch-native-uid-census-process-changed` (any host process exiting under the scan) and
+  `fresh-population-preexisting-partition-occupant`. Every other refusal returns unchanged at once.
+- At the bound the refusal is `machine-fresh-workload-exited-settlement-cohort-retryable:<last census
+  reason>`. Nothing is latched and nothing is retained as a diagnostic; `destroy` or cleanup may be
+  called again.
+- The transfer's `settle_exited_start_v3` now calls the bounded settle, so `destroy` gets it with the
+  provider line unchanged. The transfer's `close_v2` (what `simple_container_fresh_cleanup_v2`
+  reaches) attempts it before the native close, only when the owner is current, the start is a
+  proven exited start, its own Stop, Remove and Absence are completed and the permit is idle
+  (`exited_settlement_pending_v3`). Cleanup never runs a helper. If the attempt refuses, the close
+  reports that refusal instead of the bare `machine-fresh-workload-charge-retained`.
+
+**Why not exclude the engine's helpers.** The owner retains no kernel identity for conmon, the
+cleanup process or a pause process. The only handle is engine text (`.State.ConmonPid`) or a process
+name, and neither may weaken the census. A process the owner cannot prove unrelated keeps blocking.
+
+**Why not only a state the caller drives.** The observed linger is well under a second, so a caller
+would always need a second call for the common case. The named state is kept for what the bound
+does not cover.
+
+**Limit.** A process that never leaves keeps blocking, correctly. If the service-uid route keeps a
+rootless pause process the way this host does, every exited-start settle ends in the retryable
+state and never settles; the bounded repeat cannot fix that. Not known until a live run.
+
+## Edge 2 (decided and fixed in source 2026-11-27): the workload exits during association
+
+Two sub-cases, both from source:
 
 1. **First sample `running`, pid gone before capture.** `capture_subject_v2` fails with
    `machine-fresh-workload-native-capture:<reason>`. A containment owner may already be retained.
-2. **First sample `running`, subject captured, confirmation says `exited`/`stopped`.**
-   `machine_fresh_record_inspect_v3` on the confirmation refuses with
-   `machine-fresh-workload-inspect-identity` (status is not `running`). Containment and the
-   captured subject are retained; custody never opened a subject for it.
+2. **First sample `running`, subject captured, confirmation says `exited`/`stopped`.** The
+   confirmation used to be refused with `machine-fresh-workload-inspect-identity`.
 
-Both return through `after_association_v2`, which latches `outcome_unknown`. Then `wait`/`logs`
-refuse, `exited_start_v3` is false (containment held, or the first sample was not `Exited`), the
-subject settle has no custody subject, and the exited settle refuses with
-`machine-fresh-workload-exited-start-unproven`. The charge stays retained.
+Both returned through `after_association_v2` and latched `outcome_unknown`; `wait`, `logs` and both
+settles then refused and the charge stayed retained.
 
-Why it is not folded into this fix: the exited settle must not cover `outcome_unknown`, and here
-the owner holds a real containment descriptor whose closure was never bound by custody. A fix
-needs its own decision, for example a third owner sample plus closing the captured containment
-against the same cohort census. The window is the gap between two helper runs, so on the live
-spec it is a flake, not a steady failure.
+**Chosen:** classify `running` then `exited` as a proven exited start. It is the same two retained
+owner samples an exited start already rests on, in the other order a container reaches them.
+
+- Sub-case 1 runs the once-only `inspect-confirm` that path had not reached. Sub-case 2 classifies
+  the confirmation it already retains; nothing is run twice.
+- The pure reducer `machine_fresh_workload_association_exit_v3` takes the two evidence values, the
+  capture refusal and the owner's own observation of its retained subject. It accepts only
+  `Running` then `Exited`. A confirmation still `running` keeps the capture refusal; `created` is
+  `machine-fresh-workload-start-evidence-changed`; a retained cgroup still populated is
+  `machine-fresh-workload-exited-during-association-populated`. Every refusal latches as before.
+- A retained subject that no longer answers is no information, not a contradiction: the retained
+  descriptors of a dead process and a removed cgroup are expected to stop answering.
+- On acceptance the owner closes every descriptor it took (`release_exited_containment_v3`). One
+  that does not close refuses and latches. The start is never associated.
+- `exited_start_v3` then holds through a second arm that is false for a latched owner and for one
+  still holding a descriptor. `start` replies `Exited`, `wait` and `logs` are no longer refused by
+  the latch (their own gates are unchanged), and `destroy` reaches the unchanged cohort-census settle. No row and no reducer of the settle changed.
+
+**What the release rests on.** Unchanged: the owner's two retained samples, its own Stop, Remove and
+Absence, and custody's whole-cohort-empty sample. The closed descriptors are not evidence that is
+given up: custody never bound them, and the census covers every process of the service uid, its
+subuid range and the partition.
+
+**Why not a third sample.** The two-sample rule is what an exited start already requires. The launch
+projector admits no `--restart` option, so the engine default (no restart) applies and the container
+does not leave `exited` by itself. The census is the release ground either way.
+
+## Tested (edges)
+
+`test/01_unit/lib/container/machine_fresh_workload_exit_edges_v3_spec.spl` (8 cases): the retry
+reducer (schedule, both bounds, clock failure, every non-census refusal unchanged), the association
+reducer (three accepted forms, every named refusal), the held-subject mapping and the shape of the
+callers. The lifecycle, effects and transfer changes need installed custody; they were loaded by the
+seed but not executed.
+
+## Still open
+
+1. **Live guest run.** None of this was run against installed custody.
+2. **Whether the service-uid route keeps a pause process** (Edge 1, Limit).
+3. **What a retained containment descriptor answers after its subject exits.** On this host the
+   capture itself is refused (`containment-capture-refused:-95`), so it could not be observed. The
+   classification does not depend on the answer unless it is `populated`.
+4. **Subject-closure settles are not attempted by cleanup.** Only the exited-start settle is.
+5. **The cleanup error text is first-wins.** `simple_container_fresh_cleanup_v2` keeps the first
+   error on the retained open value (it did the same with `machine-fresh-workload-charge-retained`).
+   A cleanup that was refused with the retryable state and then succeeds returns closed with that
+   old text, and the live spec treats a non-empty error on a closed cleanup as a failure. Not
+   changed here; it needs its own decision in `api_v2`.
