@@ -907,7 +907,8 @@ fn native_build_parse_shard_count(args: [text]) -> i64:
     # eagerly loads its transitive front-end graph before the shard can claim
     # one source file.  Fan-out equal to --threads therefore turns an innocent
     # `--threads 8` into eight multi-GiB resident heaps.  Keep the default
-    # within the one-process allocation budget for interpreter-mode bootstrap;
+    # within the one-process allocation budget when the operator forces
+    # `SIMPLE_EXECUTION_MODE=interpret` (the clamp below applies only then);
     # a measured host may raise it explicitly.  On the QEMU/container capture
     # hosts, two otherwise healthy parse children reached roughly 1.86 GiB
     # each and were OOM-killed together before completing their cache warm-up.
@@ -1013,7 +1014,7 @@ fn run_parse_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64)
     var base = ["run", "src/app/cli/parse_shard_main.spl"]
     for arg in args:
         base = base.push(arg)
-    # The interpreted parser retains a large front-end graph.  Keep the
+    # An interpreted (opt-in) parser retains a large front-end graph.  Keep the
     # cache warmer below constrained container/QEMU host limits; the shard is
     # best-effort and its only output is content-addressed parser cache files.
     if (env_get("SIMPLE_EXECUTION_MODE") ?? "") == "interpret" and not base.contains("--low-memory"):
@@ -2794,10 +2795,10 @@ fn run_native_build_worker_inner(raw_args: [text], lease: NativeCacheLease) -> i
     # A compiled bootstrap capsule can route the two internal `run` targets
     # itself. Do not label that native subprocess lane as interpreted: doing so
     # clamps parse warming to one child before the memory-aware clamp is even
-    # consulted. Source-run wrappers run their children under the JIT: the
-    # 2026-07-30 "JIT hang" was stdout buffering (not a hang), and forced
-    # interpretation left parse shards at ~400 B/s (measured 2026-11-27: the
-    # same 6 parse shards finish in seconds under JIT).
+    # consulted. Source-run wrappers run their children under the JIT: the parse
+    # phase measured much faster on JIT (2026-11-27, seconds vs >30 min
+    # interpreted). End-to-end JIT termination of the final worker is NOT yet
+    # demonstrated (it hit the 2400 s cap).
     if (mode == nil or mode == "") and not compiled_bootstrap_route:
         env_set("SIMPLE_EXECUTION_MODE", "jit")
     for arg in forwarded_args:
@@ -3271,10 +3272,10 @@ fn native_build_has_help(args: [text]) -> bool:
 # `if entry_point == "": ... return 1`) is logically immediate, but the
 # source-run worker normally runs under the JIT
 # (`run_native_build_worker` sets `SIMPLE_EXECUTION_MODE=jit` when unset
-# outside the compiled bootstrap route) and must first interpret its large `compiler.driver`-
+# outside the compiled bootstrap route) and must first load and compile its large `compiler.driver`-
 # touching module graph before that check's first line ever executes. So an
 # invocation that is DESTINED to fail this check still pays the full,
-# multi-minute interpreter-bootstrap cost before the (correct) error ever
+# multi-minute module-load cost before the (correct) error ever
 # reaches the user. (Previously this was also indistinguishable in practice
 # from a silent hang, because the parent captured the worker's entire
 # stdout/stderr and only printed it once the whole subprocess exited --

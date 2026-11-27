@@ -171,3 +171,6 @@ NOT reached; todo 478 and the plan-doc owed item stay open. JIT therefore fixes 
 final worker; its internal phase is invisible on Windows because its stdout (74 KB) and stderr (1.3 MB) are only returned at exit and
 are discarded on timeout kill. Next: make the worker's output live (or flush captured stdout on timeout) to see which phase
 (HIR serial lowering after "HIR warm-up pool refused: no closure request published", MIR, LLVM) consumes the time.
+
+Follow-up: verify that JIT-run parse shards write front-end cache entries identical to interpreted ones (the lint entry has a known
+JIT wrong-answer precedent, `src/compiler_rust/driver/src/exec_core.rs:1971-1987`); a faster but divergent cache warm would be silent.
