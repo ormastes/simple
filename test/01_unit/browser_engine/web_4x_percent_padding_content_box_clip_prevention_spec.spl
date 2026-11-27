@@ -1,0 +1,72 @@
+"""
+## Purpose and audience
+Purpose: Regression prevention for `web_4x_percent_padding_content_box_clip_ignored_2026-11-27` —
+pinning `background-clip: content-box` and `padding-box` percent-padding painting
+on the Engine2D Draw IR lane (`simple_web_layout_render_html_pixels_engine2d` and
+`simple_web_layout_render_html_pixels_engine2d_at_device_scale`) across plain blocks,
+borders, rounded corners, zero-content boxes, and gradients.
+Audience: browser-engine and Engine2D maintainers.
+"""
+
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 5%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d,
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val BLOCK_CLIP_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:80px;width:20px\"><div style=\"padding-left:50%;height:20px;background:#00f;background-clip:content-box\"></div></div></body></html>"
+val BORDER_PADDING_BOX_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:80px;width:20px\"><div style=\"border-left:2px solid #f00;padding-left:50%;height:20px;background:#00f;background-clip:padding-box\"></div></div></body></html>"
+val BORDER_CONTENT_BOX_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:80px;width:20px\"><div style=\"border-left:2px solid #f00;padding-left:50%;height:20px;background:#00f;background-clip:content-box\"></div></div></body></html>"
+val ROUNDED_CONTENT_BOX_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:80px;width:20px\"><div style=\"padding-left:50%;height:20px;border-radius:4px;background:#00f;background-clip:content-box\"></div></div></body></html>"
+val ZERO_CONTENT_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:80px;width:20px\"><div style=\"padding-left:100%;height:20px;background:#00f;background-clip:content-box\"></div></div></body></html>"
+val GRADIENT_CONTENT_BOX_HTML: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:80px;width:20px\"><div style=\"padding-left:50%;height:20px;background-image:linear-gradient(to right, #00f, #00f);background-clip:content-box\"></div></div></body></html>"
+
+fn _color_runs(px: [u32], width: i32, y: i32, rgb: u32) -> text:
+    var out = ""
+    var in_run = false
+    var run_start = 0
+    var x = 0
+    while x < width:
+        val hit = (px[y * width + x] & 0xFFFFFFu32) == rgb
+        if hit and not in_run:
+            in_run = true
+            run_start = x
+        elif not hit and in_run:
+            in_run = false
+            val r_end = x - 1
+            out = "{out} {run_start}..{r_end}"
+        x = x + 1
+    if in_run:
+        val r_end = width - 1
+        out = "{out} {run_start}..{r_end}"
+    out
+
+describe "4x Engine2D percent padding under background-clip content-box/padding-box":
+    it "clips plain block percent padding to content-box at k=1 and k=4":
+        val px1 = simple_web_layout_render_html_pixels_engine2d(BLOCK_CLIP_HTML, 300, 30, "cpu_simd")
+        val px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(BLOCK_CLIP_HTML, 300, 30, 4, "cpu_simd")
+        expect(_color_runs(px1, 300, 10, 0x0000FFu32)).to_equal(" 90..99")
+        expect(_color_runs(px4, 1200, 40, 0x0000FFu32)).to_equal(" 360..399")
+
+    it "distinguishes border-inset padding-box from content-box with percent padding at k=4":
+        val px_pad = simple_web_layout_render_html_pixels_engine2d_at_device_scale(BORDER_PADDING_BOX_HTML, 300, 30, 4, "cpu_simd")
+        val px_cnt = simple_web_layout_render_html_pixels_engine2d_at_device_scale(BORDER_CONTENT_BOX_HTML, 300, 30, 4, "cpu_simd")
+        # padding-box: border 2px (8 device px: 320..327 red), padding+content (328..399 blue)
+        expect(_color_runs(px_pad, 1200, 40, 0xFF0000u32)).to_equal(" 320..327")
+        expect(_color_runs(px_pad, 1200, 40, 0x0000FFu32)).to_equal(" 328..399")
+        # content-box: border 2px (320..327 red), padding 10px (328..367 white), content (368..399 blue)
+        expect(_color_runs(px_cnt, 1200, 40, 0xFF0000u32)).to_equal(" 320..327")
+        expect(_color_runs(px_cnt, 1200, 40, 0x0000FFu32)).to_equal(" 368..399")
+
+    it "does not leak rounded content-box background into left percent padding at k=4":
+        val px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ROUNDED_CONTENT_BOX_HTML, 300, 30, 4, "cpu_simd")
+        expect(_color_runs(px4, 1200, 40, 0x0000FFu32)).to_equal(" 360..399")
+
+    it "paints no blue pixels when 100% padding fills the entire box at k=4":
+        val px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ZERO_CONTENT_HTML, 300, 30, 4, "cpu_simd")
+        expect(_color_runs(px4, 1200, 40, 0x0000FFu32)).to_equal("")
+
+    it "clips a linear-gradient background to content-box under percent padding at k=4":
+        val px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(GRADIENT_CONTENT_BOX_HTML, 300, 30, 4, "cpu_simd")
+        expect(_color_runs(px4, 1200, 40, 0x0000FFu32)).to_equal(" 360..399")

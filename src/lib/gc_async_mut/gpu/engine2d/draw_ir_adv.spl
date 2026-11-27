@@ -174,6 +174,16 @@ struct Engine2dDrawIrAdvOwnerResult:
     engine: Engine2D
     result: Engine2dDrawIrAdvResult
 
+struct Engine2dDrawIrBgClipRect:
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+    corners: Engine2dDrawIrCornerRadii
+    radius: i32
+    nonuniform: bool
+    clipped: bool
+
 # A strict Vulkan submission receipt deliberately carries no framebuffer
 # pixels.  The retained Engine2D and composition let an evidence caller make
 # the separately timed/recorded readback explicit without replaying DrawIR.
@@ -1147,6 +1157,108 @@ fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrComm
         execution: engine2d_glass_execution_cpu()
     )
 
+fn _engine2d_draw_ir_clamp_bg_corner(r: i32, w: i32, h: i32, inset_x: i32, inset_y: i32) -> i32:
+    if r <= 0 or w <= 0 or h <= 0:
+        return 0
+    var clamped = r
+    if clamped > w / 2:
+        clamped = w / 2
+    if clamped > h / 2:
+        clamped = h / 2
+    val inset = if inset_x > inset_y: inset_x else: inset_y
+    if clamped > inset: clamped - inset else: 0
+
+# Resolve CSS `background-clip` (border-box / padding-box / content-box) in
+# device coordinates, shrinking radii when inset into the padding or content box.
+fn _engine2d_draw_ir_bg_clip_rect(
+    command: DrawIrCommand,
+    x: i32, y: i32, w: i32, h: i32,
+    radius: i32, corners: Engine2dDrawIrCornerRadii, typed_nonuniform: bool
+) -> Engine2dDrawIrBgClipRect:
+    val style = command.computed_style
+    val bg_clip = _engine2d_draw_ir_style_value(style, "background-clip")
+    if bg_clip != "padding-box" and bg_clip != "content-box":
+        return Engine2dDrawIrBgClipRect(
+            x: x, y: y, w: w, h: h, corners: corners, radius: radius,
+            nonuniform: typed_nonuniform, clipped: false)
+    val raw_top_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-top-width"), 0, 0) as i32
+    val raw_right_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-right-width"), 0, 0) as i32
+    val raw_bottom_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-bottom-width"), 0, 0) as i32
+    val raw_left_w = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-left-width"), 0, 0) as i32
+    val top_w = if raw_top_w > 0: raw_top_w else: 0
+    val right_w = if raw_right_w > 0: raw_right_w else: 0
+    val bottom_w = if raw_bottom_w > 0: raw_bottom_w else: 0
+    val left_w = if raw_left_w > 0: raw_left_w else: 0
+    var inset_l = left_w
+    var inset_t = top_w
+    var inset_r = right_w
+    var inset_b = bottom_w
+    var bg_x = x + inset_l
+    var bg_y = y + inset_t
+    var bg_w = w - inset_l - inset_r
+    var bg_h = h - inset_t - inset_b
+    if bg_clip == "content-box":
+        if command.content_rect.present:
+            val origin_x = if command.border_rect.present: command.border_rect.x else: command.x
+            val origin_y = if command.border_rect.present: command.border_rect.y else: command.y
+            inset_l = command.content_rect.x - origin_x
+            inset_t = command.content_rect.y - origin_y
+            if inset_l < 0:
+                inset_l = 0
+            if inset_t < 0:
+                inset_t = 0
+            bg_x = x + inset_l
+            bg_y = y + inset_t
+            bg_w = if command.content_rect.width > 0: command.content_rect.width else: 0
+            bg_h = if command.content_rect.height > 0: command.content_rect.height else: 0
+            inset_r = w - inset_l - bg_w
+            inset_b = h - inset_t - bg_h
+            if inset_r < 0:
+                inset_r = 0
+            if inset_b < 0:
+                inset_b = 0
+        else:
+            val raw_pad_t = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "padding-top"), 0, 0) as i32
+            val raw_pad_r = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "padding-right"), 0, 0) as i32
+            val raw_pad_b = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "padding-bottom"), 0, 0) as i32
+            val raw_pad_l = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "padding-left"), 0, 0) as i32
+            inset_l = left_w + (if raw_pad_l > 0: raw_pad_l else: 0)
+            inset_t = top_w + (if raw_pad_t > 0: raw_pad_t else: 0)
+            inset_r = right_w + (if raw_pad_r > 0: raw_pad_r else: 0)
+            inset_b = bottom_w + (if raw_pad_b > 0: raw_pad_b else: 0)
+            bg_x = x + inset_l
+            bg_y = y + inset_t
+            bg_w = w - inset_l - inset_r
+            bg_h = h - inset_t - inset_b
+    if bg_w < 0:
+        bg_w = 0
+    if bg_h < 0:
+        bg_h = 0
+    val is_clipped = inset_l > 0 or inset_t > 0 or inset_r > 0 or inset_b > 0
+    if not is_clipped:
+        return Engine2dDrawIrBgClipRect(
+            x: x, y: y, w: w, h: h, corners: corners, radius: radius,
+            nonuniform: typed_nonuniform, clipped: false)
+    val outer_corners = if typed_nonuniform: corners else: engine2d_draw_ir_uniform_corners(radius)
+    val bg_corners = Engine2dDrawIrCornerRadii(
+        schema_present: outer_corners.schema_present,
+        valid: true,
+        top_left: _engine2d_draw_ir_clamp_bg_corner(outer_corners.top_left, w, h, inset_l, inset_t),
+        top_right: _engine2d_draw_ir_clamp_bg_corner(outer_corners.top_right, w, h, inset_r, inset_t),
+        bottom_right: _engine2d_draw_ir_clamp_bg_corner(outer_corners.bottom_right, w, h, inset_r, inset_b),
+        bottom_left: _engine2d_draw_ir_clamp_bg_corner(outer_corners.bottom_left, w, h, inset_l, inset_b)
+    )
+    var bg_uniform = engine2d_draw_ir_clamp_uniform_radius(
+        engine2d_draw_ir_uniform_corner_radius(bg_corners), bg_w, bg_h)
+    var bg_nonuniform = bg_uniform < 0
+    if bg_nonuniform and not engine2d_draw_ir_mask_geometry_safe(bg_x, bg_y, bg_w, bg_h):
+        bg_nonuniform = false
+        bg_uniform = 0
+    val bg_radius = if bg_uniform > 0: bg_uniform else: 0
+    Engine2dDrawIrBgClipRect(
+        x: bg_x, y: bg_y, w: bg_w, h: bg_h, corners: bg_corners,
+        radius: bg_radius, nonuniform: bg_nonuniform, clipped: true)
+
 # Render a single HTML/CSS box honestly instead of collapsing it to one flat
 # fill: box-shadow first (behind), then background (linear-gradient beats a solid
 # fill; a corner radius routes the solid fill to a rounded rect), then per-side
@@ -1190,6 +1302,8 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         typed_corners
     else:
         engine2d_draw_ir_uniform_corners(legacy_radius)
+    val bg = _engine2d_draw_ir_bg_clip_rect(
+        command, x, y, w, h, radius, effective_corners, typed_nonuniform)
     # An outer shadow is clipped to outside the border box. Under an opaque
     # box colour the box hides it anyway; otherwise read the box rect before
     # and after the shadows and restore what was under the box.
@@ -1243,7 +1357,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     var hole_rows: [i32] = []
     if knockout_pre.len() > 0:
         hole_rows = engine2d_draw_ir_box_straight_rows(y, w, h, effective_corners)
-    elif (((command.color >> 24) & 0xFFu32) == 0xFFu32 and not typed_nonuniform and
+    elif (not bg.clipped and ((command.color >> 24) & 0xFFu32) == 0xFFu32 and not typed_nonuniform and
         _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") == "" and
         _engine2d_draw_ir_gradient_stop_count(style) < 2 and
         not _engine2d_draw_ir_style_value(style, "background-image").starts_with("linear-gradient(") and
@@ -1299,9 +1413,11 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     # radii) and paints through the layer branch below on any corners.
     val layer_clip_radii = _engine2d_draw_ir_style_value(style, "background-gradient-layer-clip-radii")
     val layered = _engine2d_draw_ir_style_value(style, "background-gradient-layer-geometry") != "" and (layer_clip_radii != "" or (radius <= 0 and not typed_nonuniform))
-    if typed_nonuniform and not layered:
+    if bg.w <= 0 or bg.h <= 0:
+        pass_do_nothing
+    elif bg.nonuniform and not layered:
         eng = engine2d_draw_ir_render_typed_background(
-            eng, command, x, y, w, h, effective_corners)
+            eng, command, bg.x, bg.y, bg.w, bg.h, bg.corners)
     elif layered:
         # A CSS gradient layer list resolved by the producer
         # (`_html_draw_ir_gradient_layer_props`): the painting area, then per
@@ -1340,7 +1456,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         var acc: [u32] = [base_color; if rounded: rw * rh else: 0]
         var layer_buf: [u32] = []
         if not rounded and _engine2d_draw_ir_has_visible_alpha(command.color):
-            eng.draw_rect_filled(x, y, w, h, command.color)
+            eng.draw_rect_filled(bg.x, bg.y, bg.w, bg.h, command.color)
         val layer_tiles = _engine2d_draw_ir_style_value(style, "background-gradient-layer-tiles")
         val layer_repeat = _engine2d_draw_ir_style_value(style, "background-gradient-layer-repeat").split(",")
         var li: i32 = layer_stops.len() as i32 - 1
@@ -1423,7 +1539,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             li = li - 1
         if rounded and rw > 0 and rh > 0:
             eng.draw_image_blend(rx, ry, rw, rh, gradient_pixels_round_clip(acc, rx, ry, rw, rh, shape))
-    elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and radius <= 0:
+    elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and bg.radius <= 0:
         # GAP-2: an N-stop/angled/radial gradient was parsed at CSS-apply
         # time (simple_web_html_layout_renderer_decl_apply.spl) and threaded
         # through as flat style props (paint_layout.spl). Rebuild the stop
@@ -1454,7 +1570,7 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
             # to this command's origin (device-scaled with the command).
             # Layers sit over the box colour.
             if _engine2d_draw_ir_has_visible_alpha(command.color):
-                eng.draw_rect_filled(x, y, w, h, command.color)
+                eng.draw_rect_filled(bg.x, bg.y, bg.w, bg.h, command.color)
             val ox = (x as i64) * 1024
             val oy = (y as i64) * 1024
             eng.draw_radial_gradient_ellipse(
@@ -1468,34 +1584,34 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
                 _engine2d_draw_ir_nth_int(radial_geometry, 3, 0),
                 stop_colors, stop_positions)
         elif is_radial:
-            val cx = x + w / 2
-            val cy = y + h / 2
-            val r = if w > h: w / 2 else: h / 2
+            val cx = bg.x + bg.w / 2
+            val cy = bg.y + bg.h / 2
+            val r = if bg.w > bg.h: bg.w / 2 else: bg.h / 2
             eng.draw_radial_gradient_rect_stops(cx, cy, r, stop_colors, stop_positions)
         else:
             # The box colour sits under the layer (CSS Backgrounds 3), as in
             # the radial branch: a translucent stop shows it, not the page.
             if _engine2d_draw_ir_has_visible_alpha(command.color):
-                eng.draw_rect_filled(x, y, w, h, command.color)
-            eng.draw_gradient_rect_stops(x, y, w, h, stop_colors, stop_positions, angle_deg)
-    elif bg_image.starts_with("linear-gradient(") and radius <= 0:
+                eng.draw_rect_filled(bg.x, bg.y, bg.w, bg.h, command.color)
+            eng.draw_gradient_rect_stops(bg.x, bg.y, bg.w, bg.h, stop_colors, stop_positions, angle_deg)
+    elif bg_image.starts_with("linear-gradient(") and bg.radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
         val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
-        eng.draw_gradient_rect(x, y, w, h, g_from, g_to)
-    elif bg_image.starts_with("linear-gradient(") and radius > 0 and _engine2d_draw_ir_has_visible_alpha(command.color):
+        eng.draw_gradient_rect(bg.x, bg.y, bg.w, bg.h, g_from, g_to)
+    elif bg_image.starts_with("linear-gradient(") and bg.radius > 0 and _engine2d_draw_ir_has_visible_alpha(command.color):
         # No backend owns a rounded-gradient clip yet. Honor the radius with
         # the producer's explicit solid fallback rather than leaking square
         # gradient pixels outside the glass surface.
-        eng.draw_rounded_rect(x, y, w, h, radius, command.color)
+        eng.draw_rounded_rect(bg.x, bg.y, bg.w, bg.h, bg.radius, command.color)
     elif _engine2d_draw_ir_has_visible_alpha(command.color):
-        if radius > 0 and _engine2d_draw_ir_opaque_hairline_border(style, w, h, effective_corners):
+        if not bg.clipped and bg.radius > 0 and _engine2d_draw_ir_opaque_hairline_border(style, w, h, effective_corners):
             # Blink's bleed avoidance shrinks the background half a border
             # width inside an opaque border (kBackgroundBleedShrinkBackground).
             eng = engine2d_draw_ir_render_shrunk_rrect_background(eng, x, y, w, h, command.color, effective_corners)
-        elif radius > 0:
-            eng.draw_rounded_rect(x, y, w, h, radius, command.color)
+        elif bg.radius > 0:
+            eng.draw_rounded_rect(bg.x, bg.y, bg.w, bg.h, bg.radius, command.color)
         else:
-            eng.draw_rect_filled(x, y, w, h, command.color)
+            eng.draw_rect_filled(bg.x, bg.y, bg.w, bg.h, command.color)
     if shadow_admitted:
         eng = engine2d_draw_ir_render_typed_inset_shadows(
             eng, typed_shadows.layers, x, y, w, h, effective_corners)
