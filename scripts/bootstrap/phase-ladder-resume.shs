@@ -6,7 +6,9 @@
 #   sh scripts/bootstrap/phase-ladder-resume.shs <in-dir> <platform>...
 #
 # Looks up each ladder-<platform>-r<rung> artifact by name, newest first,
-# unexpired candidates on this branch (this run included); a cancelled run that
+# unexpired candidates on this branch (this run included) whose source revision
+# is $GITHUB_SHA or an ancestor with no compiler/runtime input change since (see
+# revision_reusable; unknown revision => rebuild fresh); a cancelled run that
 # only finished rung 1 still counts. phase-ladder-step.shs then climbs from the
 # highest <platform>-p<N>/PHASE it finds. Needs GH_TOKEN with actions:read;
 # inspects at most four candidates per rung. Rejected-only legacy artifacts
@@ -51,6 +53,57 @@ rejected_shape() {
   done
   return 0
 }
+# Reuse gate. A handoff is only as good as the source that built it, and the
+# newest unexpired artifact on the branch may predate the target by weeks (run
+# 45799158689 reused a Nov 24 phase-1 compiler that could not parse current
+# source). The revision is the artifact's producing run head_sha. Reuse needs
+# it to be the target commit, or a strict ancestor with no change to a path
+# that feeds the phases. Anything unproven (no sha, no target, compare failure,
+# diverged/behind, file list possibly truncated) means rebuild fresh.
+target_sha=${GITHUB_SHA:-}
+phase_input_path() {
+  case "$1" in
+    scripts/bootstrap/tests/*) return 1 ;;
+    src/compiler/*|src/compiler_rust/*|src/runtime/*|src/lib/*|src/app/cli/*) return 0 ;;
+    config/bootstrap.sdn|scripts/bootstrap/*) return 0 ;;
+  esac
+  return 1
+}
+revision_reusable() {
+  rr_sha=$(gh api "repos/$repo/actions/runs/$1" --jq .head_sha 2> /dev/null) || rr_sha=
+  if [ -z "$target_sha" ]; then
+    echo "phase-ladder-resume: run $1 not reused: target commit unknown" >&2
+    return 1
+  fi
+  case "$rr_sha" in
+    ''|*[!0-9a-fA-F]*)
+      echo "phase-ladder-resume: run $1 not reused: source revision unknown" >&2
+      return 1 ;;
+  esac
+  [ "$rr_sha" = "$target_sha" ] && return 0
+  rr_status=$(gh api "repos/$repo/compare/$rr_sha...$target_sha?per_page=100" --jq .status 2> /dev/null) || rr_status=
+  case "$rr_status" in
+    ahead|identical) ;;
+    *) echo "phase-ladder-resume: run $1 not reused: $rr_sha is not an ancestor of $target_sha (compare=${rr_status:-unknown})" >&2
+       return 1 ;;
+  esac
+  rr_files=$(gh api --paginate "repos/$repo/compare/$rr_sha...$target_sha?per_page=100" --jq '.files[].filename' 2> /dev/null) || {
+    echo "phase-ladder-resume: run $1 not reused: cannot list changes since $rr_sha" >&2
+    return 1
+  }
+  # GitHub caps the compare file list at 300; at the cap it may be truncated.
+  if [ "$(printf '%s\n' "$rr_files" | grep -c .)" -ge 300 ]; then
+    echo "phase-ladder-resume: run $1 not reused: change list since $rr_sha may be truncated" >&2
+    return 1
+  fi
+  for rr_file in $rr_files; do
+    if phase_input_path "$rr_file"; then
+      echo "phase-ladder-resume: run $1 not reused: $rr_file changed since $rr_sha" >&2
+      return 1
+    fi
+  done
+  return 0
+}
 resume_status=0
 for platform in "$@"; do
   platform_error=0
@@ -75,6 +128,10 @@ for platform in "$@"; do
     fi
     candidate_count=0
     for run in $runs; do
+      # Stale or unprovable source revision: not a candidate, not an error --
+      # the ladder rebuilds that phase fresh. Checked before the candidate limit
+      # so old artifacts cannot crowd out a usable one.
+      revision_reusable "$run" || continue
       if [ "$candidate_count" -ge 4 ]; then
         echo "phase-ladder-resume: candidate limit reached for $name; older handoffs remain uninspected" >&2
         platform_error=1
