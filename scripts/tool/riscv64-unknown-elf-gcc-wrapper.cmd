@@ -1,4 +1,4 @@
 @echo off
 setlocal EnableExtensions
-python "%~dp0riscv64-unknown-elf-tool-wrapper.py" gcc %*
+"%~dp0..\..\bin\simple.exe" run "%~dp0riscv64-unknown-elf-tool-wrapper.spl" -- gcc %*
 exit /b %ERRORLEVEL%

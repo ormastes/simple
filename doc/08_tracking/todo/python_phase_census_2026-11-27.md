@@ -87,9 +87,9 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/resource/freebsd-reaper-regression.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
 | `scripts/test/test-arm32-authenticated-syscall-abi.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
 | `scripts/test/test-darwin-footprint-guard.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` | P3_PLUS_ONLY | scripts/tool/renderdoc-export-events.shs test/02_integration/tool/renderdoc_exporter_contract_test.shs | port blocked: runs inside qrenderdoc embedded Python |
-| `scripts/tool/renderdoc-target-control-trigger.py` | P3_PLUS_ONLY | scripts/check/check-renderdoc-chrome-target-control.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | P3_PLUS_ONLY | scripts/tool/riscv64-unknown-elf-gcc-wrapper.cmd scripts/tool/riscv64-unknown-elf-gxx-wrapper.cmd | dev toolchain wrapper (exec by .cmd shims) |
+| `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` | P3_PLUS_ONLY | scripts/tool/renderdoc-export-events.shs test/02_integration/tool/renderdoc_exporter_contract_test.shs | EXCEPTION (owner default 2026-11-27): runs inside qrenderdoc embedded Python; stays Python |
+| `scripts/tool/renderdoc-target-control-trigger.py` | P3_PLUS_ONLY | scripts/check/check-renderdoc-chrome-target-control.shs | EXCEPTION (owner default 2026-11-27): runs inside qrenderdoc embedded Python (`--ui-python`, `import renderdoc`); stays Python |
+| `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | PORTED 2026-11-27 | scripts/tool/riscv64-unknown-elf-{gcc,gxx}-wrapper.cmd | now `scripts/tool/riscv64-unknown-elf-tool-wrapper.spl` (+ `scripts/tool/lib/riscv64_tool_wrapper_policy.spl`, spec `test/01_unit/scripts/riscv64_tool_wrapper_spec.spl`); `.py` deleted |
 | `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
 | `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
 | `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
@@ -106,7 +106,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `test/02_integration/app/fixtures/lsp_stdio_live_protocol_linux_evidence.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
 | `test/02_integration/app/lsp_native_stdio_protocol_test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
 | `test/02_integration/app/mcp_native_stdio_protocol_test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py` | P3_PLUS_ONLY | - | port blocked: exercises kernel_wrapper.py |
+| `test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py` | P3_PLUS_ONLY | - | EXCEPTION (owner default 2026-11-27): Jupyter kernel protocol host is Python by protocol; stays Python |
 | `test/05_perf/startup/class_a/fixtures/class_a.py` | P3_PLUS_ONLY | scripts/check/check-startup-class-a-matrix.shs test/05_perf/startup/class_a/startup_class_a_schema_contract_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/database/sqlcipher4/devhub1_crypto_oracle.py` | P3_PLUS_ONLY | test/02_integration/app/devhub/messenger/devhub1_oss_interop_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/database/sqlcipher4/gen_boundary_oracles.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
@@ -124,8 +124,8 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `test/perf/webserver/live_h2load_compare.py` | P3_PLUS_ONLY | test/05_perf/webserver/live_h2load_compare.shs test/perf/webserver/test_live_h2load_compare.py | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/perf/webserver/live_static_compare.py` | P3_PLUS_ONLY | test/01_unit/perf/live_static_compare_contract_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/perf/webserver/test_live_h2load_compare.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `tools/jupyter/kernel_wrapper.py` | P3_PLUS_ONLY | scripts/test/jupyter-docker-test.shs test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py test/03_system/tools/jupyter/jupyter_kernel_install_system_spec.spl +5 | port blocked: Jupyter kernel protocol host is Python |
-| `tools/jupyter/labextension/simple_labextension/__init__.py` | P3_PLUS_ONLY | - | port blocked: JupyterLab package shim |
+| `tools/jupyter/kernel_wrapper.py` | P3_PLUS_ONLY | scripts/test/jupyter-docker-test.shs test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py test/03_system/tools/jupyter/jupyter_kernel_install_system_spec.spl +5 | EXCEPTION (owner default 2026-11-27): Jupyter kernel protocol host is Python by protocol; stays Python |
+| `tools/jupyter/labextension/simple_labextension/__init__.py` | P3_PLUS_ONLY | - | EXCEPTION (owner default 2026-11-27): Jupyter kernel protocol host is Python by protocol; stays Python |
 
 ## Follow-up PR plan
 

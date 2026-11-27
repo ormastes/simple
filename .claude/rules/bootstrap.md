@@ -425,6 +425,11 @@ pre-p2 path, gains a Simple twin, and every p3+ caller uses the twin
 (duplication accepted; parity on identical inputs + runtime measured). Do not
 change hash pins of pre-p2 trust gates. Census:
 `doc/08_tracking/todo/python_phase_census_2026-11-27.md`.
+Documented Python exceptions (owner default 2026-11-27, embedded-host or
+protocol-bound, not ported): `scripts/tool/renderdoc-*.py` run inside
+qrenderdoc's embedded interpreter (`import renderdoc`; no Simple host exists),
+and `tools/jupyter/` (kernel wrapper, labextension shim, transport helper) is
+Python because the Jupyter kernel protocol host is Python.
 
 ## Seed build script (2026-11-24)
 

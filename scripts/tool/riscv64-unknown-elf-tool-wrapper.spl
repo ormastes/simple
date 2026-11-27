@@ -1,0 +1,37 @@
+# Launcher behind riscv64-unknown-elf-{gcc,gxx}-wrapper.cmd: forwards the line to
+# the MSYS2 riscv64 GNU tool minus clang-only flags (see lib/riscv64_tool_wrapper_policy.spl).
+# Pure-Simple port of riscv64-unknown-elf-tool-wrapper.py. Usage:
+#   bin/simple run scripts/tool/riscv64-unknown-elf-tool-wrapper.spl gcc|gxx [args...]
+# Output of the child is relayed after it exits (stdout, then stderr); the exit
+# code is the child's. A tool that cannot be spawned exits 1 with the reason on stderr.
+
+use std.nogc_sync_mut.io_runtime.{get_args, exit, file_exists, env_get, process_run}
+use std.nogc_sync_mut.io.process_ops.{rt_stderr_write}
+use std.nogc_sync_mut.sffi.diag.{print_raw}
+use scripts.tool.lib.riscv64_tool_wrapper_policy.{resolve_tool_path, default_tool_path, tool_override_env, filtered_args, is_tool_kind}
+
+fn main():
+    val all = get_args()
+    # all[0] is this script; a "--" separator may follow when launched via `run -- `.
+    var rest: [text] = []
+    var i = 1
+    while i < all.len():
+        rest.push(all[i])
+        i = i + 1
+    if rest.len() > 0 and rest[0] == "--":
+        rest = rest.slice(1, rest.len())
+    if rest.len() < 1 or not is_tool_kind(rest[0]):
+        rt_stderr_write("usage: riscv64-unknown-elf-tool-wrapper.spl gcc|gxx [args...]\n")
+        exit(2)
+    val kind = rest[0]
+    val tool = resolve_tool_path(kind, env_get(tool_override_env(kind)), file_exists(default_tool_path(kind)))
+    val (out, err, code) = process_run(tool, filtered_args(rest.slice(1, rest.len())))
+    if out.len() > 0:
+        print_raw(out)
+    if err.len() > 0:
+        rt_stderr_write(err)
+    if code < 0:
+        exit(1)
+    exit(code)
+
+main()
