@@ -1,7 +1,7 @@
 # Two perf specs blocked: no self-hosted Simple binary, and an unregistered font fixture (2026-08-18)
 
-Status: BLOCKED 2026-11-11 (P3 lane ne19 triage, release/1.0.0 worktree) —
-font-fixture blocker fixed in-tree; remaining blocker is deployment of a
+Status: fix-implemented-verification-pending (updated 2026-11-27; prior 2026-11-11 BLOCKED note below) —
+registered test font-fixture provenance support and unit verification implemented; remaining blocker is deployment of a
 pure-Simple self-hosted binary plus host-pinned baseline env, both outside a
 P3 lane's grant.
 Lane: lane-test-fix worktree, `bin/simple` -> shared Rust seed (rebuild forbidden in that lane)
@@ -145,3 +145,16 @@ Tip `79445b063c4`, Rust seed sha256 prefix `fb80903917d6d5f5`.
 - **Still blocked:** there is no deployed pure-Simple `bin/release/<triple>/simple`
   (`bin/release` is absent), and the host-pinned bitmap baseline env is not
   set.
+
+## 2026-11-27 implementation — Wave 5 Lane W5-1 (`fix-implemented-verification-pending`)
+
+- Replaced the unmanaged disk-write workaround in `test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl` with a proper provenance-gated test font fixture registration API:
+  - `src/lib/common/encoding/font_registry.spl`: added `_registered_font_fixture_candidates`, `_fixture_default_axes_for_blob` (supporting both static `"static"` and `fvar` variable TTF fixtures), `register_selected_font_fixture`, and `clear_registered_selected_font_fixtures`, preserving the 16-asset production `selected_font_asset_candidates()` catalog, rejecting unmanaged paths (`"unmanaged"`), and blocking bundled-path shadowing (`"reserved-selected-path"`).
+  - `src/lib/{nogc_sync_mut,common,nogc_async_mut,gc_async_mut}/text_layout/font_renderer.spl`: added and re-exported `font_renderer_register_font_fixture_bytes`, cleared fixture registrations in `_font_renderer_reset_registered_selected_bytes_for_test()`, and updated `font_renderer_register_selected_bytes` to refresh blobs on path re-registration.
+  - `test/fixtures/fonts/simple_2d_vector/font_fixture.spl`: added `SIMPLE_2D_ASCII_FIXTURE_PATH`, `SIMPLE_2D_LATIN1_FIXTURE_PATH`, `register_simple_2d_ascii_font_fixture`, and `register_simple_2d_latin1_font_fixture`.
+  - `test/01_unit/lib/common/text_layout/font_fixture_registration_spec.spl`: new unit verification spec for provenance registration, bit-flip/truncation/shadow rejection, and `Engine2D.load_font_bytes` / `FontRenderer` end-to-end rendering.
+- Verified with `simple.exe test --mode=interpreter`:
+  - `test/01_unit/lib/common/text_layout/font_fixture_registration_spec.spl`: `2 total, 2 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/common/encoding/font_registry_metadata_path_spec.spl`: `2 total, 2 passed, 0 failed` (`EXIT=0`).
+  - `test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl` (provenance-gated `load_font_bytes`): `cold_p50_ns=50076500 warm_p50_ns=42123300 bitmap_p50_ns=51518900 bitmap_checksum=772523490 warm_hits=651/217 warm_misses=0 warm_rasterizations=0 cache_entries=2 cache_bytes=336 checksum=562346002 checksum_mismatches=0` (`EXIT=1` on remaining interpreter cold/warm `4212330000 < 3755737501`, `651 == 217` tracked separately under `vector_font_perf_spec_masked_reds_2026-11-15.md`, and 4 unset `SIMPLE_2D_BITMAP_BASELINE_*` assertions).
+- `waiting-for:` Deployed pure-Simple `bin/release/<triple>/simple` binary for `multicore_green_fanout_spec.spl` (`expect(stderr).to_equal("")`) and native throughput of `simple_2d_vector_fonts_perf_spec.spl`, plus host-pinned `SIMPLE_2D_BITMAP_BASELINE_NS` / `SIMPLE_2D_BITMAP_BASELINE_CHECKSUM`.

@@ -2899,11 +2899,54 @@ fn _css_ch(s: text, i: i64) -> text:
 fn _css_is_digit_at(s: text, i: i64) -> bool:
     i < s.byte_len() and dec_val(_css_ch(s, i)) < 10
 
-# The CSS <number> at `start` of `s` (lower-case) as [milli, end], truncated
-# to milli: `[+-]? (D+ (. D+)? | . D+) ([eE] [+-]? D+)?`. `end == start` when
-# there is none. `e` is an exponent only before `[+-]?digit`, so `1em` and
-# `2ex` keep their unit.
-fn _css_number_milli_at(s: text, start: i64) -> [i64]:
+# The CSS length units Chrome 159 parses (Values 4 + container units),
+# lower-cased. A margin with any other letter run is dropped (`5pxx`, `5x`).
+val CSS_LENGTH_UNITS: [text] = [
+    "px", "in", "cm", "mm", "q", "pt", "pc",
+    "em", "rem", "ex", "rex", "ch", "rch", "cap", "rcap", "ic", "ric", "lh", "rlh",
+    "vw", "vh", "vi", "vb", "vmin", "vmax",
+    "svw", "svh", "svi", "svb", "svmin", "svmax",
+    "lvw", "lvh", "lvi", "lvb", "lvmin", "lvmax",
+    "dvw", "dvh", "dvi", "dvb", "dvmin", "dvmax",
+    "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax"
+]
+
+# Largest length magnitude in milli-px. Chrome's LayoutUnit tops out at
+# 33554431.98 px (Chrome 159: `width:1e10px` is 33554428 wide), so a longer
+# length clamps here instead of wrapping when a caller narrows it to i32.
+val CSS_LENGTH_MAX_MILLI: i64 = 33554431000
+# calc() works in micro (1e-6) units so a factor keeps its fourth decimal
+# (`calc(48px * 0.6667)` is 32.0016, not 31.968); `infinity` and every
+# intermediate clamp to +-1e18.
+val CSS_CALC_INFINITY: i64 = 1000000000000000000
+# Chrome 159 drops a calc() nested deeper than 100 levels (calc( is level 1).
+val CSS_CALC_MAX_DEPTH: i64 = 100
+# calc() operand kinds: a <number>, a <length>, or a function / var() whose
+# type is only known after substitution (compatible with both).
+val CSS_CALC_KIND_NUMBER: i64 = 0
+val CSS_CALC_KIND_LENGTH: i64 = 1
+val CSS_CALC_KIND_UNKNOWN: i64 = 2
+
+fn _css_clamp_milli(v: i64) -> i64:
+    if v > CSS_LENGTH_MAX_MILLI:
+        return CSS_LENGTH_MAX_MILLI
+    if v < 0 - CSS_LENGTH_MAX_MILLI:
+        return 0 - CSS_LENGTH_MAX_MILLI
+    v
+
+fn _css_calc_clamp(x: f64) -> i64:
+    if x >= 1000000000000000000.0:
+        return CSS_CALC_INFINITY
+    if x <= -1000000000000000000.0:
+        return 0 - CSS_CALC_INFINITY
+    x as i64
+
+# The CSS <number> at `start` of `s` (lower-case) as [value, end], scaled by
+# 10^`frac` (3 = milli, 6 = micro) and truncated:
+# `[+-]? (D+ (. D+)? | . D+) ([eE] [+-]? D+)?`. `end == start` when there is
+# none. `e` is an exponent only before `[+-]?digit`, so `1em` and `2ex` keep
+# their unit. The magnitude clamps at 10^(12 + frac).
+fn _css_number_scaled_at(s: text, start: i64, frac: i64) -> [i64]:
     val n = s.byte_len()
     var i = start
     var negative = false
@@ -2947,11 +2990,16 @@ fn _css_number_milli_at(s: text, start: i64) -> [i64]:
                 j = j + 1
             scale = scale + (if exp_negative: 0 - e else: e)
             i = j
-    var p = scale + 3
+    var limit: i64 = 1000000000000
+    var f = 0
+    while f < frac:  # cpu-lane-loop-ok: at most 6 steps
+        limit = limit * 10
+        f = f + 1
+    var p = scale + frac
     var value = mant
-    while p > 0 and value != 0:  # cpu-lane-loop-ok: bounded by the 10^15 clamp
-        if value > 100000000000000:
-            value = 1000000000000000
+    while p > 0 and value != 0:  # cpu-lane-loop-ok: bounded by the clamp
+        if value > limit / 10:
+            value = limit
             p = 0
         else:
             value = value * 10
@@ -2959,7 +3007,12 @@ fn _css_number_milli_at(s: text, start: i64) -> [i64]:
     while p < 0 and value != 0:  # cpu-lane-loop-ok: bounded by the digit count of `value`
         value = value / 10
         p = p + 1
+    if value > limit:
+        value = limit
     [if negative: 0 - value else: value, i]
+
+fn _css_number_milli_at(s: text, start: i64) -> [i64]:
+    _css_number_scaled_at(s, start, 3)
 
 # `v` milli of `unit` as milli-px, or CSS_LENGTH_NONE. A unitless number reads
 # as px only with `allow_bare` (the legacy margin/width quirk); 0 always does.
@@ -2998,10 +3051,25 @@ fn _css_paren_close(s: text, open: i64) -> i64:
         i = i + 1
     -1
 
-# calc() operand: `( sum )`, `calc( sum )`, another function (unresolved), or
-# a number with an optional unit. Result rows are [status, value, kind, end]:
-# kind 0 = <number> (milli), 1 = <length> (milli-px).
-fn _css_calc_operand(s: text, start: i64, font_px: i32) -> [i64]:
+# A calc() keyword constant in micro units, or -1 when `name` is none.
+# ponytail: `nan` is read as 0. Upgrade: carry NaN to the clamp.
+fn _css_calc_constant_micro(name: text) -> i64:
+    if name == "pi":
+        return 3141592
+    if name == "e":
+        return 2718281
+    if name == "infinity":
+        return CSS_CALC_INFINITY
+    if name == "-infinity":
+        return 0 - CSS_CALC_INFINITY
+    if name == "nan":
+        return 0
+    -1
+
+# calc() operand: `( sum )`, `calc( sum )`, a constant, another function
+# (unresolved, kind unknown), or a number with an optional unit. Result rows
+# are [status, value, kind, end], value in micro (number) or micro-px (length).
+fn _css_calc_operand(s: text, start: i64, font_px: i32, depth: i64) -> [i64]:
     val i = _css_skip_ws(s, start)
     val n = s.byte_len()
     if i >= n:
@@ -3012,42 +3080,57 @@ fn _css_calc_operand(s: text, start: i64, font_px: i32) -> [i64]:
     elif s.substring(i, n).starts_with("calc("):
         inner = i + 5
     if inner >= 0:
-        val r = _css_calc_sum(s, inner, font_px)
+        if depth >= CSS_CALC_MAX_DEPTH:
+            return [CSS_CALC_INVALID, 0, 0, inner]
+        val r = _css_calc_sum(s, inner, font_px, depth + 1)
         if r[0] == CSS_CALC_INVALID:
             return r
         val close = _css_skip_ws(s, r[3])
         if close >= n or _css_ch(s, close) != ")":
             return [CSS_CALC_INVALID, 0, 0, close]
         return [r[0], r[1], r[2], close + 1]
-    val num = _css_number_milli_at(s, i)
+    val num = _css_number_scaled_at(s, i, 6)
     if num[1] == i:
-        # `min(`, `var(` and friends: valid, sized only at layout time.
         var j = i
-        while j < n and _css_is_ident_char(_css_ch(s, j)):  # cpu-lane-loop-ok: ONE function name inside a calc()
+        while j < n and (_css_is_ident_char(_css_ch(s, j)) or (j > i and _css_is_digit_at(s, j))):  # cpu-lane-loop-ok: ONE name (`atan2`) inside a calc()
             j = j + 1
         if j > i and j < n and _css_ch(s, j) == "(":
+            # `min(`, `var(`, `atan2(`: valid, sized only after substitution.
             val close = _css_paren_close(s, j)
             if close < 0:
                 return [CSS_CALC_INVALID, 0, 0, j]
-            return [CSS_CALC_UNRESOLVED, 0, 1, close]
-        return [CSS_CALC_INVALID, 0, 0, i]
+            return [CSS_CALC_UNRESOLVED, 0, CSS_CALC_KIND_UNKNOWN, close]
+        val constant = if j > i: _css_calc_constant_micro(s.substring(i, j)) else: -1
+        if constant == -1:
+            return [CSS_CALC_INVALID, 0, 0, i]
+        return [CSS_CALC_OK, constant, CSS_CALC_KIND_NUMBER, j]
     var j = num[1]
     while j < n and _css_is_ident_char(_css_ch(s, j)) and _css_ch(s, j) != "-":  # cpu-lane-loop-ok: the unit of ONE calc() operand
         j = j + 1
     val unit = s.substring(num[1], j)
     if unit == "":
-        return [CSS_CALC_OK, num[0], 0, j]
-    val px = _css_unit_milli_px(num[0], unit, font_px, false)
-    if px == CSS_LENGTH_NONE:
-        # ponytail: any other unit (`%`, `vw`, `pt`) is valid but unresolved
-        # here; an unknown unit is not rejected. Upgrade: share
-        # `_CSS_LENGTH_UNITS` and resolve absolute units.
-        return [CSS_CALC_UNRESOLVED, 0, 1, j]
-    [CSS_CALC_OK, px, 1, j]
+        return [CSS_CALC_OK, num[0], CSS_CALC_KIND_NUMBER, j]
+    var factor: f64 = 0.0
+    if unit == "px":
+        factor = 1.0
+    elif unit == "em":
+        factor = font_px as f64
+    elif unit == "rem":
+        factor = css_cascade_root_font_px() as f64
+    else:
+        # `%` and every other length unit (`vw`, `pt`, `in`) is a <length>
+        # this cascade does not resolve, so the type checks still apply
+        # (Chrome 159 drops `calc(1px * 1vw)`, `calc(1vw + 2)`). A non-length
+        # dimension (`deg`, `s`) is of unknown kind: `atan2(..) / 1deg` is a
+        # number. ponytail: absolute units are not resolved and an unknown
+        # unit is not rejected. Upgrade: resolve pt/in/cm/mm/q/pc here.
+        val length_unit = unit == "%" or CSS_LENGTH_UNITS.contains(unit)
+        return [CSS_CALC_UNRESOLVED, 0, if length_unit: CSS_CALC_KIND_LENGTH else: CSS_CALC_KIND_UNKNOWN, j]
+    [CSS_CALC_OK, _css_calc_clamp((num[0] as f64) * factor), CSS_CALC_KIND_LENGTH, j]
 
 # product := operand ( ('*' | '/') operand )*
-fn _css_calc_product(s: text, start: i64, font_px: i32) -> [i64]:
-    var r = _css_calc_operand(s, start, font_px)
+fn _css_calc_product(s: text, start: i64, font_px: i32, depth: i64) -> [i64]:
+    var r = _css_calc_operand(s, start, font_px, depth)
     if r[0] == CSS_CALC_INVALID:
         return r
     var status = r[0]
@@ -3061,33 +3144,43 @@ fn _css_calc_product(s: text, start: i64, font_px: i32) -> [i64]:
         if op != "*" and op != "/":
             more = false
         else:
-            val rhs = _css_calc_operand(s, j + 1, font_px)
+            val rhs = _css_calc_operand(s, j + 1, font_px, depth)
             if rhs[0] == CSS_CALC_INVALID:
                 return rhs
+            val both_ok = status == CSS_CALC_OK and rhs[0] == CSS_CALC_OK
             if op == "*":
-                if kind == 1 and rhs[2] == 1:
+                if kind == CSS_CALC_KIND_LENGTH and rhs[2] == CSS_CALC_KIND_LENGTH:
                     return [CSS_CALC_INVALID, 0, 0, rhs[3]]
-                if status == CSS_CALC_OK and rhs[0] == CSS_CALC_OK:
-                    value = value * rhs[1] / 1000
-                kind = if kind == 1 or rhs[2] == 1: 1 else: 0
+                if both_ok:
+                    value = _css_calc_clamp((value as f64) * (rhs[1] as f64) / 1000000.0)
+                if kind == CSS_CALC_KIND_LENGTH or rhs[2] == CSS_CALC_KIND_LENGTH:
+                    kind = CSS_CALC_KIND_LENGTH
+                elif kind == CSS_CALC_KIND_UNKNOWN or rhs[2] == CSS_CALC_KIND_UNKNOWN:
+                    kind = CSS_CALC_KIND_UNKNOWN
             else:
-                if rhs[2] != 0 or (rhs[0] == CSS_CALC_OK and rhs[1] == 0):
+                if rhs[2] == CSS_CALC_KIND_LENGTH:
                     return [CSS_CALC_INVALID, 0, 0, rhs[3]]
-                if status == CSS_CALC_OK and rhs[0] == CSS_CALC_OK:
-                    value = value * 1000 / rhs[1]
+                if both_ok:
+                    # Chrome 159: `calc(10px / 0)` is +infinity, clamped.
+                    if rhs[1] == 0:
+                        value = if value > 0: CSS_CALC_INFINITY elif value < 0: 0 - CSS_CALC_INFINITY else: 0
+                    else:
+                        value = _css_calc_clamp((value as f64) * 1000000.0 / (rhs[1] as f64))
+                if kind == CSS_CALC_KIND_NUMBER and rhs[2] == CSS_CALC_KIND_UNKNOWN:
+                    kind = CSS_CALC_KIND_UNKNOWN
             if rhs[0] == CSS_CALC_UNRESOLVED:
                 status = CSS_CALC_UNRESOLVED
             i = rhs[3]
     [status, value, kind, i]
 
 # sum := product ( ws ('+' | '-') ws product )*; CSS needs the whitespace.
-fn _css_calc_sum(s: text, start: i64, font_px: i32) -> [i64]:
-    var r = _css_calc_product(s, start, font_px)
+fn _css_calc_sum(s: text, start: i64, font_px: i32, depth: i64) -> [i64]:
+    var r = _css_calc_product(s, start, font_px, depth)
     if r[0] == CSS_CALC_INVALID:
         return r
     var status = r[0]
     var value = r[1]
-    val kind = r[2]
+    var kind = r[2]
     var i = r[3]
     var more = true
     val n = s.byte_len()
@@ -3099,33 +3192,36 @@ fn _css_calc_sum(s: text, start: i64, font_px: i32) -> [i64]:
         else:
             if j == i or j + 1 >= n or _css_skip_ws(s, j + 1) == j + 1:
                 return [CSS_CALC_INVALID, 0, 0, j]
-            val rhs = _css_calc_product(s, j + 1, font_px)
+            val rhs = _css_calc_product(s, j + 1, font_px, depth)
             if rhs[0] == CSS_CALC_INVALID:
                 return rhs
-            if rhs[2] != kind:
+            if rhs[2] != kind and kind != CSS_CALC_KIND_UNKNOWN and rhs[2] != CSS_CALC_KIND_UNKNOWN:
                 return [CSS_CALC_INVALID, 0, 0, rhs[3]]
+            if kind == CSS_CALC_KIND_UNKNOWN:
+                kind = rhs[2]
             if rhs[0] == CSS_CALC_UNRESOLVED:
                 status = CSS_CALC_UNRESOLVED
             elif status == CSS_CALC_OK:
-                value = if op == "+": value + rhs[1] else: value - rhs[1]
+                value = _css_calc_clamp(if op == "+": (value as f64) + (rhs[1] as f64) else: (value as f64) - (rhs[1] as f64))
             i = rhs[3]
     [status, value, kind, i]
 
-# A whole `calc( ... )` length as [status, milli-px]. A bare <number> result
-# (`calc(5)`) is not a length and is invalid.
+# A whole `calc( ... )` length as [status, milli-px], clamped to
+# CSS_LENGTH_MAX_MILLI. A bare <number> result (`calc(5)`) is not a length
+# and is invalid.
 fn css_calc_length_milli(raw: text, font_px: i32) -> [i64]:
     val t = raw.trim().lower()
     if not t.starts_with("calc("):
         return [CSS_CALC_INVALID, 0]
-    val r = _css_calc_sum(t, 5, font_px)
+    val r = _css_calc_sum(t, 5, font_px, 1)
     if r[0] == CSS_CALC_INVALID:
         return [CSS_CALC_INVALID, 0]
     val close = _css_skip_ws(t, r[3])
     if close + 1 != t.byte_len() or _css_ch(t, close) != ")":
         return [CSS_CALC_INVALID, 0]
-    if r[0] == CSS_CALC_OK and r[2] == 0 and r[1] != 0:
+    if r[0] == CSS_CALC_OK and r[2] == CSS_CALC_KIND_NUMBER and r[1] != 0:
         return [CSS_CALC_INVALID, 0]
-    [r[0], r[1]]
+    [r[0], _css_clamp_milli(r[1] / 1000)]
 
 # Whether a value token that opens `calc(` is a valid calc() (resolved or
 # not). The UA margin check uses this to drop `calc(1px +)`.
@@ -3133,8 +3229,8 @@ fn css_calc_token_valid(tok: text) -> bool:
     css_calc_length_milli(tok, 16)[0] != CSS_CALC_INVALID
 
 # One length token as signed, unfloored milli-px: a CSS <number> with `px`,
-# `em` or `rem` (or bare, see `_css_unit_milli_px`), or a calc() of them.
-# CSS_LENGTH_NONE for anything else.
+# `em` or `rem` (or bare, see `_css_unit_milli_px`), or a calc() of them,
+# clamped to CSS_LENGTH_MAX_MILLI. CSS_LENGTH_NONE for anything else.
 fn css_length_milli(tok: text, font_px: i32, allow_bare: bool) -> i64:
     val t = tok.trim().lower()
     if t.starts_with("calc("):
@@ -3143,7 +3239,8 @@ fn css_length_milli(tok: text, font_px: i32, allow_bare: bool) -> i64:
     val num = _css_number_milli_at(t, 0)
     if num[1] == 0:
         return CSS_LENGTH_NONE
-    _css_unit_milli_px(num[0], t.substring(num[1], t.byte_len()), font_px, allow_bare)
+    val v = _css_unit_milli_px(num[0], t.substring(num[1], t.byte_len()), font_px, allow_bare)
+    if v == CSS_LENGTH_NONE: v else: _css_clamp_milli(v)
 
 # A shorthand value's tokens, lower-cased; a function (`calc(2px * 3)`)
 # stays one token. Plain values keep the allocation-light whitespace split.
@@ -3267,7 +3364,7 @@ fn _decl_vertical_margin_milli(tok: text, font_px: i32) -> i32:
     val exact = _decl_vertical_margin_exact_milli(tok, font_px)
     if exact < 0 or exact % 1000 == 0:
         return 0
-    exact as i32
+    _css_milli_slot(exact)
 
 # A horizontal margin token's whole signed number: a percentage keeps its
 # percent (Style.margin_*_pct), a length resolves em/rem against the font.
@@ -3281,7 +3378,22 @@ fn _decl_horizontal_margin_px(tok: text, font_px: i32) -> i32:
     if exact != INSET_NOT_LENGTH:
         val whole = ((if exact < 0: 0 - exact else: exact) / 1000) as i32
         return if exact < 0: 0 - whole else: whole
+    if _css_calc_dropped(t):
+        return 0
     horizontal_margin_signed(t, _decl_font_relative_length_px(t, font_px))
+
+# An invalid `calc()` margin (`calc(1px +)`, 101 levels deep) is dropped by
+# Chrome 159; the legacy digit scrape would read garbage, so it reads 0.
+fn _css_calc_dropped(tok: text) -> bool:
+    if tok.index_of("(") < 0:
+        return false
+    val t = tok.trim().lower()
+    t.starts_with("calc(") and not css_calc_token_valid(t)
+
+# A milli-px sub-pixel slot as i32, or 0 when it would not fit (a clamped
+# huge length keeps only its whole px).
+fn _css_milli_slot(exact: i64) -> i32:
+    if exact > 2147483647 or exact < -2147483647: 0 else: exact as i32
 
 # A signed margin length (calc() included) as milli-px with its magnitude
 # floored to the 1/64 px LayoutUnit, or INSET_NOT_LENGTH.
@@ -3306,7 +3418,7 @@ fn _decl_horizontal_margin_milli(tok: text, font_px: i32) -> i32:
     val exact = _decl_signed_margin_exact_milli(t, font_px)
     if exact == INSET_NOT_LENGTH or exact % 1000 == 0:
         return 0
-    exact as i32
+    _css_milli_slot(exact)
 
 # The whole-px margin that goes with `_decl_vertical_margin_milli` (round
 # half up of the exact value, so every reader that only knows whole px stays
@@ -3318,6 +3430,8 @@ fn _decl_vertical_margin_px(tok: text, font_px: i32, legacy_px: i32) -> i32:
     if exact >= 0:
         return ((exact + 500) / 1000) as i32
     val v = css_length_milli(tok, font_px, true)
+    if _css_calc_dropped(tok):
+        return 0
     if v == CSS_LENGTH_NONE or v >= 0:
         return legacy_px
     (0 - (_css_layout_unit_floor_milli(0 - v) + 500) / 1000) as i32

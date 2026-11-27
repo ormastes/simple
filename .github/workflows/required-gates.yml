@@ -30,7 +30,9 @@ jobs:
   #
   # Checkout is sparse (scripts/check, bootstrap, config/check, and the hosted
   # runtime probe source reach the working tree) and depth 1; the PR endpoints
-  # are fetched at PR_COMMITS+1 depth exactly as the extended job does.
+  # are fetched at PR_COMMITS+41 depth (the rewind gate reads a 40-commit
+  # window), then scripts/check/pr-range-exact-fetch.shs makes BASE..HEAD exact
+  # for a PR that merges another line.
   fast-gates:
     name: Code Idiom & Structural Ratchet Gates
     # Hosted (free CI plan, doc/03_plan/infra/bootstrap/free_github_actions_ci_plan_2026-10-22.md
@@ -201,6 +203,13 @@ jobs:
               git fetch --no-tags --no-recurse-submodules --quiet --depth="$(( PR_COMMITS + 41 ))" origin "$BASE_SHA" "$HEAD_SHA" ||
                   { echo "fast-gates: could not fetch the PR endpoints"; exit 1; }
             fi
+            # A PR that merges another line makes the depth-bounded clone
+            # over-count BASE..HEAD (5,094 vs 61 on #12180); every range gate
+            # below would scan the excess. No fetch when the count is exact.
+            sh scripts/check/pr-range-exact-fetch.shs --selftest ||
+                { echo "fast-gates: pr-range-exact-fetch selftest failed"; exit 1; }
+            sh scripts/check/pr-range-exact-fetch.shs "$BASE_SHA" "$HEAD_SHA" "$PR_COMMITS" ||
+                { echo "fast-gates: could not make the PR range exact"; exit 1; }
             if [ ! -s scripts/check/private_import_baseline.txt ]; then
               echo "fast-gates: private-import baseline is missing or empty"
               exit 1

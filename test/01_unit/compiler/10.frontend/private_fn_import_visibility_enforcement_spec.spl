@@ -1,0 +1,125 @@
+# Self-hosted frontend/HIR private-fn cross-module visibility enforcement
+# @req REQ-VIS-PRIVATE-IMPORT-SELFHOST
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{write_file, dir_create_all, dir_remove_all}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.{private_import_is_baselined, private_import_is_test_importer}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+use test.helpers.module_surface_owner_fixture.{module_surfaces_from_test_modules}
+
+val ENF_PROVIDER_SRC = "fn private_impl() -> i64:\n    7\npub fn public_api() -> i64:\n    private_impl()"
+
+fn enforce_probe(provider_name: text, provider_path: text, provider_src: text,
+                 consumer_name: text, consumer_path: text, consumer_src: text) -> [text]:
+    val log = Logger(level: 0)
+    val provider = parse_full_frontend(provider_src, provider_name, provider_name, log)
+    val consumer = parse_full_frontend(consumer_src, consumer_name, consumer_name, log)
+    var modules: Dict<text, Module> = {}
+    modules[provider_name] = provider
+    modules[consumer_name] = consumer
+    var surfaces = ModuleSurfacesByName.empty()
+    match module_surfaces_from_test_modules(modules, [
+            SourceFile(path: provider_path, content: provider_src, module_name: provider_name),
+            SourceFile(path: consumer_path, content: consumer_src, module_name: consumer_name)
+        ]):
+        case Ok(value): surfaces = value
+        case Err(_): expect(false).to_equal(true)
+    var lowering = hirlowering_for_module(consumer_name, surfaces)
+    val hir = lowering.lower_module(consumer)
+    var hard_errors = 0
+    var msgs = ""
+    var i = 0
+    while i < lowering.diagnostic_messages.len():
+        val msg: text = lowering.diagnostic_messages[i]
+        msgs = msgs + msg + "\n"
+        if i < lowering.diagnostic_recovered.len() and not lowering.diagnostic_recovered[i]:
+            hard_errors = hard_errors + 1
+        i = i + 1
+    val bound = if hir.symbols.lookup("private_impl") != nil: "bound" else: "unbound"
+    ["{hard_errors}", msgs, bound]
+
+describe "Frontend private-fn cross-module visibility enforcement":
+    it "rejects cross-directory plain use of a private fn by default and skips symbol registration":
+        step("Lower cross-directory plain use without env opt-in")
+        val res = enforce_probe(
+            "enf.sub.mod_a", "src/enf/sub/mod_a.spl", ENF_PROVIDER_SRC,
+            "enf.caller", "src/enf/caller.spl",
+            "use enf.sub.mod_a.\{private_impl\}\nfn run() -> i64:\n    private_impl()")
+        expect(res[0]).to_equal("1")
+        expect(res[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
+        expect(res[1]).to_contain("private fn `private_impl` of module `enf.sub.mod_a`")
+        expect(res[2]).to_equal("unbound")
+
+    it "enforces cross-directory rejection on Windows backslash paths while allowing same-dir siblings":
+        step("Check cross-directory and same-directory backslash importer paths")
+        val cross_res = enforce_probe(
+            "win.sub.mod_a", "win\\sub\\mod_a.spl", ENF_PROVIDER_SRC,
+            "win.caller", "win\\caller.spl",
+            "use win.sub.mod_a.\{private_impl\}\nfn run() -> i64:\n    private_impl()")
+        expect(cross_res[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
+        val sib_res = enforce_probe(
+            "win.sub.mod_a", "win\\sub\\mod_a.spl", ENF_PROVIDER_SRC,
+            "win.sub.mod_b", "win\\sub\\mod_b.spl",
+            "use win.sub.mod_a.\{private_impl\}\nfn run() -> i64:\n    private_impl()")
+        expect(sib_res[0]).to_equal("0")
+        expect(sib_res[1].contains("PRIVATE-IMPORT")).to_equal(false)
+        expect(sib_res[2]).to_equal("bound")
+
+    it "exempts test/** callers across POSIX and Windows path styles while keeping non-test paths strict":
+        step("Verify private_import_is_test_importer and full HIR lowering parity")
+        expect(private_import_is_test_importer("test/01_unit/foo_spec.spl")).to_equal(true)
+        expect(private_import_is_test_importer("test\\01_unit\\foo_spec.spl")).to_equal(true)
+        expect(private_import_is_test_importer("src/contest/foo.spl")).to_equal(false)
+        val test_res = enforce_probe(
+            "enf.sub.mod_a", "src/enf/sub/mod_a.spl", ENF_PROVIDER_SRC,
+            "enf.foo_spec", "test\\01_unit\\enf\\foo_spec.spl",
+            "use enf.sub.mod_a.\{private_impl\}\nfn run() -> i64:\n    private_impl()")
+        expect(test_res[0]).to_equal("0")
+        expect(test_res[1].contains("PRIVATE-IMPORT")).to_equal(false)
+        expect(test_res[2]).to_equal("bound")
+
+    it "preserves baselined legacy pairs through SCV snapshot prefixes while rejecting non-baselined siblings":
+        step("Create temporary repo with baseline and SCV snapshot paths")
+        val root = get_temp_dir() + "/simple_w4_4_scv_baseline_test"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root + "/.git")).to_equal(true)
+        expect(dir_create_all(root + "/scripts/check")).to_equal(true)
+        expect(dir_create_all(root + "/build/scv/snapshots/scv-revision-v1-test/src/pkg_a")).to_equal(true)
+        expect(write_file(root + "/scripts/check/private_import_baseline.txt", "src/pkg_a/mod_a.spl|legacy_priv\n")).to_equal(true)
+        val scv_mod = root + "/build/scv/snapshots/scv-revision-v1-test/src/pkg_a/mod_a.spl"
+        expect(write_file(scv_mod, "fn legacy_priv() -> i64:\n    1\nfn new_priv() -> i64:\n    2")).to_equal(true)
+        val scv_win = scv_mod.replace("/", "\\")
+        val scv_mixed = root + "\\build\\scv/snapshots\\scv-revision-v1-test/src\\pkg_a\\mod_a.spl"
+        expect(private_import_is_baselined(scv_mod, "legacy_priv")).to_equal(true)
+        expect(private_import_is_baselined(scv_win, "legacy_priv")).to_equal(true)
+        expect(private_import_is_baselined(scv_mixed, "legacy_priv")).to_equal(true)
+        expect(private_import_is_baselined(scv_mod, "new_priv")).to_equal(false)
+        expect(private_import_is_baselined(scv_mixed, "new_priv")).to_equal(false)
+        val _rm = dir_remove_all(root)
+
+    it "permits export use facades with a warning and allows declared friends of internal_export fns":
+        step("Verify export use and friend + internal_export exemptions")
+        val facade_res = enforce_probe(
+            "enf.sub.mod_a", "src/enf/sub/mod_a.spl", ENF_PROVIDER_SRC,
+            "enf.facade", "src/enf/facade.spl",
+            "export use enf.sub.mod_a.\{private_impl\}")
+        expect(facade_res[0]).to_equal("0")
+        expect(facade_res[1]).to_contain("[W-HIR-PRIVATE-IMPORT-001]")
+        expect(facade_res[1].contains("[E-HIR-PRIVATE-IMPORT-001]")).to_equal(false)
+
+        val friend_src = "friend client\ninternal_export private_impl\n" + ENF_PROVIDER_SRC
+        val friend_ok = enforce_probe(
+            "server.sub.mod_a", "src/server/sub/mod_a.spl", friend_src,
+            "client.entry", "src/client/entry.spl",
+            "use server.sub.mod_a.\{private_impl\}\nfn run() -> i64:\n    private_impl()")
+        expect(friend_ok[0]).to_equal("0")
+        expect(friend_ok[1].contains("PRIVATE-IMPORT")).to_equal(false)
+        expect(friend_ok[2]).to_equal("bound")

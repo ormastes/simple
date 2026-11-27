@@ -1,0 +1,81 @@
+# Host verification spec for freestanding frontend/interpreter .clear() nil guards
+# Bug: doc/08_tracking/bug/simpleos_freestanding_kernel_elf32_wrap_and_weak_gate_overbroad_2026-08-06.md
+# @req REQ-SSPEC-COMPILER
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use compiler.frontend.core.lexer.{lex_tokenize_all}
+use compiler.frontend.core.parser.{parser_warnings_clear, parser_has_errors}
+use compiler.frontend.core.ast.{
+    ast_reset, expr_reset, stmt_reset,
+    decl_metadata_pools_reset, macro_facts_reset,
+    expr_attr_apply_config, expr_attr_latch_clear
+}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.core.interpreter.env.{env_init, env_push_scope, env_pop_scope}
+use compiler.types.units.unit_ops.{unit_op_take_warnings}
+
+describe "freestanding frontend and interpreter clear nil-guards":
+    it "runs repeated lexer, AST reset, and module parse passes cleanly without nil traps":
+        step("run repeated resets and parses of a hello-world module")
+        ast_reset()
+        expr_reset()
+        stmt_reset()
+        decl_metadata_pools_reset()
+        macro_facts_reset()
+        parser_warnings_clear()
+        expr_attr_apply_config("")
+        expr_attr_latch_clear()
+
+        val hello_src = "fn main():\n    print \"hello\"\n"
+        val tok_count = lex_tokenize_all(hello_src)
+        expect(tok_count).to_be_greater_than(0)
+
+        val mod1 = parse_and_build_module(hello_src, "hello.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(mod1.functions.len()).to_be_greater_than(0)
+
+        # Second reset/parse pass must stay clean after prior pools were populated.
+        ast_reset()
+        expr_reset()
+        stmt_reset()
+        decl_metadata_pools_reset()
+        macro_facts_reset()
+        parser_warnings_clear()
+        val mod2 = parse_and_build_module(hello_src, "hello_second.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(mod2.functions.len()).to_be_greater_than(0)
+
+    it "guards interpreter env_push_scope and unit_op_take_warnings across empty cycles":
+        step("push/pop scopes and drain unit_op warnings twice")
+        env_init()
+        env_push_scope()
+        env_pop_scope()
+        val w1 = unit_op_take_warnings()
+        val w2 = unit_op_take_warnings()
+        expect(w1.len()).to_equal(0)
+        expect(w2.len()).to_equal(0)
+
+    it "keeps nil-before-clear discipline and preserves bootstrap generic-close invariant":
+        step("verify reset helpers check nil before .clear() across frontend owner files")
+        val lexer_src = file_read("src/compiler/10.frontend/core/lexer.spl").replace("\r\n", "\n")
+        expect(lexer_src).to_contain("if lex_generic_close_pending[0]:")
+        expect(lexer_src).to_contain("if lex_all_kinds == nil:\n            lex_all_kinds = []\n        else:\n            lex_all_kinds.clear()")
+
+        val expr_src = file_read("src/compiler/10.frontend/core/_AstExpr/nodes.spl").replace("\r\n", "\n")
+        expect(expr_src).to_contain("if expr_tag == nil:\n        expr_tag = []\n    else:\n        expr_tag.clear()")
+
+        val stmt_src = file_read("src/compiler/10.frontend/core/ast_stmt.spl").replace("\r\n", "\n")
+        expect(stmt_src).to_contain("if stmt_tag == nil:\n        stmt_tag = []\n    else:\n        stmt_tag.clear()")
+
+        val decl_src = file_read("src/compiler/10.frontend/core/_Ast/decl_nodes.spl").replace("\r\n", "\n")
+        expect(decl_src).to_contain("if decl_tag == nil: decl_tag = [] else: decl_tag.clear()")
+
+        val parser_src = file_read("src/compiler/10.frontend/core/parser.spl").replace("\r\n", "\n")
+        expect(parser_src).to_contain("if par_state == nil:\n            par_state = parser_state_fresh()\n        if par_state.par_warnings == nil:")
+
+        val env_src = file_read("src/compiler/10.frontend/core/interpreter/env.spl").replace("\r\n", "\n")
+        expect(env_src).to_contain("if scope_hm_keys == nil or scope_hm_vals == nil")
+
+        val unit_src = file_read("src/compiler/30.types/units/unit_ops.spl").replace("\r\n", "\n")
+        expect(unit_src).to_contain("warnings_nil = (unit_op_warnings == nil)")

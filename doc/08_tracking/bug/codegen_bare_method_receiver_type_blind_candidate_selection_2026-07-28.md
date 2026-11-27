@@ -184,3 +184,19 @@ against an archive built with
 - In-file `SAFETY NOTE (Agent δ, 2026-04-13)` documents the ambiguity half,
   which is already loud
 
+
+## 2026-11-27 — `files[path].as_str()` Dict-index site: root cause found and fixed
+
+The `Dict<text, SdnValue>` index expression was NOT the problem
+(`get_index_element_type` types it correctly). The type was lost one step
+earlier: `val files = match a: case Some(v): match v.as_dict(): case Some(e): e ...`
+— a `match` that is the sole body of an outer match arm is a tail match
+STATEMENT, and `lower_do_block` (`hir/lower/expr/control.rs`) only gave tail
+`if` statements a value type, so the arm block (and `files`) became NIL/ANY.
+`files[k]` then had an erased receiver and `.as_str()` hit
+`CODEGEN-AMBIGUOUS-METHOD` (4 candidates). Fix: tail `Node::Match` is typed
+like tail `Node::If` via `hir_tail_if_value_type`. Minimal reproducer: nested
+tail match + two types sharing a method name. Test:
+`nested_tail_match_arm_keeps_payload_type_for_dict_index_receiver`
+(`hir/lower/tests/conditional_empty_array_tests.rs`). The per-name allowlist
+mitigation / TypeId receiver check (the general class) remains OPEN.

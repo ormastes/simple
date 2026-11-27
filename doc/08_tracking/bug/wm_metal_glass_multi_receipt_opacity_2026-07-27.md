@@ -396,3 +396,10 @@ bootstrap, no Metal device). Source-side spot check at release/1.0.0 HEAD
 fixture file are present. Classification: SKIP (macOS-only native
 verification); left open pending the admitted producer, per the admission
 constraints documented above.
+
+## 2026-11-27 W5-3 Host Unit Verification & DB Transition (`fix-implemented-verification-pending`)
+
+- Verified source fix in `draw_ir_adv.spl` (`metal-parent-material-subopaque-requires-gpu-only-delta` with ordered `_engine2d_draw_ir_unfulfilled_metal_receipts`), `backend_metal.spl` (`draw_ir_apply_glass_material_device` `not self.gpu_only` fail-closed rejection), `draw_ir_target_metal.spl`, and `host_compositor_core.spl` remains present.
+- Added host unit coverage in `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_metal_readback_provenance_and_glass_spec.spl` (4/4 PASS on Windows interpreter host) pinning `draw_ir_apply_glass_material_device` `gpu_only=false` rejection and unavailable `gpu_only=true` fail-closed status.
+- Re-verified `backend_metal_device_identity_spec.spl` (2/2 PASS), `backend_readback_handle_contract_spec.spl` (1/1 PASS), `backend_metal_hardening_spec.spl` (36/36 PASS), and `host_compositor_entry_spec.spl` (54/64 PASS; all Metal glass receipt cases passed, 10 pre-existing unrelated Web/taskbar/wheel/const failures).
+- Transitioned `.sdn` shard row from `open` -> `fix-implemented-verification-pending` (`waiting-for: macOS Metal host verification`).

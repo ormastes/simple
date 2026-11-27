@@ -1,0 +1,111 @@
+# Purpose and audience: executable unit verification for registered test font fixtures.
+# Covers provenance registration, corruption rejection, and Engine2D bytes/identity loading.
+# @req REQ-SSPEC-LIB
+# @cover src/lib/common/encoding/font_registry.spl 20%
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 10%
+# @tag: unit, text_layout, font_registry, fixture
+
+use std.spec.{describe, it, expect, step}
+use std.common.encoding.font_registry.{
+    selected_font_asset_candidates,
+    selected_font_asset_candidate_for_path,
+    selected_font_asset_identity_for_path,
+    selected_font_asset_local_path_for_identity,
+    validate_selected_font_asset,
+    register_selected_font_fixture,
+    clear_registered_selected_font_fixtures
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{
+    FontRenderer,
+    font_renderer_register_font_fixture_bytes,
+    font_renderer_register_selected_bytes,
+    font_renderer_last_selected_registration_reason,
+    _font_renderer_reset_registered_selected_bytes_for_test
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+use test.fixtures.fonts.simple_2d_vector.font_fixture.{
+    SIMPLE_2D_ASCII_FIXTURE_PATH,
+    SIMPLE_2D_LATIN1_FIXTURE_PATH,
+    simple_2d_ascii_font_bytes,
+    simple_2d_latin1_font_bytes,
+    register_simple_2d_ascii_font_fixture,
+    register_simple_2d_latin1_font_fixture
+}
+
+describe "registered test font fixtures":
+    it "keeps the 16-asset production catalog unchanged while registering fixtures":
+        step("Reset fixture state and verify baseline 16-asset catalog and unmanaged behavior")
+        _font_renderer_reset_registered_selected_bytes_for_test()
+        expect(selected_font_asset_candidates().len()).to_equal(16)
+        val ascii_blob = simple_2d_ascii_font_bytes()
+        expect(selected_font_asset_identity_for_path("tmp/unmanaged.ttf")).to_equal("")
+        expect(validate_selected_font_asset("tmp/unmanaged.ttf", ascii_blob).reason).to_equal("unmanaged")
+        expect(font_renderer_register_selected_bytes("tmp/unmanaged.ttf", ascii_blob)).to_be(false)
+        expect(font_renderer_last_selected_registration_reason()).to_equal("unmanaged")
+
+        step("Register deterministic ASCII and Latin-1 fixtures and verify provenance gates")
+        expect(register_simple_2d_ascii_font_fixture(SIMPLE_2D_ASCII_FIXTURE_PATH)).to_be(true)
+        expect(register_simple_2d_latin1_font_fixture(SIMPLE_2D_LATIN1_FIXTURE_PATH)).to_be(true)
+        expect(selected_font_asset_candidates().len()).to_equal(16)
+
+        val identity = selected_font_asset_identity_for_path(SIMPLE_2D_ASCII_FIXTURE_PATH)
+        expect(identity).to_start_with("sha256=")
+        expect(identity).to_end_with(";axes=static")
+        expect(selected_font_asset_local_path_for_identity(identity)).to_equal(SIMPLE_2D_ASCII_FIXTURE_PATH)
+        expect(selected_font_asset_candidate_for_path(SIMPLE_2D_ASCII_FIXTURE_PATH).?.family).to_equal("Simple 2D ASCII Fixture")
+
+        val valid = validate_selected_font_asset(SIMPLE_2D_ASCII_FIXTURE_PATH, ascii_blob)
+        expect(valid.selected).to_be(true)
+        expect(valid.valid).to_be(true)
+        expect(valid.reason).to_equal("valid")
+
+        step("Reject bit-flipped, truncated, and bundled-shadow registrations")
+        var bit_flipped = ascii_blob
+        bit_flipped[bit_flipped.len() - 1] = (bit_flipped[bit_flipped.len() - 1].to_i64() ^ 1).to_u8()
+        expect(validate_selected_font_asset(SIMPLE_2D_ASCII_FIXTURE_PATH, bit_flipped).reason).to_equal("sha256")
+        expect(font_renderer_register_selected_bytes(SIMPLE_2D_ASCII_FIXTURE_PATH, bit_flipped)).to_be(false)
+        expect(validate_selected_font_asset(SIMPLE_2D_ASCII_FIXTURE_PATH, [0u8, 1u8, 2u8]).reason).to_equal("byte-length")
+
+        val bundled_path = selected_font_asset_candidates()[0].local_path
+        val shadow = register_selected_font_fixture(bundled_path, "Spoofed", ascii_blob)
+        expect(shadow.valid).to_be(false)
+        expect(shadow.reason).to_equal("reserved-selected-path")
+
+        _font_renderer_reset_registered_selected_bytes_for_test()
+        expect(selected_font_asset_identity_for_path(SIMPLE_2D_ASCII_FIXTURE_PATH)).to_equal("")
+
+    it "loads and renders registered fixture bytes through Engine2D and FontRenderer without disk reads":
+        step("Register fixture bytes and verify identity + Engine2D.load_font_bytes rendering")
+        _font_renderer_reset_registered_selected_bytes_for_test()
+        val path = "build/test-artifacts/01_unit/font_fixture_registration/ascii.ttf"
+        val blob = simple_2d_ascii_font_bytes()
+        var engine = Engine2D.create_with_backend(64, 48, "cpu")
+        expect(engine.load_font_bytes(path, blob)).to_be(false)
+
+        val reg = font_renderer_register_font_fixture_bytes(path, "Simple 2D ASCII Fixture", blob)
+        expect(reg.valid).to_be(true)
+        val identity = selected_font_asset_identity_for_path(path)
+        expect(identity.len()).to_be_greater_than(10)
+
+        var renderer = FontRenderer.new()
+        expect(renderer.try_load_registered_identity(identity)).to_be(true)
+        expect(renderer.current_font_identity()).to_equal(identity)
+        renderer.clear_ttf()
+
+        expect(engine.load_font_bytes(path, blob)).to_be(true)
+        expect(engine.selected_font_identity()).to_equal(identity)
+        val bg = rgb(3, 7, 11)
+        val fg = rgb(240, 220, 180)
+        engine.clear(bg)
+        engine.draw_text(4, 4, "A A", fg, 24)
+        val pixels = engine.read_pixels()
+        var painted = 0
+        for px in pixels:
+            if px != bg:
+                painted = painted + 1
+        expect(painted).to_be_greater_than(0)
+        engine.unload_font()
+        engine.shutdown()
+        clear_registered_selected_font_fixtures()
+        _font_renderer_reset_registered_selected_bytes_for_test()
