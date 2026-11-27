@@ -4096,7 +4096,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # Pen px the closing whitespace-only runs of this line charged (hangs at
     # its end), and the pen right after the last such charged space (-1: none).
     var line_end_hang = 0
-    var last_space_pen_x = -1
+    var after_space = false
     var inline_x = inline_start_x
     # Exact-minus-integer error of `inline_x` (milli-px), valid while the
     # cursor stays at (`inline_err_x`, line `inline_err_y`); see inline_pen_err.
@@ -4162,7 +4162,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             cy_frac = 0
             in_inline_run = false
             line_end_hang = 0
-            last_space_pen_x = -1
+            after_space = false
             inline_line_h = 0
             prev_margin_b = 0
             child_count = child_count + 1
@@ -4392,7 +4392,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_baseline_nodes = []
                     line_nodes = []
                     line_end_hang = 0
-                    last_space_pen_x = -1
+                    after_space = false
                     inline_baseline_margin_ts = []
                     inline_baseline_margin_bs = []
                     prev_margin_b = 0
@@ -4448,7 +4448,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             inline_baseline_nodes = []
                             line_nodes = []
                             line_end_hang = 0
-                            last_space_pen_x = -1
+                            after_space = false
                             inline_baseline_margin_ts = []
                             inline_baseline_margin_bs = []
                             out_bx[c] = ix + inline_x
@@ -4595,15 +4595,22 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # known (its one space is the next run's lead space); its box is
                 # zeroed after layout, as Chrome's is, instead of the 1 px minimum.
                 val collapsed_space_run = nodes[c].tag == "#text" and nodes[c].text_trimmed == "" and text_advance_w == 0
-                # An EMPTY plain inline element (`<span></span>`) is 0 wide in
-                # Chrome 159: its 1 px layout box is zeroed before the pen takes
-                # it, so a space after it collapses into the one before it.
-                val empty_plain_inline = (
-                    nodes[c].tag != "#text" and cst.display == "inline" and
-                    child_index.child_count[c] == 0 and not grid_item_is_replaced(nodes[c]) and
-                    cst.pad_l == 0 and cst.pad_r == 0 and cst.border_l == 0 and cst.border_r == 0 and
-                    cst.margin_l == 0 and cst.margin_r == 0
+                # An EMPTY inline element (`<span></span>`): spaces either side
+                # collapse across it whatever its padding, border or margin
+                # (CSS Text 3 4.1.1; Chrome 159: `ib <span border-left:1px>
+                # </span> ib` at 105). With no padding/border its 1 px layout box
+                # is zeroed before the pen takes it (Chrome: 0 wide, a 5 px
+                # margin-only span puts the next box at 105); with no margin
+                # either it does not move the pen at all.
+                val empty_inline_box = (
+                    nodes[c].tag != "#text" and child_index.child_count[c] == 0 and
+                    cst.display == "inline" and not grid_item_is_replaced(nodes[c])
                 )
+                val empty_unpadded_inline = (
+                    empty_inline_box and
+                    cst.pad_l == 0 and cst.pad_r == 0 and cst.border_l == 0 and cst.border_r == 0
+                )
+                val empty_plain_inline = empty_unpadded_inline and cst.margin_l == 0 and cst.margin_r == 0
                 if inline_w < 1:
                     inline_w = 1
                 # Bound an inline #text run to the available content width so a
@@ -4724,7 +4731,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             inline_baseline_nodes = []
                             line_nodes = []
                             line_end_hang = 0
-                            last_space_pen_x = -1
+                            after_space = false
                             inline_baseline_margin_ts = []
                             inline_baseline_margin_bs = []
                         else:
@@ -4746,7 +4753,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     lead_charged = true
                     # Collapsed into the space just put in the pen:
                     # the run's box still drops its lead, the pen does not move.
-                    if inline_x != last_space_pen_x or cst.white_space_spaces_kept:
+                    if not after_space or cst.white_space_spaces_kept:
                         val lead_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
                         val lead_space = resolved_space_advance(
                             cst, text_codepoints(nodes[c].text_trimmed)
@@ -4822,7 +4829,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_baseline_nodes = []
                     line_nodes = []
                     line_end_hang = 0
-                    last_space_pen_x = -1
+                    after_space = false
                     inline_baseline_margin_ts = []
                     inline_baseline_margin_bs = []
                 var inline_y = cy
@@ -5018,7 +5025,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         inline_baseline_nodes = []
                         line_nodes = []
                         line_end_hang = 0
-                        last_space_pen_x = -1
+                        after_space = false
                         inline_baseline_margin_ts = []
                         inline_baseline_margin_bs = []
                         prev_margin_b = 0
@@ -5080,7 +5087,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     inline_baseline_margin_bs = inline_baseline_margin_bs.push(
                         vertical_margin_px_in(cst, false, viewport_h, iw)
                     )
-                if empty_plain_inline and out_bw[c] <= 1:
+                if empty_unpadded_inline and out_bw[c] <= 1:
+                    out_bw[c] = 0
+                # A nowrap whitespace-only run measures its space into its box
+                # (no lead charge); after a space already in the pen it collapses
+                # (Chrome 159: nowrap `ib <span></span> ib` at 104).
+                if (
+                    after_space and cst.white_space_nowrap and not cst.white_space_spaces_kept and
+                    nodes[c].tag == "#text" and nodes[c].text_trimmed == ""
+                ):
                     out_bw[c] = 0
                 val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
                 val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
@@ -5103,6 +5118,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 )
                 if item_err != INLINE_PEN_ERR_UNKNOWN and item_delta != INLINE_PEN_ERR_UNKNOWN:
                     inline_err_milli = item_err + item_delta
+                    # Margins advance the pen at whole px; their LayoutUnit
+                    # fraction carries (Chrome 159: `ib` with margin-right:0.7px,
+                    # then ` z `, puts the next box at 110; 0.6px is a LayoutUnit
+                    # tie Simple misses, bug web_render_space_layoutunit_tie_2026-11-27).
+                    if inline_takes_margin and (cst.margin_l_milli != 0 or cst.margin_r_milli != 0 or cst.margin_l_pct or cst.margin_r_pct):
+                        inline_err_milli = inline_err_milli + (margin_l_err_milli(cst, iw) + margin_r_err_milli(cst, iw)) as i64
                     val item_carry = inline_pen_err_carry_px(inline_err_milli)
                     inline_x = inline_x + item_carry
                     inline_err_milli = inline_err_milli - (item_carry as i64) * 1000
@@ -5111,23 +5132,25 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # What a whitespace-only run charged the pen (lead space plus
                 # its milli carry) hangs at a line end. Measured, so the hang
                 # and the pen cannot disagree on whether the space was charged.
-                # Preserved spaces (pre-wrap, break-spaces; not pre-line) neither hang nor
-                # collapse (Chrome 159: centred pre-wrap `ib ` at 148). An empty
-                # plain inline is transparent; any other item, a zero-width
-                # atomic included (`ib z ib`: 109), ends the tail and the
-                # collapse.
-                val space_collapses = not cst.white_space_nowrap and not cst.white_space_pre and not cst.white_space_spaces_kept
-                if nodes[c].tag == "#text" and nodes[c].text_trimmed == "" and space_collapses:
+                # Only preserved spaces (pre, pre-wrap, break-spaces) neither
+                # hang nor collapse; nowrap and pre-line do both (Chrome 159:
+                # centred nowrap `ib ` at 150, pre-wrap at 148). An empty inline
+                # is transparent to the collapse, and to the hang while it does
+                # not move the pen; any other item, a zero-width atomic included
+                # (`ib z ib`: 109), ends both.
+                val spaces_collapsible = not cst.white_space_spaces_kept
+                if nodes[c].tag == "#text" and nodes[c].text_trimmed == "" and spaces_collapsible:
                     line_end_hang = line_end_hang + (inline_x - node_pen_start)
-                    if lead_charged:
-                        last_space_pen_x = inline_x
-                elif not empty_plain_inline:
+                    if lead_charged or inline_x != node_pen_start:
+                        after_space = true
+                elif empty_inline_box:
+                    if not empty_plain_inline:
+                        line_end_hang = 0
+                else:
                     line_end_hang = 0
-                    last_space_pen_x = -1
                     # A run that ends in a collapsible space put it in the pen;
                     # a lead space after an empty inline collapses into it.
-                    if nodes[c].tag == "#text" and space_collapses and text_ends_with_collapsible_space(nodes[c].text_data):
-                        last_space_pen_x = inline_x
+                    after_space = nodes[c].tag == "#text" and spaces_collapsible and text_ends_with_collapsible_space(nodes[c].text_data)
                 if inline_run_has_content:
                     prev_margin_b = 0
                 child_count = child_count + 1
@@ -5160,7 +5183,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 inline_baseline_nodes = []
                 line_nodes = []
                 line_end_hang = 0
-                last_space_pen_x = -1
+                after_space = false
                 inline_baseline_margin_ts = []
                 inline_baseline_margin_bs = []
             if child_count > 0:
