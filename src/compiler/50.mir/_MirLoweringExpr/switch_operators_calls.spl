@@ -791,7 +791,10 @@ impl MirLowering:
         ), call_origin: MirCallOrigin.Runtime)
         val value = b.emit_call(box, [mir_operand_copy(raw)], MirType.i64())
         self.builder = b
-        value ?? raw
+        if val boxed = value:
+            self.mark_runtime_value_local(boxed.id)
+            return boxed
+        raw
 
     me bitcast_float_enum_payload(payload_local: LocalId) -> LocalId:
         """Make a float enum payload bit-preserving before `rt_enum_new`.
@@ -7685,14 +7688,14 @@ impl MirLowering:
                 # binding captured from the enclosing activation. Retain the
                 # exact symbol owner; never classify by a bare name.
                 # Likewise a function or variant constructor (`Ok(x)`).
-                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or enum_payload_nominal_kind(SymbolId(id: sid), self.symbols) == 3 or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
                 if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
             case NamedVar(symbol, name):
                 val sid = mir_expr_symbol_id_value(symbol)
-                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or enum_payload_nominal_kind(SymbolId(id: sid), self.symbols) == 3 or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
                 if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
@@ -9611,16 +9614,17 @@ impl MirLowering:
                     is_bool = true
                 case HirTypeKind.Char:
                     decode_type = MirType(kind: MirTypeKind.Char)
-                case HirTypeKind.Named(_, _):
-                    val rec_instance = match return_hir.kind:
-                        case HirTypeKind.Result(_, err_type):
-                            val err_instance: HirType = if err_param != "": bound[err_param] else: err_type
-                            HirType(kind: HirTypeKind.Result(bound_kind_type, err_instance), span: return_hir.span)
-                        case _: HirType(kind: HirTypeKind.Optional(bound_kind_type), span: return_hir.span)
-                    self.remember_local_hir_type(result.id, rec_instance, 0, 0)
+                case HirTypeKind.Named(named_sym, _):
                     val rec_layout = self.optional_payload_struct_name(bound_kind_type)
-                    if rec_layout != "" and not self.struct_value_syms.contains(result.id):
-                        self.struct_value_syms[result.id] = rec_layout
+                    if not self.bitfield_map.has(named_sym.id) and custom_primitive_underlying_type_tag_by_symbol(named_sym.id) < 0 and (rec_layout != "" or self.enum_constructor_symbol_owner(named_sym) != ""):
+                        val rec_instance = match return_hir.kind:
+                            case HirTypeKind.Result(_, err_type):
+                                val err_instance: HirType = if err_param != "": bound[err_param] else: err_type
+                                HirType(kind: HirTypeKind.Result(bound_kind_type, err_instance), span: return_hir.span)
+                            case _: HirType(kind: HirTypeKind.Optional(bound_kind_type), span: return_hir.span)
+                        self.remember_local_hir_type(result.id, rec_instance, 0, 0)
+                        if rec_layout != "" and not self.struct_value_syms.contains(result.id):
+                            self.struct_value_syms[result.id] = rec_layout
                     return result
                 case _: return result
         val enum_id = self.enum_runtime_id(enum_name)
