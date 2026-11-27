@@ -5,7 +5,7 @@ export use std.gc_async_mut.gpu.browser_engine.simple_web_css_property_id.{CSS_P
 use std.gc_async_mut.gpu.browser_engine.simple_web_box_geometry_provenance.{
     web_box_geometry_capture_tokens, web_box_geometry_tokens_reason,
     web_fractional_capture_authored_decls}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille, gradient_has_length_stop, font_milli_of, font_milli_round_px, font_milli_store}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, parse_percent_permille, gradient_has_length_stop, font_milli_of, font_milli_round_px, font_milli_store, grid_fr_number_micro, grid_fr_format_micro}
 
 fn sticky_top_inset_value(
     raw: text, parsed: i32, position_sticky: bool
@@ -1164,17 +1164,17 @@ fn normalized_grid_track_list(raw_declaration: text) -> text:
             val plus = find_from(token, "+", 0)
             val zero_floor = token.starts_with("0+")
             val px_floor = if plus > 0 and not zero_floor: normalized_grid_positive_int(token.substring(0, plus)) else: 0
-            if plus > 0 and not zero_floor and px_floor <= 0:
+            if plus >= 0 and not zero_floor and px_floor <= 0:
                 return ""
-            val fr_size = normalized_grid_positive_int(
-                token.substring(plus + 1, token.byte_len() - 2)
+            val fr_micro = grid_fr_number_micro(
+                token.substring(if plus >= 0: plus + 1 else: 0, token.byte_len() - 2)
             )
-            if fr_size <= 0:
+            if fr_micro <= 0:
                 return ""
             if normalized != "":
                 normalized = normalized + " "
             val floor_mark = if zero_floor: "0+" elif px_floor > 0: px_floor.to_string() + "+" else: ""
-            normalized = normalized + floor_mark + fr_size.to_string() + "fr"
+            normalized = normalized + floor_mark + grid_fr_format_micro(fr_micro)
             continue
         # `auto` is kept for the column layout to size from its items
         # (`grid_explicit_auto_column_sizes`); `grid_track_sizes` still reads a
@@ -1237,8 +1237,8 @@ fn normalized_grid_auto_track(token: text, font_px: i32, percent_definite: bool)
             return limit
         return "{floor_px}auto"
     if token.ends_with("fr") and token.byte_len() > 2:
-        val fr_size = normalized_grid_positive_int(token.substring(0, token.byte_len() - 2))
-        return if fr_size > 0: "{fr_size}fr" else: ""
+        val fr_micro = grid_fr_number_micro(token.substring(0, token.byte_len() - 2))
+        return if fr_micro > 0: grid_fr_format_micro(fr_micro) else: ""
     val size = _padding_length_px(token, font_px)
     if size >= 0: "{size}px" else: ""
 
@@ -1390,6 +1390,64 @@ fn normalized_grid_template_areas(raw: text) -> text:
             pos = pos + 1
     result
 
+struct _GridAreaAxisResult:
+    valid: bool
+    placement: text
+
+struct _GridAreaShorthand:
+    valid: bool
+    row: text
+    col: text
+
+fn _grid_area_axis_placement(start_raw: text, end_raw: text, has_end: bool) -> _GridAreaAxisResult:
+    val s = start_raw.trim()
+    val s_lower = s.lower()
+    if s == "":
+        return _GridAreaAxisResult(valid: false, placement: "")
+    if not has_end:
+        if s_lower == "auto":
+            return _GridAreaAxisResult(valid: true, placement: "")
+        val single = normalized_grid_placement(s)
+        return _GridAreaAxisResult(valid: single != "", placement: single)
+    val e = end_raw.trim()
+    val e_lower = e.lower()
+    if e == "":
+        return _GridAreaAxisResult(valid: false, placement: "")
+    if s_lower == "auto":
+        if e_lower == "auto":
+            return _GridAreaAxisResult(valid: true, placement: "")
+        if e_lower.starts_with("span "):
+            val span_only = normalized_grid_placement(e)
+            return _GridAreaAxisResult(valid: span_only != "", placement: span_only)
+        val end_only = normalized_grid_placement("span 1 / " + e)
+        return _GridAreaAxisResult(valid: end_only != "", placement: end_only)
+    if e_lower == "auto":
+        val start_only = normalized_grid_placement(s)
+        return _GridAreaAxisResult(valid: start_only != "", placement: start_only)
+    val pair = normalized_grid_placement(s + " / " + e)
+    _GridAreaAxisResult(valid: pair != "", placement: pair)
+
+fn _parse_grid_area_shorthand(raw: text) -> _GridAreaShorthand:
+    val trimmed = raw.trim()
+    if trimmed == "" or find_from(trimmed, "/", 0) < 0:
+        return _GridAreaShorthand(valid: false, row: "", col: "")
+    val parts = trimmed.split("/")
+    if parts.len() < 2 or parts.len() > 4:
+        return _GridAreaShorthand(valid: false, row: "", col: "")
+    val row_res = _grid_area_axis_placement(
+        parts[0],
+        if parts.len() >= 3: parts[2] else: "",
+        parts.len() >= 3
+    )
+    val col_res = _grid_area_axis_placement(
+        parts[1],
+        if parts.len() == 4: parts[3] else: "",
+        parts.len() == 4
+    )
+    if not row_res.valid or not col_res.valid:
+        return _GridAreaShorthand(valid: false, row: "", col: "")
+    _GridAreaShorthand(valid: true, row: row_res.placement, col: col_res.placement)
+
 fn apply_grid_decls(mut st: Style, table: [text]):
     val columns = normalized_grid_track_list(
         decl_tbl_get(table, "grid-template-columns")
@@ -1428,9 +1486,27 @@ fn apply_grid_decls(mut st: Style, table: [text]):
         st.grid_auto_columns = auto_columns
     if normalized_grid_auto_flow(decl_tbl_get(table, "grid-auto-flow")):
         st.grid_auto_flow_column = true
-    val area = normalized_grid_area(decl_tbl_get(table, "grid-area"))
-    if area != "":
-        st.grid_area = area
+    val raw_area = decl_tbl_get(table, "grid-area")
+    val area_idx = decl_tbl_last_index(table, "grid-area")
+    val shorthand = _parse_grid_area_shorthand(raw_area)
+    if shorthand.valid:
+        st.grid_area = ""
+        if decl_tbl_last_index(table, "grid-row") < area_idx:
+            st.grid_row = shorthand.row
+        if decl_tbl_last_index(table, "grid-column") < area_idx:
+            st.grid_column = shorthand.col
+    else:
+        val line_only = normalized_grid_placement(raw_area)
+        if line_only != "":
+            st.grid_area = ""
+            if decl_tbl_last_index(table, "grid-row") < area_idx:
+                st.grid_row = line_only
+            if decl_tbl_last_index(table, "grid-column") < area_idx:
+                st.grid_column = ""
+        else:
+            val area = normalized_grid_area(raw_area)
+            if area != "":
+                st.grid_area = area
 
 fn _decl_tbl_raw_or(table: [text], prop: text, fallback: text) -> text:
     if decl_tbl_last_index(table, prop) < 0:

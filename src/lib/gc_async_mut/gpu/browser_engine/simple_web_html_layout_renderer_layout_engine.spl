@@ -16,12 +16,12 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
 use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_rest_pen_origin_reset, text_rest_pen_origin_restore, text_rest_pen_origin_record, g_text_rest_pen_origin_milli, box_frac_w_set, absolute_width_frac_milli, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record, form_control_tag}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{line_h_frac_milli, inline_element_union_text_line_h, text_line_frac_record, text_line_steps_table, text_line_steps_restore}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px, GridTrackLayout, grid_track_layout}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_auto_content_w}
 
 
@@ -1181,6 +1181,17 @@ pub fn web_styles_with_painted_percent_padding(nodes: [HNode], styles: [Style], 
 # per child in sibling order, -1 four times for a `display:none` child. CSS
 # Grid 8.5 auto-placement over `grid_column_count` columns and
 # `grid_row_capacity` rows; column flow fills `flow_row_bound` rows per column.
+fn _grid_area_rect_index(area_rects: [GridAreaRect], area_name: text) -> i32:
+    if area_name == "":
+        return -1
+    var area_idx = 0
+    var area_found = -1
+    while area_idx < area_rects.len():
+        if area_rects[area_idx].area == area_name:
+            area_found = area_idx as i32
+        area_idx = area_idx + 1
+    area_found
+
 fn grid_item_placements(
     styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style,
     area_rects: [GridAreaRect], grid_column_count: i32,
@@ -1198,13 +1209,18 @@ fn grid_item_placements(
     var grid_definite = child_index.first_child[i]
     while grid_definite >= 0:
         val definite_style = styles[grid_definite]
-        val definite_column = grid_placement_start(definite_style.grid_column)
-        val definite_row = grid_placement_start(definite_style.grid_row)
-        val definite_column_span = grid_placement_span(definite_style.grid_column)
+        var definite_column = grid_placement_start(definite_style.grid_column)
+        var definite_row = grid_placement_start(definite_style.grid_row)
+        var definite_column_span = grid_placement_span(definite_style.grid_column)
         var definite_row_span = grid_placement_span(definite_style.grid_row)
+        val definite_area_idx = _grid_area_rect_index(area_rects, definite_style.grid_area)
+        if definite_area_idx >= 0:
+            definite_column = area_rects[definite_area_idx].col_start
+            definite_row = area_rects[definite_area_idx].row_start
+            definite_column_span = area_rects[definite_area_idx].col_span
+            definite_row_span = area_rects[definite_area_idx].row_span
         if (
             definite_column >= 0 and definite_row >= 0 and
-            definite_style.grid_area == "" and
             definite_row < grid_row_capacity and
             definite_column + definite_column_span <= grid_column_count and
             not simple_web_style_hot_is_display_none(computed_style_hot_from(definite_style))
@@ -1237,18 +1253,12 @@ fn grid_item_placements(
             grid_child_style.grid_column
         )
         var grid_row_span = grid_placement_span(grid_child_style.grid_row)
-        if grid_child_style.grid_area != "":
-            var area_idx = 0
-            var area_found = -1
-            while area_idx < area_rects.len():
-                if area_rects[area_idx].area == grid_child_style.grid_area:
-                    area_found = area_idx as i32
-                area_idx = area_idx + 1
-            if area_found >= 0:
-                grid_column = area_rects[area_found].col_start
-                grid_row = area_rects[area_found].row_start
-                grid_column_span = area_rects[area_found].col_span
-                grid_row_span = area_rects[area_found].row_span
+        val area_found = _grid_area_rect_index(area_rects, grid_child_style.grid_area)
+        if area_found >= 0:
+            grid_column = area_rects[area_found].col_start
+            grid_row = area_rects[area_found].row_start
+            grid_column_span = area_rects[area_found].col_span
+            grid_row_span = area_rects[area_found].row_span
         if grid_column_span > grid_column_count:
             grid_column_span = grid_column_count
         if grid_row_span > grid_row_capacity:
@@ -1329,19 +1339,30 @@ fn grid_item_placements(
 
 # [columns, rows] the children of grid `i` reach by their own placement: a
 # definite start line plus its span, or the span alone. At least 1 each.
-fn grid_item_line_extents(styles: [Style], child_index: HtmlChildIndex, i: i32) -> [i32]:
+fn grid_item_line_extents(
+    styles: [Style], child_index: HtmlChildIndex, i: i32,
+    area_rects: [GridAreaRect]
+) -> [i32]:
     var column_extent = 1
     var row_extent = 1
     var c = child_index.first_child[i]
     while c >= 0:  # cpu-lane-loop-ok: one pass over a grid's children during layout, never on a paint path
         val cst = styles[c]
-        if cst.grid_area == "" and not simple_web_style_hot_is_display_none(computed_style_hot_from(cst)):
-            val column_start = grid_placement_start(cst.grid_column)
-            val column_end = (if column_start > 0: column_start else: 0) + grid_placement_span(cst.grid_column)
+        if not simple_web_style_hot_is_display_none(computed_style_hot_from(cst)):
+            var column_start = grid_placement_start(cst.grid_column)
+            var column_span = grid_placement_span(cst.grid_column)
+            var row_start = grid_placement_start(cst.grid_row)
+            var row_span = grid_placement_span(cst.grid_row)
+            val area_found = _grid_area_rect_index(area_rects, cst.grid_area)
+            if area_found >= 0:
+                column_start = area_rects[area_found].col_start
+                column_span = area_rects[area_found].col_span
+                row_start = area_rects[area_found].row_start
+                row_span = area_rects[area_found].row_span
+            val column_end = (if column_start > 0: column_start else: 0) + column_span
             if column_end > column_extent:
                 column_extent = column_end
-            val row_start = grid_placement_start(cst.grid_row)
-            val row_end = (if row_start > 0: row_start else: 0) + grid_placement_span(cst.grid_row)
+            val row_end = (if row_start > 0: row_start else: 0) + row_span
             if row_end > row_extent:
                 row_extent = row_end
         c = child_index.next_sibling[c]
@@ -1361,7 +1382,10 @@ fn grid_template_auto_track_count(raw: text) -> i32:
             continue
         if t == "auto":
             has_auto = true
-        elif grid_fr_track_factor(t) <= 0:
+        elif t.ends_with("fr"):
+            if grid_track_fr_micro(t) <= 0:
+                return 0
+        elif parse_int(t) <= 0:
             return 0
         n = n + 1
     if has_auto and n > 1: n else: 0
@@ -1380,36 +1404,76 @@ fn grid_template_auto_track_count(raw: text) -> i32:
 # A `L+Nfr` token (`minmax(Lpx, Nfr)`) starts at L, with no content floor.
 # ponytail: a spanning item does not size any track. Upgrade: spread spanning
 # items (CSS Grid 12.5.2).
+fn _grid_whole_track_layout(sizes: [i32], gap: i32) -> GridTrackLayout:
+    var start_milli: [i32] = []
+    var end_milli: [i32] = []
+    var cursor: i64 = 0
+    var col = 0
+    while col < sizes.len() as i32:
+        if col > 0:
+            cursor = cursor + (gap as i64) * 1000
+        start_milli.push(cursor as i32)
+        cursor = cursor + (sizes[col] as i64) * 1000
+        end_milli.push(cursor as i32)
+        col = col + 1
+    GridTrackLayout(sizes: sizes, start_milli: start_milli, end_milli: end_milli)
+
+fn _grid_snap_milli_i64(milli: i64) -> i32:
+    val shifted = milli + 500
+    (if shifted >= 0: shifted / 1000 else: 0 - ((999 - shifted) / 1000)) as i32
+
 fn grid_explicit_auto_column_sizes(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style,
-    placements: [i32], column_count: i32, available_w: i32, widths: [i32]
-) -> [i32]:
+    placements: [i32], explicit_count: i32, column_count: i32, available_w: i32, widths: [i32]
+) -> GridTrackLayout:
     val gap = st.column_gap_px
+    val auto_tracks = if st.grid_auto_columns == "": [] else: st.grid_auto_columns.split(" ")
     var sizes: [i32] = [0; column_count]
     var limits: [i32] = [0; column_count]
-    var fr: [i32] = [0; column_count]
+    var fr: [i64] = [0; column_count]
     var fr_floor: [bool] = [false; column_count]
     var is_auto: [bool] = [false; column_count]
-    var fr_total = 0
+    var fr_total: i64 = 0
     var auto_count = 0
+    var has_explicit_fr = false
     var column = 0
     for part in st.grid_template_columns.split(" "):
         val t = part.trim()
-        if t == "" or column >= column_count:
+        if t == "" or column >= explicit_count or column >= column_count:
             continue
         if t == "auto":
             is_auto[column] = true
             auto_count = auto_count + 1
         elif t.contains("+"):
-            fr[column] = grid_fr_track_factor(t)
+            fr[column] = grid_track_fr_micro(t)
             sizes[column] = grid_fr_track_floor(t)
             fr_total = fr_total + fr[column]
+            has_explicit_fr = true
         elif t.ends_with("fr"):
-            fr[column] = parse_int(t)
+            fr[column] = grid_track_fr_micro(t)
             fr_floor[column] = true
             fr_total = fr_total + fr[column]
+            has_explicit_fr = true
         else:
             sizes[column] = parse_int(t)
+        column = column + 1
+    column = explicit_count
+    while column < column_count:
+        val track = if auto_tracks.len() > 0: auto_tracks[(column - explicit_count) % (auto_tracks.len() as i32)] else: "auto"
+        if track.ends_with("fr"):
+            if not has_explicit_fr:
+                fr[column] = grid_track_fr_micro(track)
+                fr_total = fr_total + fr[column]
+        elif track.ends_with("%"):
+            sizes[column] = available_w * parse_int(track) / 100
+        elif track.ends_with("px"):
+            sizes[column] = parse_int(track)
+        else:
+            if track != "auto":
+                sizes[column] = parse_int(track)
+                limits[column] = sizes[column]
+            is_auto[column] = true
+            auto_count = auto_count + 1
         column = column + 1
     var c = child_index.first_child[i]
     var placement = 0
@@ -1464,35 +1528,49 @@ fn grid_explicit_auto_column_sizes(
     if free > 0 and fr_total > 0:
         # Expand flexible tracks (12.7): a track whose floor beats its share
         # keeps the floor and leaves the share to the others.
-        var flex_space = free
-        var flex_weight = fr_total
+        var flex_space: i64 = free as i64
+        var flex_weight: i64 = fr_total
         var inflexible: [bool] = [false; column_count]
         column = 0
         while column < column_count:
             if fr[column] > 0:
-                flex_space = flex_space + sizes[column]
+                flex_space = flex_space + (sizes[column] as i64)
             column = column + 1
         var changed = true
         while changed and flex_weight > 0:  # cpu-lane-loop-ok: each pass freezes one more fr track of one grid during layout
             changed = false
             column = 0
             while column < column_count:
-                if fr[column] > 0 and not inflexible[column] and sizes[column] * flex_weight > flex_space * fr[column]:
+                if fr[column] > 0 and not inflexible[column] and (sizes[column] as i64) * flex_weight > flex_space * fr[column]:
                     inflexible[column] = true
-                    flex_space = flex_space - sizes[column]
+                    flex_space = flex_space - (sizes[column] as i64)
                     flex_weight = flex_weight - fr[column]
                     changed = true
                 column = column + 1
-        var used = 0
-        var assigned = 0
-        column = 0
-        while column < column_count and flex_weight > 0:
-            if fr[column] > 0 and not inflexible[column]:
-                used = used + fr[column]
-                val after = flex_space * used / flex_weight
-                sizes[column] = after - assigned
-                assigned = after
-            column = column + 1
+        if flex_weight > 0:
+            var start_milli: [i32] = []
+            var end_milli: [i32] = []
+            var fixed_before: i64 = 0
+            var used_fr: i64 = 0
+            var prev_fr_px = 0
+            column = 0
+            while column < column_count:
+                val gap_before: i64 = (column as i64) * (gap as i64) * 1000
+                val fr_before_milli = (flex_space * used_fr * 1000 + flex_weight / 2) / flex_weight
+                val s_milli = fixed_before * 1000 + gap_before + fr_before_milli
+                start_milli.push(s_milli as i32)
+                if fr[column] > 0 and not inflexible[column]:
+                    used_fr = used_fr + fr[column]
+                    val fr_after_milli = (flex_space * used_fr * 1000 + flex_weight / 2) / flex_weight
+                    end_milli.push((fixed_before * 1000 + gap_before + fr_after_milli) as i32)
+                    val after_px = _grid_snap_milli_i64(fr_after_milli)
+                    sizes[column] = after_px - prev_fr_px
+                    prev_fr_px = after_px
+                else:
+                    fixed_before = fixed_before + (sizes[column] as i64)
+                    end_milli.push((s_milli + (sizes[column] as i64) * 1000) as i32)
+                column = column + 1
+            return GridTrackLayout(sizes: sizes, start_milli: start_milli, end_milli: end_milli)
     elif free > 0 and auto_count > 0 and (st.justify_content == "flex-start" or st.justify_content == "normal" or st.justify_content == "stretch"):
         var k = 0
         var assigned = 0
@@ -1504,7 +1582,7 @@ fn grid_explicit_auto_column_sizes(
                 sizes[column] = sizes[column] + after - assigned
                 assigned = after
             column = column + 1
-    sizes
+    _grid_whole_track_layout(sizes, gap)
 
 # Column sizes of a grid with implicit columns (CSS Grid 7.6, 12.5; Chrome
 # 159): the template tracks, then one `grid-auto-columns` track per implicit
@@ -1517,19 +1595,19 @@ fn grid_column_sizes_with_implicit(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style,
     placements: [i32], explicit_count: i32, column_count: i32,
     available_w: i32, widths: [i32]
-) -> [i32]:
+) -> GridTrackLayout:
     val gap = st.column_gap_px
     val auto_tracks = if st.grid_auto_columns == "": [] else: st.grid_auto_columns.split(" ")
     var sizes: [i32] = [0; column_count]
-    var fr: [i32] = [0; column_count]
+    var fr: [i64] = [0; column_count]
     var is_auto: [bool] = [false; column_count]
-    var fr_total = 0
+    var fr_total: i64 = 0
     var auto_count = 0
     var column = explicit_count
     while column < column_count:
         val track = if auto_tracks.len() > 0: auto_tracks[(column - explicit_count) % (auto_tracks.len() as i32)] else: "auto"
         if track.ends_with("fr"):
-            fr[column] = parse_int(track)
+            fr[column] = grid_track_fr_micro(track)
             fr_total = fr_total + fr[column]
         elif track.ends_with("%"):
             sizes[column] = available_w * parse_int(track) / 100
@@ -1563,25 +1641,75 @@ fn grid_column_sizes_with_implicit(
     while column < column_count:
         used_w = used_w + sizes[column]
         column = column + 1
-    val explicit = grid_track_sizes(
+    val explicit_layout = grid_track_layout(
         st.grid_template_columns, available_w - used_w + gap * (explicit_count - 1), gap
     )
     column = 0
-    while column < explicit_count and column < explicit.len() as i32:
-        sizes[column] = explicit[column]
-        used_w = used_w + explicit[column]
+    while column < explicit_count and column < explicit_layout.sizes.len() as i32:
+        sizes[column] = explicit_layout.sizes[column]
+        used_w = used_w + explicit_layout.sizes[column]
         column = column + 1
     val free_w = available_w - used_w
     val stretch_auto = st.justify_content == "flex-start" or st.justify_content == "normal" or st.justify_content == "stretch"
-    if free_w > 0 and (fr_total > 0 or (auto_count > 0 and stretch_auto)):
+    if free_w > 0 and fr_total > 0:
+        var start_milli: [i32] = []
+        var end_milli: [i32] = []
+        var fixed_before: i64 = 0
+        var used_fr: i64 = 0
+        var prev_fr_px = 0
+        val explicit_offset_milli: i64 = if explicit_layout.end_milli.len() > 0: explicit_layout.end_milli[explicit_layout.end_milli.len() - 1] as i64 else: 0
+        column = 0
+        while column < explicit_count and column < explicit_layout.start_milli.len() as i32:
+            start_milli.push(explicit_layout.start_milli[column])
+            end_milli.push(explicit_layout.end_milli[column])
+            column = column + 1
+        val base_gap_before: i64 = if explicit_count > 0: (gap as i64) * 1000 else: 0
+        val free_64: i64 = free_w as i64
+        while column < column_count:
+            val imp_gap_before: i64 = ((column - explicit_count) as i64) * (gap as i64) * 1000
+            val fr_before_milli = (free_64 * used_fr * 1000 + fr_total / 2) / fr_total
+            val s_milli = explicit_offset_milli + base_gap_before + imp_gap_before + fixed_before * 1000 + fr_before_milli
+            start_milli.push(s_milli as i32)
+            if fr[column] > 0:
+                used_fr = used_fr + fr[column]
+                val fr_after_milli = (free_64 * used_fr * 1000 + fr_total / 2) / fr_total
+                end_milli.push((explicit_offset_milli + base_gap_before + imp_gap_before + fixed_before * 1000 + fr_after_milli) as i32)
+                val after_px = _grid_snap_milli_i64(fr_after_milli)
+                sizes[column] = after_px - prev_fr_px
+                prev_fr_px = after_px
+            else:
+                fixed_before = fixed_before + (sizes[column] as i64)
+                end_milli.push((s_milli + (sizes[column] as i64) * 1000) as i32)
+            column = column + 1
+        return GridTrackLayout(sizes: sizes, start_milli: start_milli, end_milli: end_milli)
+    if free_w > 0 and auto_count > 0 and stretch_auto:
+        var k = 0
+        var assigned = 0
         column = explicit_count
         while column < column_count:
-            if fr_total > 0:
-                sizes[column] = sizes[column] + free_w * fr[column] / fr_total
-            elif is_auto[column]:
-                sizes[column] = sizes[column] + free_w / auto_count
+            if is_auto[column]:
+                k = k + 1
+                val after = free_w * k / auto_count
+                sizes[column] = sizes[column] + after - assigned
+                assigned = after
             column = column + 1
-    sizes
+    var start_milli: [i32] = []
+    var end_milli: [i32] = []
+    var cursor: i64 = 0
+    column = 0
+    while column < explicit_count and column < explicit_layout.start_milli.len() as i32:
+        start_milli.push(explicit_layout.start_milli[column])
+        end_milli.push(explicit_layout.end_milli[column])
+        cursor = (explicit_layout.end_milli[column] as i64)
+        column = column + 1
+    while column < column_count:
+        if column > 0:
+            cursor = cursor + (gap as i64) * 1000
+        start_milli.push(cursor as i32)
+        cursor = cursor + (sizes[column] as i64) * 1000
+        end_milli.push(cursor as i32)
+        column = column + 1
+    GridTrackLayout(sizes: sizes, start_milli: start_milli, end_milli: end_milli)
 
 # `justify-content` on grid columns (CSS Box Alignment 5.1, CSS Grid 11.1;
 # Chrome 159): [lead, extra gap]. With free space, center / end shift every
@@ -2463,16 +2591,23 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # block path they had, a lone `auto` template keeps it too, and a spanning
     # item does not widen an auto track. Upgrade: size explicit + implicit
     # tracks in one pass and spread spanning items (CSS Grid 12.5.2).
-    var grid_auto_template_n = if st.display == "grid": grid_template_auto_track_count(st.grid_template_columns) else: 0
-    if grid_auto_template_n > 0 and (st.grid_auto_flow_column or st.grid_auto_columns != "" or grid_item_line_extents(styles, child_index, i)[0] > grid_auto_template_n):
-        grid_auto_template_n = 0
-    var grid_explicit_columns: [i32] = [0; grid_auto_template_n]
-    if grid_auto_template_n == 0:
-        grid_explicit_columns = grid_track_sizes(st.grid_template_columns, iw, st.column_gap_px)
+    var area_rects: [GridAreaRect] = []
+    var grid_extents: [i32] = [1, 1]
+    var grid_auto_template_n = 0
+    var grid_explicit_layout = GridTrackLayout(sizes: [], start_milli: [], end_milli: [])
+    if st.display == "grid":
+        area_rects = grid_template_area_rects(st.grid_template_areas)
+        grid_extents = grid_item_line_extents(styles, child_index, i, area_rects)
+        grid_auto_template_n = grid_template_auto_track_count(st.grid_template_columns)
+        if grid_auto_template_n == 0 and st.grid_template_columns.trim() == "auto" and (st.grid_auto_flow_column or st.grid_auto_columns != "" or grid_extents[0] > 1):
+            grid_auto_template_n = 1
+        if grid_auto_template_n == 0:
+            grid_explicit_layout = grid_track_layout(st.grid_template_columns, iw, st.column_gap_px)
+    val grid_explicit_columns = grid_explicit_layout.sizes
     # Without a column template the grid still has columns when implicit ones
     # are sized (`grid-auto-columns`) or made by the flow (`grid-auto-flow:
     # column`); any other template-less grid stays on the block path below.
-    if st.display == "grid" and (grid_explicit_columns.len() > 0 or st.grid_auto_columns != "" or st.grid_auto_flow_column):
+    if st.display == "grid" and (grid_auto_template_n > 0 or grid_explicit_columns.len() > 0 or st.grid_auto_columns != "" or st.grid_auto_flow_column):
         # Row `fr` tracks would need the container's resolved content height,
         # which isn't generally known ahead of auto-height row sizing;
         # available_w=0 here means an `fr` row track resolves to 0px rather
@@ -2483,18 +2618,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         val grid_row_capacity = (
             grid_child_count + explicit_rows.len() as i32 + 1
         )
-        # `grid-template-areas` named-area rectangles, resolved against
-        # `grid-area:<name>` references below (CSS Grid SS7.1); see
-        # grid_template_area_rects for the rectangularity-validation and
-        # scope notes.
-        val area_rects = grid_template_area_rects(st.grid_template_areas)
         # Implicit columns (CSS Grid 7.6): a definite column or a span past
         # the template widens the row-flow grid; column flow fills
         # `grid_flow_rows` rows per column and opens a column whenever they
         # are full, so it is placed over one spare column per item and the
         # grid keeps the columns it used.
-        val grid_explicit_column_count = grid_explicit_columns.len() as i32
-        val grid_extents = grid_item_line_extents(styles, child_index, i)
+        val grid_explicit_column_count = if grid_auto_template_n > 0: grid_auto_template_n else: grid_explicit_columns.len() as i32
         val grid_flow_rows = if not st.grid_auto_flow_column:
             grid_row_capacity
         elif explicit_rows.len() as i32 > 0:
@@ -2518,13 +2647,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 grid_column_count = placed_column_end
             grid_placement_index = grid_placement_index + 4
         grid_placement_index = 0
-        val grid_columns = if grid_column_count == grid_explicit_column_count:
-            if grid_auto_template_n > 0: grid_explicit_auto_column_sizes(nodes, styles, child_index, i, st, grid_placements, grid_column_count, iw, out_intrinsic_widths) else: grid_explicit_columns
+        val grid_columns_layout = if grid_auto_template_n > 0:
+            grid_explicit_auto_column_sizes(nodes, styles, child_index, i, st, grid_placements, grid_explicit_column_count, grid_column_count, iw, out_intrinsic_widths)
+        elif grid_column_count == grid_explicit_column_count:
+            grid_explicit_layout
         else:
             grid_column_sizes_with_implicit(
                 nodes, styles, child_index, i, st, grid_placements,
                 grid_explicit_column_count, grid_column_count, iw, out_intrinsic_widths
             )
+        val grid_columns = grid_columns_layout.sizes
         # Implicit `grid-auto-columns` tracks count as flexible only when the grid has them.
         val grid_has_fr = st.grid_template_columns.contains("fr") or (grid_column_count > grid_explicit_column_count and st.grid_auto_columns.contains("fr"))
         val grid_justify = grid_justify_content_offsets(st, grid_columns, iw, grid_has_fr)
@@ -2535,7 +2667,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # its items; every other implicit row is content sized from its
         # `grid-auto-rows` floor, and `fr` implicit rows are equalized below.
         var grid_row_fixed: [bool] = [false; grid_row_capacity]
-        var grid_row_fr: [i32] = [0; grid_row_capacity]
+        var grid_row_fr: [i64] = [0; grid_row_capacity]
         val grid_auto_tracks = if st.grid_auto_rows == "": [] else: st.grid_auto_rows.split(" ")
         var explicit_row_index = 0
         while explicit_row_index < grid_row_capacity:
@@ -2545,7 +2677,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             elif grid_auto_tracks.len() > 0:
                 val auto_track = grid_auto_tracks[(explicit_row_index - explicit_rows.len() as i32) % (grid_auto_tracks.len() as i32)]
                 if auto_track.ends_with("fr"):
-                    grid_row_fr[explicit_row_index] = parse_int(auto_track)
+                    grid_row_fr[explicit_row_index] = grid_track_fr_micro(auto_track)
                 elif auto_track != "auto":
                     grid_rows[explicit_row_index] = parse_int(auto_track)
                     grid_row_fixed[explicit_row_index] = auto_track.ends_with("px")
@@ -2583,16 +2715,33 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # percent margins on all four sides are of its inline size, and the
             # item's margin box fills it (Chrome 159). Auto inline margins
             # keep the legacy 0 here.
+            val grid_base_whole_x = grid_track_offset(
+                grid_columns, st.column_gap_px, grid_column
+            )
+            val grid_base_width = grid_track_span_size(
+                grid_columns, st.column_gap_px,
+                grid_column, grid_column_span
+            )
+            val grid_whole_x = grid_track_offset(
+                grid_columns, grid_column_gap, grid_column
+            )
             val grid_child_width = grid_track_span_size(
                 grid_columns, grid_column_gap,
                 grid_column, grid_column_span
             )
+            val grid_col_end = grid_column + grid_column_span - 1
+            val grid_col_left_err = if grid_column >= 0 and grid_column < grid_columns_layout.start_milli.len() as i32:
+                grid_columns_layout.start_milli[grid_column] - grid_base_whole_x * 1000
+            else:
+                0
+            val grid_col_right_err = if grid_col_end >= 0 and grid_col_end < grid_columns_layout.end_milli.len() as i32:
+                grid_columns_layout.end_milli[grid_col_end] - (grid_base_whole_x + grid_base_width) * 1000
+            else:
+                0
             val grid_margin_l = if grid_child_style.margin_l_auto: 0 else: resolve_horizontal_margin(grid_child_style.margin_l, grid_child_style.margin_l_pct, grid_child_width)
             val grid_margin_r = if grid_child_style.margin_r_auto: 0 else: resolve_horizontal_margin(grid_child_style.margin_r, grid_child_style.margin_r_pct, grid_child_width)
             var grid_child_x = (
-                ix + grid_column_lead + grid_track_offset(
-                    grid_columns, grid_column_gap, grid_column
-                ) + grid_margin_l
+                ix + grid_column_lead + grid_whole_x + grid_margin_l
             )
             val grid_margin_t = vertical_margin_px_in(
                 grid_child_style, true, viewport_h, grid_child_width
@@ -2645,12 +2794,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             val grid_ml_err = margin_l_err_milli(grid_child_style, grid_child_width)
             val grid_mr_err = margin_r_err_milli(grid_child_style, grid_child_width)
             box_x_snap_clear(nodes.len() as i32, grid_child)
-            if grid_ml_err != 0 or grid_mr_err != 0:
-                val grid_left = (box_line_start_err_at(i) as i32) + grid_ml_err
+            box_device_extra_w_record(nodes.len() as i32, grid_child, 0)
+            if grid_ml_err != 0 or grid_mr_err != 0 or grid_col_left_err != 0 or grid_col_right_err != 0:
+                val grid_left = (box_line_start_err_at(i) as i32) + grid_col_left_err + grid_ml_err
                 val grid_sx = box_x_snap(nodes.len() as i32, grid_child, grid_left)
                 grid_child_x = grid_child_x + grid_sx
                 if grid_auto_w and grid_child_style.min_width_px == 0 and grid_child_style.max_width_px == 0:
-                    val grid_right = (box_line_start_err_at(i) as i32) + grid_item_w * 1000 - grid_mr_err
+                    val grid_right = (box_line_start_err_at(i) as i32) + grid_item_w * 1000 + grid_col_right_err - grid_mr_err
                     grid_item_w = snap_milli_px(grid_right) - grid_sx
                     if grid_item_w < 0:
                         grid_item_w = 0
@@ -2746,18 +2896,18 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             grid_span_item = grid_span_item + 1
         # `fr` implicit rows of an auto-height grid share one flex fraction:
         # the largest content size per `fr` among them (CSS Grid 12.7.1).
-        var grid_fr_unit = 0
+        var grid_fr_unit: i64 = 0
         var grid_fr_row = 0
         while grid_fr_row < max_grid_row:
             if grid_row_fr[grid_fr_row] > 0:
-                val fr_unit = (grid_rows[grid_fr_row] + grid_row_fr[grid_fr_row] - 1) / grid_row_fr[grid_fr_row]
+                val fr_unit = ((grid_rows[grid_fr_row] as i64) * 1000000 + grid_row_fr[grid_fr_row] - 1) / grid_row_fr[grid_fr_row]
                 if fr_unit > grid_fr_unit:
                     grid_fr_unit = fr_unit
             grid_fr_row = grid_fr_row + 1
         grid_fr_row = 0
         while grid_fr_row < max_grid_row:
             if grid_row_fr[grid_fr_row] > 0:
-                grid_rows[grid_fr_row] = grid_fr_unit * grid_row_fr[grid_fr_row]
+                grid_rows[grid_fr_row] = ((grid_fr_unit * grid_row_fr[grid_fr_row] + 999999) / 1000000) as i32
             grid_fr_row = grid_fr_row + 1
         # Second pass: the rows are final. Re-lay an item whose row offset
         # moved, that stretches to a content sized row, or that `align-self`
