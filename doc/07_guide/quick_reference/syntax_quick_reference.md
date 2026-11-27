@@ -108,9 +108,16 @@ An unannotated parameter is a type variable, **not** `any`. For mixed data use
 an `enum` (closed set of cases). Trait objects (`dyn Trait`) are the intended
 answer for an open set, but the self-hosted compiler cannot yet dispatch a
 trait call with several implementors, so do not migrate onto `dyn Trait` yet.
-A script is a `.shs` file or an `.spl` file with top-level statements and no
-`fn main`; a module it imports is still checked as safe code. These rules are
-not yet enforced in default builds.
+`unsafe` means any `unsafe:` block or `@unsafe` function; no extra capability
+is needed. **Script mode is a property of the source file, set by file kind
+and config, not by how the file is run:** `.shs` and `.sscript` are script by
+default, `.spl` is compiled (even with top-level statements); a file-header
+attribute, CLI flag or `simple.sdn` row can change it, most local wins. The
+interpreter also runs compiled-mode source, as `bin/simple test` does, and
+applies the compiled rules to it. A module a script imports is still checked
+as safe code. Generics are being moved to per-type copies (monomorphization).
+None of this is enforced in default builds yet, and the config key names are
+not final; see the design doc §3.2 and §6.
 
 ---
 

@@ -26,10 +26,14 @@ SFFI (Simple FFI) is Simple's mechanism for calling C/C++/Rust functions. It use
 > generates the Simple `extern fn`, the Rust signature, the C prototype and a
 > parity check. On top sits a safe generic Simple wrapper: `Handle<T>` (a
 > phantom newtype over the handle word, erased at codegen) and `FfiCodec<T>`
-> (statically resolved and inlined; identity for scalars and handles).
+> (monomorphized and inlined; identity for scalars and handles). With full
+> monomorphization decided the same day, the inlined codec and unboxed
+> `Array<f64>` storage are the default design, not an option; they depend on
+> the monomorphization stage, which does not exist yet.
 > **Generics never cross the ABI**, tag checks exist only in the unsafe decode
-> layer, and collections store typed unboxed elements (`Array<f64>`). `any` is
-> not a wrapper type: it is allowed only in `unsafe` and script mode. Design:
+> layer, and collections store typed unboxed elements. `any` is not a wrapper
+> type: it is allowed only in `unsafe` (any `unsafe` block or function) and
+> script mode. Design:
 > `doc/05_design/language/type_system/no_any_inference_generics.md` §7; staged
 > work: `doc/03_plan/language/type_system/no_any_inference_plan.md` stage S6.
 > Everything below describes what exists today.

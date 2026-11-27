@@ -1,7 +1,10 @@
 # No `any` in Safe Code: Inference, Implicit Generics, Thin SFFI
 
-**Status:** owner-approved design, 2026-11-27. **Not implemented** except where
-§2 says so. Rollout is warn first, then error (§12).
+**Status:** owner-approved design, 2026-11-27, with the follow-up owner
+decisions of the same day folded in (§13.1): full monomorphization, `any` in
+any `unsafe`, source mode by file kind and config, syntactic-only seed.
+**Not implemented** except where §2 says so. Rollout is warn first, then error
+(§12).
 **Plan:** `doc/03_plan/language/type_system/no_any_inference_plan.md`.
 **Numbers:** counts and timings come from the 2026-11-27 usage census, a
 read-only analysis that is not checked in. They carry the census's own labels
@@ -42,8 +45,8 @@ annotated; private agree gives one copy; private disagree gives a capped,
 deduplicated implicit generic; over cap or unsupported recursion is an
 "annotate" error; disagreeing arms are an error naming both), and warn then
 error. Everything more specific in this document is a **proposal** made to
-fill in that decision and is listed for confirmation in §13: the definition of
-script mode, treating all unannotated methods as must-annotate, the value
+fill in that decision and is listed for confirmation in §13: the
+source-mode config names, treating all unannotated methods as must-annotate, the value
 restriction, the cap value, the rules for method, field and arithmetic uses of
 an inferred `T`, keeping collection access as compiler intrinsics, and
 realizing the codec inside the compiler first.
@@ -93,8 +96,9 @@ callbacks 5%; handles 2%; mixed containers 2%; reflection 1 to 2%.
   deleted (commit `200a05f5bc8`); the owner decision of 2026-10-31 is one
   erased body per generic function, with `T` a tagged word boxed and decoded at
   boundaries. The seed resolves a single uppercase letter type name straight to
-  `ANY` (`compiler/src/hir/lower/type_resolver.rs`). **There is no
-  monomorphizer anywhere.** §6 is about what that means for this design.
+  `ANY` (`compiler/src/hir/lower/type_resolver.rs:295-297`). **There is no
+  monomorphizer anywhere.** The 2026-11-27 decision reverses this (§6); the
+  bullet describes the code as it is today.
 - **Self-hosted diagnostics.** `E-ANY-COMPILE-001` / `W-ANY-COMPILE-001`
   (written `Any`, `20.hir/hir_lowering/types.spl`), `E-MC-ANY-001/002` (the
   typed-HIR escape checker in `35.semantics/any_escape/`), `E-MIR-TYPE-Any`,
@@ -138,8 +142,9 @@ callbacks 5%; handles 2%; mixed containers 2%; reflection 1 to 2%.
    it.** The driver passes an empty grant list
    (`80.driver/hir_semantic_consumer_v1.spl`); `type_erasure` is used 0 times
    in `src/lib`, `src/os` and the seed std (4 in `src/app`), against 5,227
-   `@unsafe` and 3,954 `unsafe(capabilities: [...])` uses [exact]. See Q5.
-6. **No script-mode flag exists** in either compiler, only proxies (§3.2).
+   `@unsafe` and 3,954 `unsafe(capabilities: [...])` uses [exact]. Decided:
+   any `unsafe` admits `any` and the capability requirement goes (§3.1).
+6. **No source-mode flag exists** in either compiler, only proxies (§3.2).
 7. **The seed has no equivalent.** No any/untyped diagnostic; the production
    pipeline always lowers leniently; the type check result is discarded and its
    errors are downgraded to a warning (`pipeline/lowering.rs`);
@@ -154,7 +159,17 @@ callbacks 5%; handles 2%; mixed containers 2%; reflection 1 to 2%.
    exported, 386 have zero same-file call sites [est]. They are either dead or
    used from other files without an `export`. §5.2 depends on which.
 
-### 2.4 In flight, seed only, uncommitted at the time of writing
+### 2.4 Seed work landed and in flight
+
+Landed on `release/1.0.0` on 2026-11-27 (seed, adjacent to this design):
+
+- PR #12235 (`work/seed-long-match-chain-stall-20261127`): long `match` chain
+  JIT stall.
+- PR #12236 (`work/jit-nested-option-result-match-20261127`): nested `Option`
+  / `Result` patterns in JIT `match`; the remaining nested optional pattern
+  holes found in review are filed under `doc/08_tracking/bug/`.
+
+In flight, not on the release line when this was written:
 
 - Lane `d29-e` (`work/seed-join-disagreeing-siblings-20261127`): typed join of
   value-position `if`/`match` arms in `hir/lower/expr/control.rs`
@@ -172,50 +187,179 @@ callbacks 5%; handles 2%; mixed containers 2%; reflection 1 to 2%.
   `SCRIPT_ENTRY_ATTR`) on the `main` synthesized from a script's top-level
   statements.
 
+Both lanes decide "script" with an ad-hoc heuristic (an entry file with
+top-level statements and no `main`: `set_entry_script_mode` in d29-e,
+`SCRIPT_ENTRY_ATTR` in d29-c). That is **not** the decided definition and is
+to be replaced by the resolved source mode (§3.2, plan S4-A/S4-B).
+
 ## 3. Where `any` is allowed
 
-### 3.1 `unsafe`
+### 3.1 `unsafe` (decided 2026-11-27)
 
-`any` may be named, created, stored and passed inside `unsafe` code. A value
-may leave an `unsafe` region into safe code only through a **checked decode**:
-an operation that inspects the runtime tag and either yields a typed value or
-fails (`Option<T>` / `Result<T, E>`). The decode itself is written in `unsafe`.
-This is the only place tag checks occur (§7.4).
+`any` may be named, created, stored and passed inside **any** `unsafe` code:
+an `unsafe:` block (with or without a capability list) and the body of an
+`@unsafe` / `unsafe fn` function. There is **no separate `type_erasure`
+capability requirement**. The existing escape checker implements the narrower
+capability rule and the driver passes it an empty grant list; both change
+(plan S4-C). In the seed an `@unsafe` function does not set the unsafe depth
+today (`FunctionDef::has_unsafe()` has no callers), so only blocks are visible
+there; that is fixed in the same lane.
 
-Whether "unsafe" here means any `unsafe:` block and `@unsafe` function, or only
-code granted the `type_erasure` capability, is open (Q5). The decision text
-says `unsafe`; the existing escape checker implements the narrower capability;
-the warn-rules guide already exempts any `unsafe:`/`danger:` block. In the seed
-an `@unsafe` function does not set the unsafe depth today
-(`FunctionDef::has_unsafe()` has no callers), so only blocks are visible there.
+A value may leave an `unsafe` region into safe code only through a **checked
+decode**: an operation that inspects the runtime tag and either yields a typed
+value or fails (`Option<T>` / `Result<T, E>`). The decode itself is written in
+`unsafe`. This is the only place tag checks occur (§7.5).
 
-### 3.2 Script mode
+Because every `unsafe` now admits `any`, the count of `any` uses inside unsafe
+code is ratcheted (it is 0 today), so growth is visible in review.
 
-What counts as script mode is an **open owner decision** (Q7); this section is
-the recommended answer. Script mode is a property of the **source unit**, not
-of how it is executed. A script is a `.shs` file, or an `.spl` file with top-level statements and no
-`fn main`. In such a unit `any` is allowed and unannotated code behaves as it
-does today.
+### 3.2 Source mode: script or compiled (decided 2026-11-27)
 
-The exemption is **per compilation unit**. A library module imported by a
-script is still safe compiled code and is checked as such. When a script passes
-an `any` value to a typed parameter of a safe function, the conversion happens
-on the script side with a runtime tag check and a runtime error on mismatch.
+**Decision:** whether a source unit is in script mode is determined by its
+**file kind**, and a **config setting can change it**. It is not determined by
+which engine runs the code: the interpreter can run a unit in compiled mode,
+which is what the test runner does.
 
-No flag carries this today. Three proxies exist and they do not agree:
+Two axes that must not be conflated:
 
-| Proxy | Where | Problem as the definition |
-|-------|-------|---------------------------|
-| Structural: file has top-level statements | seed `pipeline/script_detection.rs` (`has_script_statements`), `is_script_statement` in `pipeline/native_project/compiler.rs`, lane d29-c's `SCRIPT_ENTRY_ATTR` | closest to the definition; not yet a field on the module |
-| Execution mode | self-hosted `CompileMode.Interpret` | library code would escape the rule whenever it is run interpreted, which is every `bin/simple test` |
-| Path | self-hosted `10.frontend/core/parser.spl`, `parser_path_is_script` (`examples/`, `scripts/`, `test/`, `fixtures/`, `repro/`) | written for the `LOG001` print lint; would exempt every acceptance spec from the rule being tested |
+| Axis | Question | Values | Set by |
+|------|----------|--------|--------|
+| **Source mode** | which language rules apply to this unit | `script`, `compiled` | file kind, then config |
+| **Execution engine** | what runs it | interpreter, JIT, native (AOT), SMF | CLI / `SIMPLE_EXECUTION_MODE` / test-runner `--mode` |
 
-The design adds an explicit source kind (`Module` or `Script`) to the parsed
-module, set from the file, with the same predicate in both compilers.
+Every combination is legal. `compiled` source run by the interpreter is the
+normal case for `bin/simple test`; `script` source is never an input to a
+native build of a library.
 
-Consequence for tests: a spec file is itself a script unit, so a negative test
-("this must be a compile error") cannot be written as top-level code in a spec.
-It has to compile a fixture as a non-script module and assert the diagnostic.
+#### What the tree specifies today
+
+Read from the tree. No single document states the whole rule, so the gaps are
+named and filled as proposals below.
+
+- **File kinds.** `doc/07_guide/language/naming_convention.md` §8 defines two
+  extensions: `.spl` (Simple source: application, library, compiler and test
+  code) and `.shs` (shell scripts). The seed driver additionally accepts
+  `.simple` and `.sscript` as Simple source (`driver/src/exec_core.rs`,
+  `driver/src/cli/basic.rs`) and diverts `.shs` to the interpreter
+  (`interpreter_preference_reason` returns `shs-extension`).
+- **Config precedence that already exists for a neighbouring setting.**
+  `doc/07_guide/language/strictness_tiers.md` ("Strictness Tiers (Script
+  Modes)") selects `moderate` / `lib` / `reliable` with most-local-wins
+  precedence: file-header attribute `@lint_profile(...)`, then CLI
+  `--profile`, then `simple.sdn` `[lints] profile`. `moderate` is described
+  there as the tier for scripts, prototypes and examples.
+- **Engine selection.** `SIMPLE_EXECUTION_MODE`, the test runner `--mode`
+  (`TestExecutionMode`: interpreter, SMF, native, compile, safe mode) and the
+  self-hosted `CompileMode` (`Interpret`, `Jit`, `Aot`, `Check`, `Sdn`,
+  `SmfExec`). These choose an engine and say nothing about source mode.
+- **Not found:** a config key that sets source mode, and a statement of which
+  mode a `.spl` file with top-level statements is in. Both are proposals
+  below and need confirming (Q7a, Q7b).
+
+#### Default by file kind
+
+| File kind | Default source mode |
+|-----------|---------------------|
+| `.shs` | `script` |
+| `.sscript` | `script` (the extension exists for this; today the seed only treats it as Simple source) |
+| `.spl`, `.simple` | `compiled` |
+
+A `.spl` file is `compiled` by default **whether or not it has top-level
+statements**. Top-level statements decide how an entry point is synthesized,
+not which rules apply. This is where the decided rule differs from the
+heuristics now in the tree (below), and it means spec files and examples are
+compiled-mode source unless config says otherwise (Q7b).
+
+#### Config, and precedence
+
+Most-local wins, the same order the strictness tier already uses:
+
+1. **File-header attribute** on the unit (proposed spelling
+   `@source_mode(script)` / `@source_mode(compiled)`).
+2. **CLI flag** for the invocation (proposed `--source-mode=script|compiled`),
+   applying to the entry unit only.
+3. **`simple.sdn`**: a project default and per-path overrides (proposed
+   `[source_mode] default = "compiled"` plus path-prefix rows, for example
+   `"examples/" = "script"`).
+4. **File kind** default from the table above.
+
+The key and attribute names are proposals (Q7a); the precedence and the
+existence of a config override are the decision. An environment variable is
+deliberately not in the list: mode must be a property of the source tree, so
+that the same file means the same thing on every machine.
+
+Source mode is separate from the strictness tier. A `script` unit normally
+also runs at `moderate`, but the tier governs lint severity while source mode
+governs the `any` and inference rules; neither implies the other.
+
+Overrides are visible: a config row or attribute that moves a `.spl` unit to
+`script` is counted by a ratchet, like unsafe uses, because it is the other
+way to switch the rule off.
+
+#### Interpreter in compiled mode
+
+When the interpreter runs a `compiled` unit it applies the same front end as a
+native build: parse, HIR lowering, type inference and the safe-code checks run
+and their errors are errors. Only code generation differs. The dynamic value
+representation inside the interpreter is an implementation detail and does not
+make the source "script". The test runner already works this way in spirit: it
+selects an engine per run (`--mode`) over the same spec source, and the seed
+`SIMPLE_JIT_STRICT` path already refuses to demote a typed lowering error to
+an interpreter fallback.
+
+What has to change for this to be true everywhere: today the self-hosted
+driver computes `script_mode = (mode == CompileMode.Interpret)`
+(`80.driver/driver_hir_pipeline_passes.spl`) and gates the `any` ban on
+`mode != Interpret` (`driver_hir_pipeline_lowering.spl`). Left as is, library
+code would escape the rule on every `bin/simple test`. Both sites read the
+source mode of the unit instead.
+
+#### How lowering and the type checker learn the mode
+
+1. The **driver** resolves the mode once per unit, from path, extension,
+   config and header attribute, before parsing the body.
+2. It is stored on the **parsed module** as `source_mode` and copied to the
+   HIR module.
+3. **HIR lowering** reads it from the module (the seed function context
+   carries it next to `unsafe_depth`); the **type checker** and the
+   `any`-escape pass read it from the HIR module.
+4. It is part of the **cache key** of the unit, so a config change re-checks
+   the unit, and it is **not** inherited across imports: each imported unit
+   has its own mode.
+5. No pass re-derives it from the path, the engine or the AST shape.
+
+#### What differs between the two modes
+
+| Rule | `compiled` | `script` |
+|------|-----------|----------|
+| `any`, `[any]` | only in `unsafe` | allowed |
+| Unannotated parameter | type variable; tiers of §5 | dynamic, as today |
+| Undeterminable type | compile error | dynamic value |
+| Disagreeing `if`/`match` arms | compile error | allowed |
+| Exported function unannotated | error (after rollout) | allowed |
+| Top-level statements | allowed (entry synthesis) | allowed |
+| Imported by compiled code | yes | only through annotated exports, checked at the boundary |
+| Native / AOT build target | yes | no; scripts are run, not linked into libraries |
+| Calling a typed function with a dynamic value | n/a | runtime tag check at the call, runtime error on mismatch |
+
+#### Heuristics to be replaced
+
+Three proxies exist today. None is the decided definition; S4-A and S4-B
+replace all of them with the resolved `source_mode`.
+
+| Proxy | Where | Why it is wrong |
+|-------|-------|-----------------|
+| Entry file with top-level statements and no `main` | seed: `has_script_statements` (`pipeline/script_detection.rs`), `is_script_statement` (`pipeline/native_project/compiler.rs`), and the ad-hoc switches added by the in-flight seed lanes: `set_entry_script_mode` (lane d29-e) and `SCRIPT_ENTRY_ATTR` / `__script_entry` (lane d29-c) | a `.spl` spec or example is `compiled` by file kind; AST shape is not the rule. **To be replaced** |
+| Execution engine | self-hosted `CompileMode.Interpret` | exempts library code whenever it is interpreted |
+| Path | self-hosted `parser_path_is_script` (`10.frontend/core/parser.spl`: `examples/`, `scripts/`, `test/`, `fixtures/`, `repro/`) | written for the `LOG001` print lint; paths belong in config rows, not in the parser |
+
+The in-flight lanes needed a switch in order to land. It is temporary and its
+replacement is tracked.
+
+Consequence for tests: under the default a spec file is `compiled`, so a
+negative test can live in an ordinary fixture module, and the 618 explicit
+`any` uses under `test/` are in scope for migration unless config marks a
+directory `script`.
 
 ## 4. Element 1: annotations and inference
 
@@ -264,7 +408,7 @@ and warn-first, because they hide real breakage (§10.3).
 | T1 | `pub` / exported, unannotated | must annotate; the error carries the inferred signature | about 600 (93 `pub` + about 503 via `export` lists) | one typed copy |
 | T1m | unannotated method | must annotate | 230 | one typed copy |
 | T2 | private, same-module call sites **agree** | inferred | about 470 to 500 of 553 | **one** monomorphic copy; cheaper than today (no boxing) |
-| T3 | private, call sites **disagree** | implicit generic, instances capped and deduplicated | fewer than 30 | see §6 |
+| T3 | private, call sites **disagree** | implicit generic, instances capped and deduplicated | fewer than 30 | one copy per distinct type vector (§6) |
 | T4 | over the cap, unsupported recursion, or a body that dispatches on runtime tags | **compile error**: annotate, or use an enum | about 170 raw, about 60 unique | none |
 | T5 | `unsafe` / script | `any` allowed | 0 uses inside unsafe today | as today |
 
@@ -334,10 +478,9 @@ Uses of an inferred `T` inside a T3 body:
   another.
 - **Over the cap** is T4, never a silent switch to something else.
 
-Under the current erased model an instance is a type-level fact and costs no
-extra body, so the cap and dedup matter for code size only if §6 is answered
-with specialization. They are specified now so that answer does not change the
-language rule.
+With full monomorphization (§6) each instance is a real copy of the body, so
+the cap bounds code size directly. The cap applies to implicit generics only;
+explicit `<T>` is governed by the budgets in §6.3.
 
 ### 5.5 T4: what is refused
 
@@ -366,40 +509,87 @@ The census found no text-versus-int disagreement in existing source by grep,
 so this rule is expected to break little and to stop silent wrong values where
 it fires.
 
-## 6. Instances versus the erased-generics decision
+## 6. Generics are monomorphized (decided 2026-11-27)
 
-This is where this design and an earlier owner decision pull in different
-directions. It is **left open for the owner** (Q1; the census calls it D1).
+**Decision:** full monomorphization. Every generic function and type gets one
+copy of code per distinct closed type-argument vector, everywhere: explicit
+`<T>`, implicit generics (T3), generic types and their methods.
 
-- 2026-10-31: generics are erased; one body per generic; no monomorphizer.
-- 2026-11-27: safe code never uses or produces `any`; a T3 function has
-  instances with a cap; `FfiCodec<T>` is monomorphized and inlined; collections
-  store typed unboxed elements.
+**This reverses the owner decision of 2026-10-31** ("one erased body per
+generic function"), recorded in
+`doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md`
+(§1A and the revision 1.1 notes) and
+`doc/08_tracking/bug/monomorphization_deleted_2026-10-31.md`, and stated as a
+rule in `.claude/rules/language.md` ("Generics are erased - there is no
+monomorphization pass"). Under that decision `src/compiler/40.mono` was deleted
+(commit `200a05f5bc8`) and the erased execution model was built in its place.
+Those documents and that rule remain accurate descriptions of **the code as it
+is today** until the lanes below land. Each is updated by the lane that makes
+it false, not before.
 
-The census separates two goals that the decision text treats as one:
+### 6.1 What has to be built
 
-| Goal | Needs specialization? | Status |
-|------|-----------------------|--------|
-| Remove `any` **the type** from safe code: every use statically checked, no silent garbage | **No.** HM with implicit generics works over the erased representation. An inferred `T` has the runtime shape `any` has today but is checked at every use and call site | feasible now; stages S1 to S5 |
-| **Zero cost**: inlined codec, unboxed `Array<f64>`, no per-element tag | **Yes.** Without specialization a user-level codec trait is dictionary or dynamic dispatch per call | needs an owner decision that partly reverses 2026-10-31 |
+Neither compiler monomorphizes today.
 
-Ways to answer Q1:
+| Piece | State today | Work |
+|-------|-------------|------|
+| Self-hosted `40.mono` stage | deleted; older design in `doc/03_plan/compiler/generics/native_monomorphization_plan_2026-07-17.md` and `doc/05_design/compiler/generics/generic_instantiation_model.md` (marked partly superseded) | restore or rebuild: instance collection from the typed HIR, type substitution over bodies, instance naming, and a post-mono check that no type parameter, `Infer` or `Any` reaches MIR |
+| Self-hosted erased path | `TypeParam` lowers to a tagged `i64` (`50.mir/_MirLowering/function_lowering.spl`); box and decode at `T` boundaries | removed for safe code once instances exist; kept only for `unsafe` and script values |
+| Seed | a single uppercase letter type name resolves to `ANY` (`compiler/src/hir/lower/type_resolver.rs:295-297`); `PipelineStage::Monomorphize` is a label only; the JIT instantiator compile step is unimplemented | a real monomorphization pass for **explicit** generics. This is code generation, not inference, so it is inside the syntactic-only seed scope (§11) |
+| Instance identity | none | canonical closed type vector as the key; one instance per key per program, shared across modules |
+| Cross-module instances | none | an instance of a generic from module A requested by module B is emitted once. The body of an exported generic becomes something importers depend on, unlike a private function body |
 
-| Option | Instances are | Body copies | Run-time cost |
-|--------|---------------|-------------|---------------|
-| A. Typed signature over one erased body | type-level only; the call site retypes and decodes | 1 | today's boxing |
-| B. Selective specialization by representation class | one body per class (word integer, float, reference) for chosen hot functions | small, fixed | removed for those functions |
-| C. Full monomorphization | one body per closed type vector, up to the cap | up to the cap | removed |
+### 6.2 Dedup and cap
 
-Lane d29-c's stage 1 is option A. Under A, "never produces `any`" is a
-statement about the **type system**: no expression in safe code has type
-`any`. The erased body's tagged word is an implementation detail of generated
-code, the way a vtable is for `dyn Trait`.
+- **Dedup.** Instances are keyed by `(generic, canonical type vector)`.
+  Identical keys from any number of call sites or modules are one body.
+- **Cap for implicit generics (T3).** A private unannotated function may have
+  at most **N** distinct instances; beyond that it is T4 ("annotate"). N is
+  proposed as 4 (Q2). The cap exists because the user never wrote `<T>` and
+  should be told when a helper has quietly become widely polymorphic.
+- **Explicit generics have no cap.** The user asked for genericity. They are
+  governed by the budgets in §6.3 instead.
+- The cap is a compiler constant, identical in both compilers.
 
-**Design position until Q1 is answered:** the classifier in §5 is the same for
-A, B and C; ship A; specify the SFFI layer (§7) so its user-visible API does
-not change if B arrives later. S1 to S5 do not depend on Q1. The unboxed half
-of S6 does.
+### 6.3 Build-time and code-size budgets
+
+Monomorphization trades build time and binary size for run-time speed. The
+2026-10-31 decision was made on that trade; reversing it needs numbers, and
+**none exist yet**. Baselines to record before the first mono lane lands, and
+gates to hold afterwards:
+
+| Measure | Baseline to capture | Gate |
+|---------|--------------------|------|
+| Instances emitted, per module and total | 0 (erased) | reported on every build; top generics by instance count listed |
+| Compiler binary size (stage 2 and 3) | current erased build | growth budget set from the first measurement; a regression over budget fails |
+| Bootstrap wall time, per stage | current | same |
+| Compile time of the generic-heavy modules | current | same |
+| Object cache hit rate after a private-body edit | current | must not fall: instance bodies are cached by key |
+
+What is known today [census]: 1,208 explicit generic function declarations
+exist in `src`, and fewer than 30 functions are expected to become implicit
+generics. The instance count for the explicit ones is **unknown** until the
+collector runs. That first measurement is its own lane and gates the rest; the
+budget values themselves are an open owner decision (Q11).
+
+If a budget is exceeded, in order of preference: share one body between
+instances whose type arguments have the same representation and no
+type-dependent operation (a compiler optimization, invisible to the language);
+outline cold generic code; raise the budget with the measurement recorded.
+
+### 6.4 Consequences
+
+- "Safe code never produces `any`" holds for **generated code** too, not only
+  for the type system: a scalar instance contains no tag operation.
+- `FfiCodec<T>` monomorphized and inlined, and unboxed `Array<f64>`, are the
+  **default** design, not an option (§7.5, §7.6).
+- T2 and T3 produce the same kind of code; T3 only differs in having more
+  than one copy.
+- The 133 generic externs still leave the ABI (§7.2): an instance needs a
+  monomorphic symbol to call.
+- Erased-model work in flight (the stage-1 identity instantiation of lane
+  d29-c, over one erased body) is a stepping stone and is superseded by real
+  instances when the seed pass lands.
 
 ## 7. Element 2: SFFI
 
@@ -481,21 +671,27 @@ with tag checks only in the unsafe decode layer.
 What the code allows today [read]:
 
 - No such trait exists (0 hits for `FfiCodec`, `ToFfi`, `FromFfi`, `Boxable`),
-  and without specialization a user-level trait would be dispatched per call.
+  and until monomorphization lands a user-level trait would be dispatched per
+  call.
 - The compiler already **has** this codec internally: `box_runtime_value` /
   `decode_runtime_value` in `50.mir/_MirLoweringExpr/expr_dispatch.spl`
   (83 call sites), inline for integers of 32 bits or fewer and a runtime call
   for `i64`/`u64`.
 
-So the first realization needs no user-visible trait: the wrapper is written
-as `fn get<T>(a: Handle<[T]>, i: i64) -> T` and the compiler inserts, at the
+With full monomorphization decided (§6), `FfiCodec<T>` as a user-extensible,
+monomorphized and inlined trait is the **default** design: each wrapper
+instance calls the codec of its concrete `T`, and for scalars and handles that
+inlines to nothing.
+
+Sequencing only: before the mono stage exists, a wrapper can be written as
+`fn get<T>(a: Handle<[T]>, i: i64) -> T` with the compiler inserting, at the
 call site where `T` is statically known, the decode it already knows how to
-emit. That gives the same API and the same safety. `FfiCodec<T>` as a
-user-extensible, inlined trait arrives with option B or C of §6.
+emit. That gives the same API and safety early, and the wrapper bodies do not
+change when the trait takes over.
 
 ### 7.6 Typed, unboxed collection storage
 
-Target: `Array<f64>` stores 8-byte floats, `Array<i64>` words, `Array<u8>`
+Default design, now that monomorphization is decided (§6): `Array<f64>` stores 8-byte floats, `Array<i64>` words, `Array<u8>`
 bytes; element access is a typed load; `[any]` is the tagged-element array and
 is `unsafe`/script only.
 
@@ -623,10 +819,10 @@ rows with no existing family.
 
 | Risk | Mitigation |
 |------|------------|
-| Call-site decode on T3 calls under option A | T2 is the common case (about 85 to 90% of unannotated functions) and gets concrete types with no boxing, which is cheaper than today; T3 is fewer than 30 functions |
+| Boxing remains until the mono stage lands | T2 already gets concrete types with no boxing once types are written back; generic code stays erased, at the cost it has now, until §6.1 is built |
 | Collection access gets slower if moved to library wrappers | indexing, `len`, `push`, concat stay compiler intrinsics (§7.6) |
-| Code size growth under B or C | instance cap; dedup; worst case about 120 bodies today |
-| Zero-cost claims not met under A | stated, not hidden: A removes `any` the type, not boxing. Unboxed `f64` arrays and an inlined user codec need Q1 |
+| Code size growth from per-type copies | dedup by canonical type vector; cap on implicit generics; measured budgets with a failing gate (§6.3). The instance count for the 1,208 explicit generics is unknown until measured |
+| Instruction-cache and binary-size regressions hide a run-time loss | the budget lane records run-time benchmarks alongside size, not size alone |
 
 ### 10.2 Build speed
 
@@ -658,14 +854,16 @@ and lowering cost, not the unifier.
 | Inference picks a surprising type | T2 requires **all** call sites to agree; no "most common type" heuristic; no defaulting beyond literals |
 | Unresolved names turning into `ANY` hide breakage | made errors last, warn first; this is the high-risk rollout item |
 | Trait-bound inference is under-exercised | S5 is last among the inference stages and its failure mode is the "annotate" error, not wrong code |
-| A negative test passes vacuously | fixtures compiled as non-script modules (§3.2); each has a must-pass twin |
+| A negative test passes vacuously | fixtures are compiled-mode modules (§3.2); each has a must-pass twin |
 | `unsafe` becomes the escape hatch | grants are counted by ratchet; a migration lane that moves more than a small share of its sites into `unsafe` stops and reports |
 | The join fix types a join `ANY` in safe code | lane d29-c section A boxes a scalar arm and types the join `ANY` when the sibling is `ANY`. Correct today; under this design the `ANY` sibling is itself the defect, and the boxing path remains for `unsafe`/script only |
 
 ## 11. Seed and self-hosted parity
 
-The rule set is defined once, in this document. How much of it each compiler
-implements is a choice with a recommended answer (Q6).
+The rule set is defined once, in this document. **Decided 2026-11-27:** the
+Rust seed gets syntactic checks only; full HM inference exists only in the
+self-hosted compiler. Monomorphization of explicit generics is code
+generation, not inference, and is built in both (§6.1).
 
 | Piece | Seed | Self-hosted |
 |-------|------|-------------|
@@ -685,7 +883,7 @@ imports; once those are annotated the seed never needs to infer. The seed gets
 - fixes for its silent mis-typings (lambda `I64`, `[]` as `[I32]`, then-arm
   join), which are wrong regardless of this design;
 - the **syntactic** twins of the checks: written `any` outside unsafe, and an
-  unannotated parameter in a non-script module.
+  unannotated parameter of an exported function in a compiled-mode module.
 
 The full engine (tiers, write-back, bounds) is built once, in the self-hosted
 compiler. The direction of disagreement is then safe: a program the
@@ -693,17 +891,13 @@ self-hosted HM accepts is always accepted by the more lenient seed. The reverse
 (seed accepts, self-hosted refuses) is expected for unmigrated code and is
 what the warn phase reports.
 
-The alternative, full inference in both, doubles the large items (write-back,
-call-site inference, bounds) in a compiler that is meant to stay minimal.
-
-**Consequence of the recommendation, stated plainly.** `bin/simple` is
-currently the Rust seed and no full-CLI self-hosted binary is deployed
-(`.claude/rules/commands.md`). Under the recommended scope, tiers T2 and T3,
-write-back and bound inference do not exist in the deployed compiler until a
-self-hosted binary is deployed. Until then users of `bin/simple` get the arm
-join, stage-1 identity instantiation, the mis-typing fixes and the syntactic
-warnings, and nothing more. If that is not acceptable, the answer to Q6 is
-"full inference in the seed" and the cost is the seed's missing write-back.
+**Consequence, stated plainly.** `bin/simple` is currently the Rust seed and
+no full-CLI self-hosted binary is deployed (`.claude/rules/commands.md`). Tiers
+T2 and T3, write-back and bound inference therefore do not exist in the
+deployed compiler until a self-hosted binary is deployed. Until then users of
+`bin/simple` get the arm join, stage-1 identity instantiation, the mis-typing
+fixes, the syntactic warnings and (when it lands) monomorphized explicit
+generics, and nothing more.
 
 Under `SIMPLE_BOOTSTRAP=1` the seed skips lint and several checks and forces
 lenient types [read], so it accepts whatever the self-hosted checker accepts,
@@ -713,14 +907,14 @@ signatures, not private functions that the self-hosted compiler would infer.
 
 Parity that is required either way: same verdict from both compilers on the
 shared fixture corpus for every check both implement; same message text and
-codes; same cap constant; same script predicate.
+codes; same cap constant; same source-mode resolution; same instance keys.
 
 ## 12. Rollout
 
 Warn first, then error, the same pattern as the other staged rules in
 `doc/07_guide/quick_reference/syntax_quick_reference.md` ("Staged warnings").
 
-1. Script source kind and the unsafe rule decided and implemented first; no
+1. Source mode (§3.2) and the unsafe rule (§3.1) implemented first; no
    other check is meaningful without them.
 2. Diagnostics land as **warnings** in every profile, with baselines frozen so
    new sites fail review and old ones do not.
@@ -732,33 +926,36 @@ Disagreeing arms and uninferable types that would otherwise compute on a
 tagged word are errors from the start in the seed lanes: they replace silent
 wrong values, not working code.
 
-## 13. Open questions for the owner
+## 13. Owner decisions
 
-- **Q1 (census D1).** Keep one erased body and accept today's boxing cost
-  (option A), or allow selective specialization, capped and deduplicated, for
-  hot generic code (B or C)? Blocks only the unboxed half of S6 and the
-  code-generation half of S3.
-- **Q2.** Instance cap value. Proposed 4.
-- **Q3.** A private function with no call sites and an undetermined signature:
-  error, or unused-code warning?
+### 13.1 Decided 2026-11-27
+
+| # | Decision | Where |
+|---|----------|-------|
+| D1 | **Full monomorphization.** Per-type copies everywhere. Reverses the 2026-10-31 erased-body decision | §6 |
+| D2 | **`any` is allowed in any `unsafe` block or function, and in script mode.** No separate `type_erasure` capability | §3.1 |
+| D3 | **Source mode is set by file kind and config**, not by execution engine; the interpreter can run compiled-mode source | §3.2 |
+| D4 | **Seed scope: syntactic checks only.** Full HM inference exists only in the self-hosted compiler | §11 |
+
+### 13.2 Still open
+
+- **Q8. File privacy.** 386 of 553 non-exported unannotated functions have no
+  same-file caller (§5.2). Enforce file privacy, widen inference scope to the
+  package, or treat those functions as must-annotate?
+- **Q7a.** Names of the source-mode config key, CLI flag and file-header
+  attribute (§3.2 proposes `[source_mode]`, `--source-mode`,
+  `@source_mode(...)`). No existing key was found in the tree.
+- **Q7b.** Confirm that a `.spl` file with top-level statements is `compiled`
+  by default, which puts spec files and examples under the safe-code rules
+  unless config marks their directories `script`.
+- **Q2.** Instance cap for implicit generics. Proposed 4.
+- **Q3.** A private function with no call sites and an undetermined
+  signature: error, or unused-code warning?
 - **Q4.** `Option` joins: is a value arm with a `None` arm inferred as
   `Option<T>`?
-- **Q5 (census D2).** Does plain `unsafe` allow `any`, or only code granted the
-  `type_erasure` capability?
-- **Q6 (census D4).** Seed scope: syntactic checks only (recommended, §11) or
-  full inference parity? The plan is written for the recommendation; §11
-  states what that means for the deployed compiler.
-- **Q7 (census D3).** Script mode by file kind (recommended, §3.2) or by
-  interpreted execution (today's proxy)?
-- **Q8.** Enforce file privacy? 386 of 553 non-exported unannotated functions
-  have no same-file caller (§5.2). The alternatives are widening inference
-  scope to the package or treating those functions as must-annotate.
 - **Q9.** Trait objects (§8.2): commit to multi-implementor dynamic dispatch
-  in the self-hosted compiler, with which layout, or defer element 4 and rely
-  on enums?
+  in the self-hosted compiler, and with which layout?
 - **Q10.** Confirm the proposals listed at the end of §1 that go beyond the
-  decision text: all unannotated methods must be annotated; only `fn`
-  declarations generalize; method-presence constraints, no field access and a
-  numeric bound for arithmetic on an inferred `T`; collection access stays a
-  compiler intrinsic; the codec is compiler-inserted first and a user-level
-  `FfiCodec<T>` trait follows Q1.
+  decision text.
+- **Q11.** Build-time and code-size budget values for monomorphization
+  (§6.3), once the first measurement exists.

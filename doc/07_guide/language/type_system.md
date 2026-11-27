@@ -138,7 +138,12 @@ and an ERROR after phase 3 (staged). See
 
 - `nil` only inside `unsafe:`; use `Option<T>` / `None` (match arm `None:`).
 - `any` / `Any` (including `[any]`) and erased access are allowed only inside
-  `unsafe:` and in script mode (a script source file, not "run interpreted").
+  `unsafe` (any `unsafe:` block or `@unsafe` function; no separate capability)
+  and in script mode. Script mode is set by file kind and config, not by the
+  execution engine: `.shs` / `.sscript` are script by default, `.spl` is
+  compiled; a header attribute, CLI flag or `simple.sdn` row overrides, most
+  local wins; the interpreter also runs compiled-mode source (as the test
+  runner does) under the compiled rules.
   Safe compiled code never uses or produces `any`: where a type cannot be
   determined the result is a compile error, not a fallback. Owner decision
   2026-11-27, staged warning then error. **Not yet enforced in default
@@ -150,8 +155,10 @@ and an ERROR after phase 3 (staged). See
   (`dyn Trait`) are intended for open sets, but the self-hosted compiler
   cannot yet dispatch a trait call with several implementors; do not migrate
   onto `dyn Trait` yet.
-- Generics are erased; there is no monomorphization pass. How implicit-generic
-  instances relate to this is an open owner question (design doc §6).
+- Generics are erased today; there is no monomorphization pass yet. **Decided
+  2026-11-27: generics will be fully monomorphized** (one copy per distinct
+  type-argument vector), reversing the 2026-10-31 erased-body decision. Until
+  that lands, a generic `T` is still a tagged word at run time (design doc §6).
 - Non-exhaustive value match: WARNING now, ERROR after phase 3 (staged).
 
 ## Union Types
