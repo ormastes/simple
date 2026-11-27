@@ -1,0 +1,89 @@
+"""
+## Purpose and audience
+Purpose: Pin where a `<summary>`'s text starts after the disclosure marker at
+device scale 4, against Chrome 159.
+
+Chrome reserves the marker symbol at the ZOOMED font size but adds the inside
+marker's `0.4em` end margin at the UNZOOMED (CSS) font size, each truncated to
+1/64 px on its own:
+
+    advance_device = trunc64(0.66 * fs * k) + trunc64(0.4 * fs)
+
+16 px at k=4: 2703/64 + 409/64 = 48.625 device px = 12.15625 CSS px. At k=1
+the same rule gives the pinned 16.9375 (`summary_disclosure_marker_chrome159_spec`).
+Simple reserves `summary_marker_inline_width` = round(16.9375) = 17 CSS px at
+every scale, so at 4x the label sits 4.84 CSS px (19-20 device px) right of
+Chrome's. Catalog forms-media 4x: 11,695 of the page's 30,324 mismatched px
+are the `Disclosure widget` summary row (CSS y 366..391).
+
+Audience: web renderer layout (layout_foundation `summary_marker_inline_width`,
+layout_engine inline_base_x / line-start pen error) maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --window-size=400,300`, PAGE below):
+- `--dump-dom` + `Range.getBoundingClientRect()` of the summary text, CSS px
+  from the content start: k=1 16px 16.9375, 20px 21.1875, 24px 25.421875,
+  13px 13.765625; k=4 16px 12.15625, 20px 15.19921875, 24px 18.23828125,
+  13px 9.875; k=2 16px 13.75; k=3 16px 12.6875.
+- `--screenshot --force-device-scale-factor=4`: first device column with
+  red < 128 of the `H` label, searched right of the triangle inside each
+  summary's row band: 16px 70, 20px 83, 24px (open) 97, 13px 60. The triangle
+  ink is device columns 16..50 / 16..60 / 16..78 / 16..44 on both engines.
+- `--force-device-scale-factor=1`: `H` starts at columns 22 / 27 / 31 / 19.
+Tolerance 1 device px: glyph edges differ by one antialiased column between
+the two rasterisers.
+"""
+
+"""
+Traceability: REQ-WEB-SUMMARY-MARKER-002 — at device scale k a summary's text starts at Chrome's trunc64(0.66em·k) + trunc64(0.4em) device advance.
+"""
+# @tag: unit, browser_engine, layout, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}}details{{position:absolute;left:4px}}</style></head><body><details style=\"top:0\"><summary>H</summary></details><details style=\"top:40px;font-size:20px\"><summary>H</summary></details><details open style=\"top:80px;font-size:24px\"><summary>H</summary></details><details style=\"top:130px;font-size:13px\"><summary>H</summary></details></body></html>"
+
+fn _red(px: u32) -> i32:
+    ((px >> 16u32) & 0xFFu32) as i32
+
+# First device column >= x0 holding ink (red < 128) in rows y0..y1, or -1.
+fn _first_ink_col(px: [u32], k: i32, x0: i32, y0: i32, y1: i32) -> i32:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return -2
+    var x = x0
+    while x < x0 + 40 * k:
+        var y = y0
+        while y <= y1:
+            if _red(px[y * w + x]) < 128:
+                return x
+            y = y + 1
+        x = x + 1
+    -1
+
+fn _near(got: i32, chrome: i32) -> bool:
+    got >= chrome - 1 and got <= chrome + 1
+
+# One "<got> " per summary: the Chrome column when within tolerance.
+fn _label_cols(k: i32, from: [i32], bands: [i32], chrome: [i32]) -> text:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, k, "cpu_simd")
+    var got = ""
+    var i = 0
+    while i < chrome.len():
+        val col = _first_ink_col(px, k, from[i], bands[i * 2], bands[i * 2 + 1])
+        got = got + (if _near(col, chrome[i]): chrome[i].to_text() else: col.to_text()) + " "
+        i = i + 1
+    got
+
+describe "Summary text starts at Chrome's marker advance at device scale 4 (Chrome 159)":
+    it "AC-1: at 4x the `H` labels (16/20/24 open/13 px) start at device columns 70 83 97 60":
+        val got = _label_cols(4, [52, 62, 80, 46], [0, 156, 160, 316, 320, 516, 520, 640], [70, 83, 97, 60])
+        expect(got).to_equal("70 83 97 60 ")
+    it "AC-2: at 1x the same labels stay at columns 22 27 31 19":
+        val got = _label_cols(1, [14, 16, 20, 12], [0, 39, 40, 79, 80, 129, 130, 160], [22, 27, 31, 19])
+        expect(got).to_equal("22 27 31 19 ")

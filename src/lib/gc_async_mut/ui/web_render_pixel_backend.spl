@@ -25,7 +25,8 @@ use std.common.ui.web_render_api.{
     web_render_pixel_artifact,
     web_render_url_request
 }
-use std.common.ui.draw_ir.{DrawIrComposition}
+use std.common.ui.draw_ir.{DRAW_IR_COMMAND_RECT, DrawIrCommand, DrawIrComposition}
+use std.common.crypto.sha256.{sha256_text}
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels,
     simple_web_render_html_to_readback_result_with_engine2d_backend,
@@ -46,7 +47,10 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     SimpleWebLayoutEngine2DReadbackResult
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
+    engine2d_draw_ir_adv_composition
+}
 use std.gc_async_mut.gpu.engine2d.backend_lane.{
     ENGINE2D_HOST_GPU_LANE_GPU,
     ENGINE2D_HOST_GPU_LANE_HOST,
@@ -120,6 +124,72 @@ fn web_render_artifact_with_runtime_queue_evidence(artifact: WebRenderArtifact, 
     val drain_status = if drain.drained > 0: WEB_RENDER_QUEUE_STATUS_DRAINED else: WEB_RENDER_QUEUE_STATUS_UNAVAILABLE
     web_render_artifact_with_runtime_queue_handle(artifact, submit_status, drain_status, submit.packet_id, drain.drained, drain.last_backend_handle, drain.diagnostic)
 
+fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
+    var i = 0
+    while i < command.computed_style.len():
+        if command.computed_style[i].key == key:
+            return command.computed_style[i].value
+        i = i + 1
+    ""
+
+fn _draw_ir_solid_material_entry_valid(command: DrawIrCommand) -> bool:
+    if command.kind != DRAW_IR_COMMAND_RECT or command.width <= 0 or command.height <= 0:
+        return false
+    if ((command.color >> 24) & 255u32) != 255u32:
+        return false
+    val bg = _draw_ir_style_value(command, "background-color")
+    val fg = _draw_ir_style_value(command, "color")
+    val bg_img = _draw_ir_style_value(command, "background-image")
+    val layers_raw = _draw_ir_style_value(command, "background-layers-raw")
+    val backdrop = _draw_ir_style_value(command, "backdrop-filter")
+    val reason = _draw_ir_style_value(command, "backdrop-filter-fallback-reason")
+    if bg == "" or fg == "":
+        return false
+    if bg_img != "" and bg_img != "none":
+        return false
+    if layers_raw != "":
+        return false
+    if backdrop != "" and backdrop != "none":
+        return false
+    if reason != "" and reason != "cpu-raster-backdrop-sampling-unavailable":
+        return false
+    true
+
+fn _draw_ir_realized_material_fallback(composition: DrawIrComposition, result: Engine2dDrawIrAdvResult) -> WebRenderMaterialFallbackProvenance:
+    if (result.skipped_command_count != result.occluded_command_count or
+        result.rendered_command_count <= 0 or
+        result.cpu_composited_material_count != 0 or
+        result.metal_device_glass_material_count != 0):
+        return WebRenderMaterialFallbackProvenance.none()
+    var canonical = "simple-web-realized-solid-material-v1"
+    var material_count = 0
+    var batch_i = 0
+    while batch_i < composition.batches.len():
+        val commands = composition.batches[batch_i].commands
+        var command_i = 0
+        while command_i < commands.len():
+            val command = commands[command_i]
+            val fallback = _draw_ir_style_value(command, "backdrop-filter-fallback")
+            if fallback == "solid-material":
+                if not _draw_ir_solid_material_entry_valid(command):
+                    return WebRenderMaterialFallbackProvenance.none()
+                val bg = _draw_ir_style_value(command, "background-color")
+                val fg = _draw_ir_style_value(command, "color")
+                val raw_bg_img = _draw_ir_style_value(command, "background-image")
+                val bg_img = if raw_bg_img == "": "none" else: raw_bg_img
+                canonical = canonical + "\n{material_count}|kind=solid-material|reason=cpu-raster-backdrop-sampling-unavailable|bg=" + bg + "|fg=" + fg + "|backdrop=none|background-image=" + bg_img
+                material_count = material_count + 1
+            elif fallback == "cpu-composited-material":
+                return WebRenderMaterialFallbackProvenance.none()
+            command_i = command_i + 1
+        batch_i = batch_i + 1
+    if material_count == 0:
+        return WebRenderMaterialFallbackProvenance.none()
+    WebRenderMaterialFallbackProvenance.solid(
+        "cpu-raster-backdrop-sampling-unavailable",
+        sha256_text(canonical)
+    )
+
 pub fn web_render_draw_ir_request_to_pixel_artifact(req: WebRenderRequest, composition: DrawIrComposition, backend_name: text) -> WebRenderArtifact:
     val backend = simple_web_resolved_engine2d_backend_name(req.viewport_w, req.viewport_h, backend_name)
     val empty = web_render_pixel_artifact(req.with_pixel_output(), [])
@@ -134,12 +204,9 @@ pub fn web_render_draw_ir_request_to_pixel_artifact(req: WebRenderRequest, compo
         return web_render_engine2d_unavailable_artifact(empty, selected, "Draw IR execution incomplete")
     val rendered = web_render_engine2d_rendered_artifact(web_render_pixel_artifact(req.with_pixel_output(), result.pixels), selected)
     val readback = web_render_artifact_with_backend_readback_source_evidence(rendered, selected, result.readback_source)
-    # Generic Draw IR does not carry the producer-owned typed material witness
-    # emitted by the HTML layout renderer. Even a complete CPU execution must
-    # not recover provenance from copied nested computed_style metadata.
     web_render_artifact_with_material_fallback(
         readback,
-        WebRenderMaterialFallbackProvenance.none())
+        _draw_ir_realized_material_fallback(composition, result))
 
 class WebRenderPixelArtifactCache:
     width: i32

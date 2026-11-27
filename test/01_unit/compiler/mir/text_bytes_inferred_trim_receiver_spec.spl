@@ -7,6 +7,38 @@ fn _bytes_len_of_trimmed(source: text) -> i64:
     val bytes = trimmed.bytes()
     bytes.len()
 
+# Call-result receiver shape from src/lib/common/sdn/parser.spl `parse`
+# (`val trimmed = _sdn_strip_leading_comment_lines(source).trim()`): the trim
+# receiver is a user-call result, so binding inference records no declared
+# type for `trimmed` at all and the `.bytes()` gate must rely purely on the
+# lowered-local text proof.
+fn _strip_identity(source: text) -> text:
+    source.slice(0, source.byte_len())
+
+fn _bytes_len_of_call_result_trimmed(source: text) -> i64:
+    val trimmed = _strip_identity(source).trim()
+    val bytes = trimmed.bytes()
+    bytes.len()
+
+# Sibling methods on the same inferred-trim receiver shape (parser.spl
+# lines ~68, 261, 326, 358): starts_with/byte_len/slice prove text through
+# the lowered local, never through a non-Str declaration, so they must keep
+# lowering on this shape too.
+fn _sibling_score_of_trimmed(source: text) -> i64:
+    val t = source.trim()
+    var score = 0
+    if t.starts_with("1"):
+        score = score + 1
+    if t.byte_len() == 3:
+        score = score + 2
+    if t.slice(0, 2) == "12":
+        score = score + 4
+    score
+
 describe "text bytes on inferred trim receiver":
     it "lowers and returns the byte length":
         expect(_bytes_len_of_trimmed("  123  ")).to_equal(3)
+    it "lowers .bytes() when the trim receiver is a call result":
+        expect(_bytes_len_of_call_result_trimmed("  123  ")).to_equal(3)
+    it "lowers starts_with/byte_len/slice on an inferred trim receiver":
+        expect(_sibling_score_of_trimmed("  123  ")).to_equal(7)

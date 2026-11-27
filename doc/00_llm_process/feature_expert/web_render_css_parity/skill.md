@@ -5829,3 +5829,21 @@ pins the border-box form, the default-UA gap is unfiled.
   (26 rows, inline + style-rule paths, measured Chrome 159.0.8154.6).
 - Trap: `.w{height:60px;padding-top:1px}` stacks at a 61px pitch — measure
   absolute getBoundingClientRect() values, do not derive them.
+## 2026-11-27 — forms-media 4x: `<summary>` label pen and textarea device line
+
+- **Survey (4x, base f43f68c218e, 8 CSS px cells).** forms-media had 30,324 mismatched px.
+  - The `Disclosure widget` summary row (CSS y 366..391) held 11,695 of them (39 %). The triangle matched column for column (device 180..214), but from `D` onward the label sat 19-20 device px right of Chrome's.
+  - The `Notes` textarea value held 2,497. Its box matched (border rows 1075..1078 / 1269..1272), but the text was one device row high.
+- **Summary marker rule (Chrome 159, `--dump-dom` at k = 1..4).** The symbol is reserved at the ZOOMED font size, but the inside marker's `0.4em` end margin uses the CSS font size. Each part is truncated to 1/64 device px on its own: `advance_device = trunc64(0.66·fs·k) + trunc64(0.4·fs)`.
+  - 16 px: k=1 16.9375, k=2 13.75, k=3 12.6875, k=4 12.15625 CSS px.
+  - At k=4: 20 px 15.19921875, 24 px 18.23828125, 13 px 9.875.
+  - **Fix.** `summary_marker_inline_milli(fs, k)` (layout_foundation) returns that advance in milli CSS px. At k > 1, `inline_base_x` takes its floor, and the remainder (`summary_err`) is added to `line_start_err` only while `cy` is on the summary's first line (`summary_line0_y`). k = 1 keeps `summary_marker_inline_width`.
+- **Textarea device line (Chrome 159, 13.333px DejaVu Sans Mono at k=4).** Value lines stack at the face's DEVICE `normal` line: 63 px, baseline 50 below the line top.
+  - The value is laid out by `layout_with_style` outside the inline baseline pass, so no device-dy was recorded. The painter's ascent at the 53 px device size is 49, so the first line sat one row high, and lines 2..n stepped k x 15 = 60.
+  - **Fix.** `textarea_value_device_lines_record` (layout_foundation, called after the textarea label layout in layout_engine) records the strut delta + painter term as device-dy for every line, plus a per-line `line_y_steps` step of (63 - 60)/k = 750 milli CSS px.
+  - Rows are now 51 / 114 / 177 (Chrome 51 / 114 / 177; was 50 / 110 / 170).
+  - Open: the `<input>` value shows the same one-row-high first line at 4x (490 vs Chrome 491, probe `font-family:monospace` input). It is not fixed here.
+- **Pins.**
+  - `summary_marker_advance_dpr4_chrome159_spec`: AC-1 checks the 4x `H` first ink at 70/83/97/60 (was 89/107/124/76). AC-2 checks 1x at 22/27/31/19.
+  - `textarea_value_device_line_dpr4_chrome159_spec`: AC-1 and AC-2 cover 4x, AC-3 is the 1x guard.
+  - 20 related textarea / form-control / dpr4 / summary specs give the same results as base. `details_summary_rendering_spec` is 0/2 on base and head, for a pre-existing reason.

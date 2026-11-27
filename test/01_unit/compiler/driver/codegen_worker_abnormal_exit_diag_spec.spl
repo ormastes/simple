@@ -1,0 +1,319 @@
+use std.spec.*
+use compiler.driver.driver_build.build_outcome.{
+    build_outcome_abnormal_exit_label_v1,
+    build_outcome_diagnostics_dir_v1,
+    build_outcome_capture_worker_stderr_v1,
+    build_outcome_unit_attribution_v1
+}
+use compiler.driver.driver_build.native_codegen_pool_v1.{
+    NATIVE_CODEGEN_JOB_FAILED_V1,
+    native_codegen_abnormal_exit_label_v1,
+    native_codegen_diagnostics_dir_v1,
+    native_codegen_pool_run_v1,
+    native_codegen_receipt_path_v1
+}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.mir.mir_data.{MirModule}
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_build.native_mir_shard.{
+    native_mir_shard_in_flight_modules_v1,
+    native_mir_shard_attribute_abort_v1,
+    native_mir_shard_diagnostic_parity_v1
+}
+use compiler.driver.driver_build.native_staged_codegen.{
+    NativeStagedCodegenStateV1,
+    native_staged_codegen_pending_modules_v1,
+    native_staged_codegen_batch_attribute_v1
+}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_env_failure_receipt_publish_v1,
+    native_file_worker_error_reason_read_v1
+}
+use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig}
+use compiler.driver.driver_hir_recovery.{
+    hir_shard_recovery_inventory,
+    hir_shard_recovery_claim,
+    hir_shard_recovery_terminal
+}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{
+    mir_shard_hir_residency_reset_v1,
+    mir_shard_hir_residency_note_v1
+}
+use std.nogc_sync_mut.io_runtime.{host_os}
+use std.io_runtime.{dir_create_all, dir_remove_all, dir_list_optional, file_delete, file_exists, file_read, file_write, getpid}
+use app.io.env_ops.{env_set}
+use std.nogc_sync_mut.env.{env_snapshot, env_clear, env_restore}
+
+fn make_diag_workspace(name: text) -> text:
+    val dir = "build/spec_codegen_diag_{name}_{getpid()}"
+    val _rm = dir_remove_all(dir)
+    val _mk = dir_create_all(dir)
+    dir
+
+describe "codegen worker abnormal exit diagnostics and attribution":
+    it "decodes SIGABRT exit representations including -134, 134, and 122":
+        expect(build_outcome_abnormal_exit_label_v1(-134, false)).to_contain("SIGABRT")
+        expect(native_codegen_abnormal_exit_label_v1(134, false)).to_contain("SIGABRT")
+        expect(native_codegen_abnormal_exit_label_v1(122, false)).to_contain("SIGABRT")
+        expect(native_codegen_abnormal_exit_label_v1(-6, false)).to_contain("SIGABRT")
+        expect(native_codegen_abnormal_exit_label_v1(139, false)).to_contain("SIGSEGV")
+        expect(native_codegen_abnormal_exit_label_v1(137, false)).to_contain("SIGKILL")
+        expect(native_codegen_abnormal_exit_label_v1(1, true)).to_contain("TIMEOUT")
+        expect(native_codegen_abnormal_exit_label_v1(0, false)).to_contain("EMPTY_OBJECT")
+
+    it "preserves aborting codegen child stderr in diagnostics after stage_root removal":
+        val root = make_diag_workspace("pool")
+        val stage = "{root}/stage"
+        val ledger = "{root}/ledger"
+        val diag_dir = "{ledger}/diagnostics"
+        val _mk1 = dir_create_all(stage)
+        val _mk2 = dir_create_all(ledger)
+        val is_win = host_os() == "windows"
+        val script_path = if is_win: "{root}/abort_worker.cmd" else: "{root}/abort_worker.sh"
+        val script_body = if is_win:
+            "@echo off\r\necho panic_in_app_test_runner_new 1>&2\r\nexit /b 134\r\n"
+        else:
+            "echo panic_in_app_test_runner_new >&2\nexit 134\n"
+        val _ws = file_write(script_path, script_body)
+        val saved = env_snapshot()
+        val _e1 = env_set("SIMPLE_NATIVE_BUILD_DIAG_DIR", diag_dir)
+        val tool = if is_win: "cmd.exe" else: "/bin/sh"
+        val result = native_codegen_pool_run_v1(
+            tool,
+            ["app.test_runner_new"],
+            1,
+            stage,
+            ledger,
+            \idx, _ir, _obj:
+                if is_win:
+                    ["/c", script_path.replace("/", "\\")]
+                else:
+                    [script_path]
+        )
+        env_restore(saved)
+        # Simulate caller cleanup of stage_root after pool finishes.
+        val _rm_stage = dir_remove_all(stage)
+
+        expect(result.failed).to_equal(1)
+        expect(result.states[0]).to_equal(NATIVE_CODEGEN_JOB_FAILED_V1)
+
+        val receipt = file_read(native_codegen_receipt_path_v1(ledger, "app.test_runner_new"))
+        expect(receipt).to_contain("abort_label: \"SIGABRT (signal 6, exit=134)\"")
+        expect(receipt).to_contain("stderr_diag_path:")
+        expect(receipt).to_contain("panic_in_app_test_runner_new")
+
+        val diag_files = dir_list_optional(diag_dir) ?? []
+        expect(diag_files.len()).to_equal(1)
+        val diag_body = file_read("{diag_dir}/{diag_files[0]}")
+        expect(diag_body).to_contain("module: app.test_runner_new")
+        expect(diag_body).to_contain("SIGABRT (signal 6, exit=134)")
+        expect(diag_body).to_contain("panic_in_app_test_runner_new")
+        val _rm_root = dir_remove_all(root)
+
+    it "attributes non-terminal in-flight MIR shard claims and residency context before sealing":
+        val root = make_diag_workspace("mir_shard")
+        val queue = "{root}/queue"
+        val diag_dir = "{root}/diagnostics"
+        val _mk = dir_create_all(queue)
+        val owner = "0/8@abort"
+        expect(hir_shard_recovery_inventory(queue, "inv-1", ["mod_done", "mod_abort_a", "mod_abort_b"])).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, owner, "mod_done", "k0")).to_equal(1)
+        expect(hir_shard_recovery_terminal(queue, owner, "mod_done", "PASS", true)).to_equal(true)
+        expect(hir_shard_recovery_claim(queue, owner, "mod_abort_a", "k1")).to_equal(1)
+        expect(hir_shard_recovery_claim(queue, owner, "mod_abort_b", "k2")).to_equal(1)
+
+        mir_shard_hir_residency_reset_v1()
+        mir_shard_hir_residency_note_v1("src/mod_abort_a.spl", "mod_abort_a", "rk1", "b1", "off", "full")
+
+        val in_flight = native_mir_shard_in_flight_modules_v1(queue, owner)
+        expect(in_flight.len()).to_equal(2)
+        expect(in_flight.contains("mod_done")).to_equal(false)
+        expect(in_flight.contains("mod_abort_a")).to_equal(true)
+        expect(in_flight.contains("mod_abort_b")).to_equal(true)
+
+        val attr = native_mir_shard_attribute_abort_v1(
+            queue, owner, 122, "thread panicked at unknown call origin", diag_dir)
+        expect(attr).to_contain("mod_abort_a")
+        expect(attr).to_contain("mod_abort_b")
+        expect(attr).to_contain("EXIT_122")
+        expect(attr).to_contain("diag=")
+        expect(attr).to_contain("mode=")
+
+        val reason = native_file_worker_error_reason_read_v1(queue, owner)
+        expect(reason).to_contain("mod_abort_a")
+        expect(reason).to_contain("mod_abort_b")
+        expect(reason).to_contain("mir-shard child exited 122")
+
+        val diag_files = dir_list_optional(diag_dir) ?? []
+        expect(diag_files.len()).to_equal(1)
+        val diag_body = file_read("{diag_dir}/{diag_files[0]}")
+        expect(diag_body).to_contain("mod_abort_a")
+        expect(diag_body).to_contain("held_full=[mod_abort_a]")
+        expect(diag_body).to_contain("mode=")
+        expect(diag_body).to_contain("unknown call origin")
+        mir_shard_hir_residency_reset_v1()
+        val _rm_root = dir_remove_all(root)
+
+    it "attributes staged batch 1 candidate modules and persists batch abort stderr":
+        val root = make_diag_workspace("staged")
+        val diag_dir = "{root}/diagnostics"
+        var state = NativeStagedCodegenStateV1.begin(4)
+        state.scheduled_names = ["mod.a", "mod.b", "mod.c", "mod.d", "mod.e"]
+        state.shard_claimed_names = ["mod.a", "mod.extra"]
+        val pending = native_staged_codegen_pending_modules_v1(state)
+        expect(pending.len()).to_equal(5)
+        expect(pending.contains("mod.a")).to_equal(true)
+        expect(pending.contains("mod.extra")).to_equal(true)
+
+        val attr = native_staged_codegen_batch_attribute_v1(
+            state, -134, "abort in batch 1 cranelift codegen", diag_dir)
+        expect(attr).to_contain("batch=1")
+        expect(attr).to_contain("SIGABRT")
+        expect(attr).to_contain("mod.a")
+        expect(attr).to_contain("mod.extra")
+
+        val diag_files = dir_list_optional(diag_dir) ?? []
+        expect(diag_files.len()).to_equal(1)
+        val diag_body = file_read("{diag_dir}/{diag_files[0]}")
+        expect(diag_body).to_contain("batch=1")
+        expect(diag_body).to_contain("abort in batch 1 cranelift codegen")
+        val _rm_root = dir_remove_all(root)
+
+    it "publishes attributed mir-shard exit receipts with diagnostics and --threads 1 parity":
+        val root = make_diag_workspace("mir_receipt")
+        val mir_q = "{root}/mir_q"
+        val _mk = dir_create_all(mir_q)
+        expect(hir_shard_recovery_inventory(mir_q, "inv-r", ["mod.crash"])).to_equal(true)
+        expect(hir_shard_recovery_claim(mir_q, "0/1@mir", "mod.crash", "kc")).to_equal(1)
+
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_MIR_SHARD_QUEUE", mir_q)
+        val _s2 = env_set("SIMPLE_MIR_SHARD_OWNER", "0/1@mir")
+        val published = native_file_worker_env_failure_receipt_publish_v1(["--mir-shard=0/1"], 122, "")
+        val reason = native_file_worker_error_reason_read_v1(mir_q, "0/1@mir")
+        env_restore(saved)
+
+        expect(published).to_equal(true)
+        expect(reason).to_contain("mir-shard child exited 122 without publishing a cause")
+        expect(reason).to_contain("mod.crash")
+        expect(reason).to_contain("SIMPLE_MIR_SHARDING=0 SIMPLE_NATIVE_BUILD_THREADS=1")
+        val q_diags = dir_list_optional("{mir_q}/diagnostics") ?? []
+        expect(q_diags.len()).to_equal(1)
+        val _rm_root = dir_remove_all(root)
+
+    it "provides --threads 1 in-process diagnostic parity with parallel worker capture":
+        val root = make_diag_workspace("parity")
+        val diag_dir = "{root}/diagnostics"
+        val _mk = dir_create_all(diag_dir)
+        val saved = env_snapshot()
+        env_clear()
+        val _s1 = env_set("SIMPLE_BUILD_DIAG_DIR", diag_dir)
+
+        val seq_builder = ParallelBuilder.create(ParallelBuildConfig.single_threaded())
+        val _u1 = seq_builder.add_unit("mod_bad.spl", [])
+        val seq_res = seq_builder.build(\_p: Err("codegen abort in mod_bad.spl"))
+
+        val par_builder = ParallelBuilder.create(ParallelBuildConfig(
+            num_threads: 4, parallel_threshold: 1, deterministic: false,
+            verbose: false, unstable: false, unit_timeout_ms: 0))
+        val _u2 = par_builder.add_unit("mod_bad.spl", [])
+        val par_res = par_builder.build(\_p: Err("codegen abort in mod_bad.spl"))
+
+        val t1_line = native_mir_shard_diagnostic_parity_v1("mod.bad", 1, -134, "abort trace", diag_dir)
+        val t8_line = native_mir_shard_diagnostic_parity_v1("mod.bad", 8, -134, "abort trace", diag_dir)
+        env_restore(saved)
+
+        expect(seq_res.success).to_equal(false)
+        expect(par_res.success).to_equal(false)
+        expect(seq_res.stats.failed).to_equal(1)
+        expect(par_res.stats.failed).to_equal(1)
+        expect(t1_line).to_contain("module=mod.bad")
+        expect(t1_line).to_contain("SIGABRT")
+        expect(t8_line).to_contain("module=mod.bad")
+        expect(t8_line).to_contain("SIGABRT")
+        val diag_files = dir_list_optional(diag_dir) ?? []
+        expect(diag_files.len() >= 2).to_equal(true)
+        val _rm_root = dir_remove_all(root)
+
+    it "persists codegen stderr outside nested stage_root/ledger when all diag env vars are unset":
+        val root = make_diag_workspace("unset_env")
+        val stage = "{root}/stage"
+        val ledger = "{stage}/ledger"
+        val _mk1 = dir_create_all(stage)
+        val _mk2 = dir_create_all(ledger)
+        val is_win = host_os() == "windows"
+        val script_path = if is_win: "{root}/abort_unset.cmd" else: "{root}/abort_unset.sh"
+        val script_body = if is_win:
+            "@echo off\r\necho panic_without_diag_env 1>&2\r\nexit /b 134\r\n"
+        else:
+            "echo panic_without_diag_env >&2\nexit 134\n"
+        val _ws = file_write(script_path, script_body)
+        val saved = env_snapshot()
+        val _e1 = env_set("SIMPLE_NATIVE_BUILD_DIAG_DIR", "")
+        val _e2 = env_set("SIMPLE_BUILD_DIAG_DIR", "")
+        val _e3 = env_set("SIMPLE_NATIVE_CACHE_DIR", "")
+        val _e4 = env_set("SIMPLE_CACHE_DIR", "")
+        val resolved_dir = native_codegen_diagnostics_dir_v1(stage, ledger)
+        val tool = if is_win: "cmd.exe" else: "/bin/sh"
+        val result = native_codegen_pool_run_v1(
+            tool,
+            ["app.unset_diag_env_mod"],
+            1,
+            stage,
+            ledger,
+            \idx, _ir, _obj:
+                if is_win:
+                    ["/c", script_path.replace("/", "\\")]
+                else:
+                    [script_path]
+        )
+        env_restore(saved)
+
+        val receipt = file_read(native_codegen_receipt_path_v1(ledger, "app.unset_diag_env_mod"))
+        var captured_path = ""
+        for line in receipt.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.starts_with("stderr_diag_path: \""):
+                val raw = trimmed.substring("stderr_diag_path: \"".byte_len())
+                if raw.ends_with("\""):
+                    captured_path = raw.substring(0, raw.byte_len() - 1)
+
+        # Delete the entire stage_root (including nested ledger), simulating driver cleanup.
+        val _rm_stage = dir_remove_all(stage)
+
+        expect(result.failed).to_equal(1)
+        expect(resolved_dir).to_equal(".simple/build/diagnostics")
+        expect(captured_path != "").to_equal(true)
+        expect(captured_path.starts_with(stage)).to_equal(false)
+        expect(file_exists(captured_path)).to_equal(true)
+        val diag_body = file_read(captured_path)
+        expect(diag_body).to_contain("module: app.unset_diag_env_mod")
+        expect(diag_body).to_contain("SIGABRT (signal 6, exit=134)")
+        expect(diag_body).to_contain("panic_without_diag_env")
+        val _rm_diag = file_delete(captured_path)
+        val _rm_root = dir_remove_all(root)
+
+    it "exercises native_staged_codegen_flush_v1 production batch attribution on withheld batch":
+        val root = make_diag_workspace("flush_wiring")
+        val diag_dir = "{root}/diagnostics"
+        val _mk = dir_create_all(diag_dir)
+        val saved = env_snapshot()
+        val _s1 = env_set("SIMPLE_BUILD_DIAG_DIR", diag_dir)
+        var driver = CompilerDriver.create(driver_core_compile_options_default())
+        driver.native_staged_codegen = NativeStagedCodegenStateV1.begin(4)
+        driver.native_staged_codegen.scheduled_names = ["staged_diag_fixture"]
+        driver.ctx.mir_modules["staged_diag_fixture"] = MirModule(
+            name: "staged_diag_fixture", functions: {}, statics: {}, constants: {}, types: {})
+        val ok = driver.native_staged_codegen_flush_v1(true)
+        env_restore(saved)
+
+        expect(ok).to_equal(true)
+        expect(driver.native_staged_codegen.modules_withheld).to_equal(1)
+        val diag_files = dir_list_optional(diag_dir) ?? []
+        expect(diag_files.len()).to_equal(1)
+        val diag_body = file_read("{diag_dir}/{diag_files[0]}")
+        expect(diag_body).to_contain("staged_diag_fixture")
+        expect(diag_body).to_contain("withheld")
+        val _rm_root = dir_remove_all(root)
