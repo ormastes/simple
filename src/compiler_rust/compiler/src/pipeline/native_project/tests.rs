@@ -10832,3 +10832,98 @@ fn erased_some_arm_binds_user_option_and_generic_owner_after_qualification() {
     jit.compile_module(&mir).expect("JIT compilation");
     assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 427);
 }
+
+/// The erased bare-`None` arm names user enums through the qualified identity
+/// too, so a native build matches `Opt.None` and `Q.None` (a `None`-only enum).
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+#[test]
+fn erased_none_arm_user_enum_identity_survives_runtime_name_qualification() {
+    let source = "enum Opt:\n    Some(i64)\n    None\n\nenum Q:\n    Here(i64)\n    None\n\nfn g(x) -> i64:\n    match x:\n        Some(v): return v\n        None: return -5\n    -9\n\nfn q(x) -> i64:\n    match x:\n        None: return -6\n        Here(v): return v\n    -9\n\nfn main() -> i64:\n    g(Opt.Some(4)) * 1000 + g(Opt.None) * -100 + q(Q.None) * -10 + q(Q.Here(3))\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    for name in ["Opt", "Q"] {
+        mir.local_globals.insert(name.to_string());
+    }
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 4563);
+}
+
+/// The erased `f64?` boundary (Option `Some` -> tagged float) tests the
+/// builtin Option identity, which native qualification must leave alone.
+/// seed_jit_erased_f64_option_some_binds_raw_bits_2026-11-27
+#[test]
+fn erased_f64_option_some_boundary_survives_runtime_name_qualification() {
+    let source = "enum Opt:\n    Some(i64)\n    None\n\nfn h(x) -> i64:\n    match x:\n        Some(v):\n            if v == 0.1:\n                return 1\n            return 3\n        None: return 4\n    5\n\nfn main() -> i64:\n    val a: f64? = Some(0.1)\n    val c: f64? = None\n    h(a) * 100 + h(c) * 10 + h(Opt.None)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    mir.local_globals.insert("Opt".to_string());
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 144);
+}
+
+/// The bare `None` arm tests the stamp the constructors leave, so it carries no
+/// enum id for qualification to re-point: None-first owners sharing a
+/// discriminant still match exactly after qualification, and Result values
+/// never do.
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+#[test]
+fn erased_none_arm_stamp_survives_runtime_name_qualification() {
+    let source = "enum Q1:\n    None\n    A(i64)\n\nenum Q2:\n    None\n    B(i64)\n\nfn g(x) -> i64:\n    match x:\n        None: return 1\n        _: return 0\n    -9\n\nfn main() -> i64:\n    val ok: Result<i64, text> = Ok(3)\n    var s = 0\n    var i = 0\n    while i < 2:\n        s = s * 10000 + g(Q1.None) * 1000 + g(Q2.None) * 100 + g(Q2.B(4)) * 10 + g(ok)\n        i = i + 1\n    s\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    for name in ["Q1", "Q2"] {
+        mir.local_globals.insert(name.to_string());
+    }
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner_set",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    // One arm, one call, and nothing but the subject in it.
+    let tests: Vec<usize> = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| b.instructions.iter()))
+        .filter_map(|inst| match inst {
+            crate::mir::MirInst::Call { target, args, .. } if target.name() == "rt_is_none_variant" => Some(args.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tests, vec![1]);
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 11_001_100);
+}

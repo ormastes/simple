@@ -1413,6 +1413,8 @@ the old fabricating behaviour.",
             matches!(
                 *s,
                 "rt_enum_new"
+                    | "rt_enum_new_none"
+                    | "rt_is_none_variant"
                     | "rt_enum_check_discriminant"
                     | "rt_enum_check_variant"
                     | "rt_try_is_absent"

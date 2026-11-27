@@ -715,6 +715,8 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 
         // Enum operations
         "rt_enum_new" => simple_runtime::rt_enum_new as *const () as usize,
+        "rt_enum_new_none" => simple_runtime::rt_enum_new_none as *const () as usize,
+        "rt_is_none_variant" => simple_runtime::rt_is_none_variant as *const () as usize,
         "rt_enum_register_name" => simple_runtime::rt_enum_register_name as *const () as usize,
         "rt_enum_check_discriminant" => simple_runtime::rt_enum_check_discriminant as *const () as usize,
         "rt_enum_check_variant" => simple_runtime::rt_enum_check_variant as *const () as usize,

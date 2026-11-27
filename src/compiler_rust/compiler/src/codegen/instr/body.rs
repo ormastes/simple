@@ -379,7 +379,7 @@ pub(super) fn build_vreg_types(
                             "rt_env_get" | "rt_get_env" | "rt_file_read_text" | "rt_file_read_text_rv" => {
                                 Some(TypeId::STRING)
                             }
-                            "rt_is_some" | "rt_is_present" | "rt_is_none" => Some(TypeId::BOOL),
+                            "rt_is_some" | "rt_is_present" | "rt_is_none" | "rt_is_none_variant" => Some(TypeId::BOOL),
                             "rt_string_eq" | "rt_native_eq" | "rt_native_neq" | "rt_native_cmp" => Some(TypeId::I64),
                             // Array/collection length returns a native i64. Recording
                             // it here types the `len()` result VReg so a CHAINED

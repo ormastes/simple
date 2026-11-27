@@ -1444,6 +1444,13 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     return (int64_t)(intptr_t)value;
 }
 
+/* This legacy lane has no object header to stamp and no rt_is_none: a
+ * `None`-named variant is built like any other. */
+SPL_WEAK
+int64_t rt_enum_new_none(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    return rt_enum_new(enum_id, discriminant, payload);
+}
+
 SPL_WEAK
 int64_t rt_enum_id(int64_t value) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
