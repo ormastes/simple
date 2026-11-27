@@ -1,0 +1,72 @@
+#!/bin/sh
+# check-rt-host-map.shs: SRT001 per-host rt_ provider map, MAPPING evidence only.
+# POSIX sh + one awk (scripts/check/lib/rt-scan.awk); replaces check-rt-host-map.py.
+# Usage: check-rt-host-map.shs [--root DIR] [--regen-baseline] [--selftest]
+# Last stdout line is the verdict: PASS (0), FAIL (1), ERROR nothing checked (2).
+# Deliberate deviations from the Python original: see the header of lib/rt-scan.awk.
+LC_ALL=C; export LC_ALL
+here=$(cd "$(dirname "$0")" && pwd) || exit 2
+root=$(cd "$here/../.." && pwd) || exit 2
+selftest=0; regen=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --selftest) selftest=1 ;;
+    --regen-baseline) regen=1 ;;
+    --root) shift; root=${1:-}; [ -n "$root" ] || { echo "ERROR — --root needs a value"; exit 2; } ;;
+    *) ;;
+  esac
+  shift
+done
+if [ "$selftest" = 1 ]; then
+  RT_ROOT= awk -v MODE=host -v SELFTEST=1 -f "$here/lib/rt-scan.awk" </dev/null || exit $?
+  fx=$(mktemp -d) || { echo "ERROR — mktemp failed"; exit 2; }
+  [ -n "${RT_KEEP:-}" ] || trap 'rm -rf "$fx"' EXIT INT TERM
+  mkdir -p "$fx/src/runtime/nested" "$fx/src/runtime/vendor" || exit 2
+  r=$fx/src/runtime
+  printf '#include "guarded.h"
+' > "$r/root_linux.c"
+  printf '%s
+' '#include "shared.h"' '#include "diamond.h"' '#if defined(__linux__)' '#include "linux_only.h"' '#endif'     '#if defined(FEATURE_X)' '#include "unknown.h"' '#endif' '#if 0' '#include "disabled.h"' '#endif'     '#include "vendor/foreign.h"' '#include "escape.h"' '#include "../../outside.h"' '#include <unrelated.h>'     '#include COMPUTED_HEADER' '/* #include "unrelated.h" */' 'const char *s = "long rt_fake(void) { return 0; }";' > "$r/main.c"
+  printf '%s
+' '#include "nested/leaf.h"' '#include "cycle.h"' 'long rt_shared(void) { return 1; }' 'long rt_prototype(void);'     '    static long rt_static(void) { return 1; }' 'inline static long rt_static_inline(void) { return 1; }'     'static' 'int64_t rt_multiline_static(void) { return 1; }' 'inline' 'static' 'long rt_inline_static(void) { return 1; }'     'static' 'inline' 'long rt_static_reordered(void) { return 1; }' 'inline' 'long rt_public_inline(void) { return 1; }' > "$r/shared.h"
+  printf '#include "nested/leaf.h"
+' > "$r/diamond.h"
+  printf '#include "shared.h"
+' > "$r/cycle.h"
+  printf 'long rt_leaf(void) { return 1; }
+' > "$r/nested/leaf.h"
+  printf 'long rt_root_host(void) { return 1; }
+' > "$r/guarded.h"
+  printf 'long rt_include_host(void) { return 1; }
+' > "$r/linux_only.h"
+  printf 'long rt_unknown(void) { return 1; }
+' > "$r/unknown.h"
+  printf 'long rt_disabled(void) { return 1; }
+' > "$r/disabled.h"
+  printf 'long rt_unrelated(void) { return 1; }
+' > "$r/unrelated.h"
+  printf 'long rt_vendor(void) { return 1; }
+' > "$r/vendor/foreign.h"
+  printf 'long rt_escape(void) { return 1; }
+' > "$fx/outside.h"
+  # a real symlink or nothing: Git Bash on Windows copies for `ln -s`, which is not a symlink
+  if ln -s "$fx/outside.h" "$r/escape.h" 2>/dev/null && [ -L "$r/escape.h" ]; then
+    echo "PASS — symlink-escape fixture: real symlink outside owned runtime"
+  else
+    rm -f "$r/escape.h"
+    echo "UNTESTED — symlink-escape fixture: Windows symlink privilege unavailable"
+  fi
+  find "$fx" -type f 2>/dev/null | RT_ROOT=$fx awk -v MODE=host -v INCSELF=1 -f "$here/lib/rt-scan.awk"
+  exit $?
+fi
+RT_ROOT=$root
+export RT_ROOT
+# one find: every regular file under the scanned top dirs (no symlinks)
+tops=
+for d in src/runtime src/compiler_rust/runtime/src src/compiler src/lib src/app src/os; do
+  [ -d "$root/$d" ] && tops="$tops $root/$d"
+done
+[ -n "$tops" ] || { echo "ERROR — nothing was checked (0 extern to C provider edges)"; exit 2; }
+# shellcheck disable=SC2086
+find $tops -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.m' -o -name '*.mm' -o -name '*.h' -o -name '*.rs' -o -name '*.spl' \) 2>/dev/null |
+  awk -v MODE=host -v REGEN=$regen -f "$here/lib/rt-scan.awk"
