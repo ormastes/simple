@@ -55,8 +55,11 @@ use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_at_device_scale
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_compose_support.{
+    simple_web_layout_render_html_software_pixels_tile_lane
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    simple_web_layout_render_html_software_pixels
+    simple_web_layout_render_html_software_pixels, simple_web_layout_render_html_draw_ir
 }
 
 val CSS_W: i32 = 300
@@ -633,3 +636,80 @@ describe "The checkable author-box skip in every paint pass (Chrome 159)":
         step("base: both paths dropped the #22c55e pill. The two paths still differ by 44 px on the 8 px radius edge, as on a plain span -- a raster rounded-rect gap, not this rule")
         expect(_d_div(3, 0xff22c55eu32).slice(1, 3)).to_equal([336, 336])
         expect(_d_div(3, 0xff767676u32)[1]).to_equal(0)
+
+# Which `appearance` values keep a checkbox native (Chrome 159, k = 1, a
+# 30 x 16 #22c55e author pill): `none`, `initial` and `unset` show the pill
+# (336 px); `-webkit-appearance:checkbox`, `revert`, an invalid `foo`,
+# `textfield` and `radio` keep the native control (0 pill px).
+fn _appearance_page(values: [text]) -> text:
+    var body = ""
+    for v in values:
+        body = body + "<div><input type=\"checkbox\" style=\"" + v + "\"></div>"
+    "<!doctype html><html><head><meta charset=\"utf-8\"><style>" +
+        "*{{box-sizing:border-box}}" +
+        "body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';width:300px;color:#172033}}" +
+        "div{{height:44px;padding:6px 0 0 10px;overflow:hidden}}" +
+        "input{{width:30px;height:16px;padding:0;border-radius:8px;background:#22c55e;border:1px solid #15803d}}" +
+        "</style></head><body>" + body + "</body></html>"
+
+# Pill px per div, Draw IR then raster: [ir0, rs0, ir1, rs1, ...].
+fn _pill_px(values: [text]) -> [i32]:
+    val page = _appearance_page(values)
+    val ir = _render(page, D_H, 1)
+    val rs = simple_web_layout_render_html_software_pixels(page, CSS_W, D_H)
+    var out: [i32] = []
+    var n = 0
+    while n < values.len():
+        var ci = 0
+        var cr = 0
+        var y = n * 44
+        while y < n * 44 + 44:
+            var x = 0
+            while x < CSS_W:
+                if not _off(ir[y * CSS_W + x], 0xff22c55eu32):
+                    ci = ci + 1
+                if not _off(rs[y * CSS_W + x], 0xff22c55eu32):
+                    cr = cr + 1
+                x = x + 1
+            y = y + 1
+        out.push(ci)
+        out.push(cr)
+        n = n + 1
+    out
+
+fn _draw_ir_layer_raw_count(page: text, needle: text) -> i32:
+    val composition = simple_web_layout_render_html_draw_ir(page, CSS_W, D_H)
+    var n = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            for p in command.computed_style:
+                if p.key == "background-layers-raw" and p.value.contains(needle):
+                    n = n + 1
+    n
+
+describe "appearance values and the remaining checkable box paths (Chrome 159)":
+    it "AC-17: only none / initial / unset drop the native control":
+        step("base: every non-auto value, including checkbox, revert and an invalid one, showed the pill")
+        expect(_pill_px(["-webkit-appearance:checkbox", "appearance:revert", "appearance:initial", "appearance:foo"])).to_equal([0, 0, 0, 0, 336, 336, 0, 0])
+        expect(_pill_px(["appearance:textfield", "appearance:none", "appearance:unset", "appearance:radio"])).to_equal([0, 0, 336, 336, 336, 336, 0, 0])
+        step("!important outranks a later normal declaration in the same style")
+        expect(_pill_px(["appearance:none !important;appearance:checkbox", "appearance:checkbox !important;appearance:none"])).to_equal([336, 336, 0, 0])
+
+    it "AC-18: the tile lane does not treat a checkable's author fill as an occluder":
+        step("base: the 600 px #0f0 radio occluded tile 0, so the red block under it was culled (2500 px)")
+        val page = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}#r{{width:50px;height:50px;background:#f00}}input{{display:block;margin:-50px 0 0 0;padding:0;border:0;border-radius:0;width:600px;height:600px;background:#00ff00}}</style></head><body><div id=\"r\"></div><input type=\"radio\"></body></html>"
+        val tiled = simple_web_layout_render_html_software_pixels_tile_lane(page, 400, 300, 0, 300, true)
+        val classic = simple_web_layout_render_html_software_pixels_tile_lane(page, 400, 300, 0, 300, false)
+        var diff = 0
+        var i = 0
+        while i < tiled.len():
+            if tiled[i] != classic[i]:
+                diff = diff + 1
+            i = i + 1
+        expect(diff).to_equal(0)
+
+    it "AC-19: Draw IR drops a checkable's background layers, as the raster does":
+        step("control: a div keeps the layer; base: the checkbox kept it too")
+        val css = "<style>input,div{{width:30px;height:30px;border:0;background-image:linear-gradient(#ff0000,#ff0000),linear-gradient(#0000ff,#0000ff)}}</style>"
+        expect(_draw_ir_layer_raw_count("<html><head>" + css + "</head><body><div></div></body></html>", "linear-gradient")).to_equal(1)
+        expect(_draw_ir_layer_raw_count("<html><head>" + css + "</head><body><input type=\"checkbox\"></body></html>", "linear-gradient")).to_equal(0)
