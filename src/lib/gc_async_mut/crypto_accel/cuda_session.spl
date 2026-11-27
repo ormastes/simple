@@ -11,7 +11,8 @@ use std.gc_async_mut.cuda.{cuda_available, cuda_init, cuda_device_count,
     cuda_mem_alloc, cuda_mem_free, cuda_memcpy_htod, cuda_memcpy_dtoh,
     cuda_memset, cuda_module_load_data, cuda_module_load_binary,
     cuda_module_unload,
-    cuda_launch_kernel, cuda_sync, CUDA_SUCCESS}
+    cuda_launch_kernel, cuda_sync, cuda_get_error_string, CUDA_SUCCESS,
+    CUDA_ERROR_INVALID_VALUE, CUDA_ERROR_NOT_INITIALIZED, CUDA_ERROR_NO_DEVICE}
 use std.gc_async_mut.gpu_ffi.{cuda_device_identity, cuda_device_name,
     cuda_device_compute_capability}
 
@@ -23,6 +24,7 @@ class CryptoCudaSession:
     initialized: bool
     completion_unknown: bool
     generation: i64
+    last_error: text
 
     static fn create() -> CryptoCudaSession:
         CryptoCudaSession.create_for_device(0)
@@ -30,7 +32,12 @@ class CryptoCudaSession:
     static fn create_for_device(device_ordinal: i64) -> CryptoCudaSession:
         CryptoCudaSession(device_ordinal: device_ordinal,
             device: 0, context: 0, module: 0,
-            initialized: false, completion_unknown: false, generation: 0)
+            initialized: false, completion_unknown: false, generation: 0,
+            last_error: "")
+
+    me _record_error(op: text, rc: i64) -> i64:
+        self.last_error = "{op}:rc={rc}:{cuda_get_error_string(rc)}"
+        rc
 
     me is_valid() -> bool:
         self.initialized and self.context != 0 and
@@ -38,39 +45,59 @@ class CryptoCudaSession:
 
     me init() -> i64:
         if self.initialized or self.context != 0 or self.completion_unknown:
-            return 1
+            return self._record_error("cuda-session-state-invalid", 1)
         if self.device_ordinal < 0:
-            return 1
+            return self._record_error("cuda-device-ordinal-negative", CUDA_ERROR_INVALID_VALUE)
         val cuda_missing = not cuda_available()
         if cuda_missing:
-            return 1
-        val initialization_failed = cuda_init() != CUDA_SUCCESS
-        if initialization_failed:
-            return 1
+            return self._record_error("cuda-unavailable", CUDA_ERROR_NOT_INITIALIZED)
+        val init_rc = cuda_init()
+        if init_rc != CUDA_SUCCESS:
+            return self._record_error("cuda-init", init_rc)
         val device_count = cuda_device_count()
         if device_count < 1 or self.device_ordinal >= device_count:
-            return 1
-        self.device = cuda_device_get(self.device_ordinal)
-        self.context = cuda_ctx_create(self.device)
+            return self._record_error("cuda-device-range", CUDA_ERROR_NO_DEVICE)
+        val dev = cuda_device_get(self.device_ordinal)
+        if dev < 0:
+            return self._record_error("cuda-device-get", dev)
+        self.device = dev
+        val ctx = cuda_ctx_create(self.device)
         # A failed cuCtxCreate comes back as a negative CUresult, never a handle.
-        if self.context <= 0:
+        if ctx <= 0:
+            val err_rc = if ctx == 0: 1 else: ctx
             self.context = 0
             self.device = 0
-            return 1
+            return self._record_error("cuda-ctx-create", err_rc)
+        self.context = ctx
+        # Explicitly pin current context so subsequent allocations/copies cannot
+        # observe an unbound or foreign TLS context on shared GPU hosts.
+        val act_rc = cuda_ctx_set_current(self.context)
+        if act_rc != CUDA_SUCCESS:
+            val _destroyed = cuda_ctx_destroy(self.context)
+            self.context = 0
+            self.device = 0
+            return self._record_error("cuda-ctx-set-current", act_rc)
+        self.last_error = ""
         self.initialized = true
         self.generation = self.generation + 1
         CUDA_SUCCESS
 
     me activate() -> i64:
         if not self.is_valid():
-            return 1
-        cuda_ctx_set_current(self.context)
+            return self._record_error("cuda-session-invalid", CUDA_ERROR_NOT_INITIALIZED)
+        val rc = cuda_ctx_set_current(self.context)
+        if rc != CUDA_SUCCESS:
+            return self._record_error("cuda-ctx-set-current", rc)
+        CUDA_SUCCESS
 
     me load_module(source: text) -> i64:
         if not self.is_valid() or source == "":
             return 0
+        if self.activate() != CUDA_SUCCESS:
+            return 0
         val loaded = cuda_module_load_data(source)
         if loaded <= 0:
+            val _e = self._record_error("cuda-module-load-data", loaded)
             return 0
         if self.module != 0:
             val _unloaded = cuda_module_unload(self.module)
@@ -80,8 +107,11 @@ class CryptoCudaSession:
     me load_module_binary(bytes: [u8]) -> i64:
         if not self.is_valid() or bytes.len() == 0:
             return 0
+        if self.activate() != CUDA_SUCCESS:
+            return 0
         val loaded = cuda_module_load_binary(bytes)
         if loaded <= 0:
+            val _e = self._record_error("cuda-module-load-binary", loaded)
             return 0
         if self.module != 0:
             val _unloaded = cuda_module_unload(self.module)
@@ -91,7 +121,13 @@ class CryptoCudaSession:
     me alloc(byte_count: i64) -> i64:
         if byte_count <= 0 or not self.is_valid():
             return 0
-        cuda_mem_alloc(byte_count)
+        if self.activate() != CUDA_SUCCESS:
+            return 0
+        val ptr = cuda_mem_alloc(byte_count)
+        if ptr <= 0:
+            val _e = self._record_error("cuda-mem-alloc", if ptr == 0: 1 else: ptr)
+            return 0
+        ptr
 
     me free(ptr: i64):
         if ptr != 0 and not self.completion_unknown:
@@ -99,37 +135,66 @@ class CryptoCudaSession:
 
     me upload(dst: i64, src: i64, byte_count: i64) -> i64:
         if not self.is_valid() or dst == 0 or src == 0 or byte_count <= 0:
-            return 1
-        cuda_memcpy_htod(dst, src, byte_count)
+            return CUDA_ERROR_INVALID_VALUE
+        val act_rc = self.activate()
+        if act_rc != CUDA_SUCCESS:
+            return act_rc
+        val rc = cuda_memcpy_htod(dst, src, byte_count)
+        if rc != CUDA_SUCCESS:
+            return self._record_error("cuda-memcpy-htod", rc)
+        CUDA_SUCCESS
 
     me readback(dst: i64, src: i64, byte_count: i64) -> i64:
         if not self.is_valid() or dst == 0 or src == 0 or byte_count <= 0:
-            return 1
-        cuda_memcpy_dtoh(dst, src, byte_count)
+            return CUDA_ERROR_INVALID_VALUE
+        val act_rc = self.activate()
+        if act_rc != CUDA_SUCCESS:
+            return act_rc
+        val rc = cuda_memcpy_dtoh(dst, src, byte_count)
+        if rc != CUDA_SUCCESS:
+            return self._record_error("cuda-memcpy-dtoh", rc)
+        CUDA_SUCCESS
 
     me clear(ptr: i64, byte_count: i64) -> i64:
         if not self.is_valid() or ptr == 0 or byte_count <= 0:
-            return 1
-        cuda_memset(ptr, 0, byte_count)
+            return CUDA_ERROR_INVALID_VALUE
+        val act_rc = self.activate()
+        if act_rc != CUDA_SUCCESS:
+            return act_rc
+        val rc = cuda_memset(ptr, 0, byte_count)
+        if rc != CUDA_SUCCESS:
+            return self._record_error("cuda-memset", rc)
+        CUDA_SUCCESS
 
     me launch(entry: text, grid_x: i64, block_x: i64,
             args_ptr: i64) -> i64:
         val session_invalid = not self.is_valid()
         if session_invalid:
-            return 1
+            return CUDA_ERROR_NOT_INITIALIZED
         val entry_invalid = self.module == 0 or entry == ""
         val shape_invalid = grid_x <= 0 or block_x <= 0 or args_ptr == 0
         if entry_invalid or shape_invalid:
-            return 1
-        cuda_launch_kernel(self.module, entry,
+            return CUDA_ERROR_INVALID_VALUE
+        val act_rc = self.activate()
+        if act_rc != CUDA_SUCCESS:
+            return act_rc
+        val rc = cuda_launch_kernel(self.module, entry,
             grid_x, 1, 1, block_x, 1, 1, args_ptr)
+        if rc != CUDA_SUCCESS:
+            return self._record_error("cuda-launch", rc)
+        CUDA_SUCCESS
 
     me sync() -> i64:
         if not self.is_valid():
-            return 1
+            return CUDA_ERROR_NOT_INITIALIZED
+        val act_rc = self.activate()
+        if act_rc != CUDA_SUCCESS:
+            self.completion_unknown = true
+            return act_rc
         val rc = cuda_sync()
         if rc != CUDA_SUCCESS:
             self.completion_unknown = true
+            return self._record_error("cuda-sync", rc)
         rc
 
     me identity() -> i64:
@@ -162,5 +227,6 @@ class CryptoCudaSession:
         self.device = 0
         self.initialized = false
         self.completion_unknown = false
+        self.last_error = ""
 
 export CryptoCudaSession

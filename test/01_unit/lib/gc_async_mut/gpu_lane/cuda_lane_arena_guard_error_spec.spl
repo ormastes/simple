@@ -1,0 +1,60 @@
+use std.spec
+use std.io_runtime.{file_read}
+use std.gc_async_mut.cuda.{CUDA_SUCCESS}
+use std.gc_async_mut.crypto_accel.cuda_session.{CryptoCudaSession}
+use std.gc_async_mut.gpu_lane.cuda_lane_session.{
+    CudaLaneSession, format_cuda_lane_error}
+use std.gc_async_mut.gpu_lane.cuda_vm_executor.{CudaVmExecutor}
+
+describe "CudaLane arena guard deterministic init and error propagation":
+    it "rejects negative device ordinal in CryptoCudaSession and records error":
+        var sess = CryptoCudaSession.create_for_device(-1)
+        val rc = sess.init()
+        expect(rc != CUDA_SUCCESS).to_equal(true)
+        expect(sess.is_valid()).to_equal(false)
+        expect(sess.last_error.starts_with("cuda-device-ordinal-negative:rc=")).to_equal(true)
+        sess.shutdown()
+        expect(sess.last_error).to_equal("")
+
+    it "fails closed with diagnostic codes on invalid CryptoCudaSession calls":
+        var sess = CryptoCudaSession.create()
+        val act_rc = sess.activate()
+        expect(act_rc != CUDA_SUCCESS).to_equal(true)
+        expect(sess.last_error.starts_with("cuda-session-invalid:rc=")).to_equal(true)
+        expect(sess.upload(0, 0, 8) != CUDA_SUCCESS).to_equal(true)
+        expect(sess.readback(0, 0, 8) != CUDA_SUCCESS).to_equal(true)
+        expect(sess.clear(0, 8) != CUDA_SUCCESS).to_equal(true)
+        expect(sess.launch("entry", 1, 1, 0) != CUDA_SUCCESS).to_equal(true)
+        val sync_rc = sess.sync()
+        expect(sync_rc != CUDA_SUCCESS).to_equal(true)
+        expect(sess.completion_unknown).to_equal(false)
+        expect(sess.last_error.starts_with("cuda-session-invalid:rc=")).to_equal(true)
+        sess.shutdown()
+        expect(sess.last_error).to_equal("")
+
+    it "skips negative device ordinal in CudaLaneSession.probe and formats arena guard errors":
+        var lane = CudaLaneSession.create_for_device(-1)
+        expect(lane.probe()).to_equal("skip:cuda-device-ordinal-negative")
+        val formatted = format_cuda_lane_error("cuda-lane-arena-guard-init-failed", -2)
+        expect(formatted.starts_with("cuda-lane-arena-guard-init-failed:rc=-2:")).to_equal(true)
+
+    it "fails closed cleanly on uninitialized CudaVmExecutor and cleans up on shutdown":
+        var vm = CudaVmExecutor.create()
+        val outcome = vm.run_source("HALT", 10, 0)
+        expect(outcome.ok).to_equal(false)
+        expect(outcome.error).to_equal("cuda-vm-entry-not-loaded")
+        expect(vm.shutdown()).to_equal("")
+        expect(vm.entry_loaded).to_equal(false)
+
+    it "pins context activation, scratch pointer guard, and partial-init cleanup in source":
+        val crypto_src = file_read("src/lib/gc_async_mut/crypto_accel/cuda_session.spl")
+        expect(crypto_src.contains("val act_rc = cuda_ctx_set_current(self.context)")).to_equal(true)
+        expect(crypto_src.contains("val _destroyed = cuda_ctx_destroy(self.context)")).to_equal(true)
+        val lane_src = file_read("src/lib/gc_async_mut/gpu_lane/cuda_lane_session.spl")
+        expect(lane_src.contains("me _cleanup_init_failure():")).to_equal(true)
+        expect(lane_src.contains("me _upload_with_reactivate(")).to_equal(true)
+        expect(lane_src.contains("format_cuda_lane_error(\"cuda-lane-arena-guard-init-failed\"")).to_equal(true)
+        val vm_src = file_read("src/lib/gc_async_mut/gpu_lane/cuda_vm_executor.spl")
+        expect(vm_src.contains("if value_ptr == 0:")).to_equal(true)
+        expect(vm_src.contains("if args_ptr == 0:")).to_equal(true)
+        expect(vm_src.contains("self.entry_loaded = false")).to_equal(true)

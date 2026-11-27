@@ -13,7 +13,11 @@ use std.gpu.engine2d.generated_kernel_dispatch.{
     generated_2d_operation_provenance,
     generated_2d_submit_result
 }
-use std.gpu.engine2d.backend_lane.{engine2d_backend_lane_preferred_font_offload_candidate}
+use std.gpu.engine2d.backend_lane.{
+    FontRuntimeProvenance,
+    engine2d_backend_lane_preferred_font_offload_candidate,
+    engine2d_font_runtime_provenance_valid
+}
 use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats, vector_font_accelerator_stats}
 
 class VectorFontOffloadEvidence:
@@ -166,3 +170,22 @@ fn vector_font_preferred_glyph_readback_evidence(candidates: [text], width: i64,
         evidence.reason = "no-preferred-font-backend-candidate"
         return evidence
     vector_font_glyph_readback_evidence(backend, width, height, args_ptr, module_or_queue_handle, kernel_or_pipeline_handle, runtime_available, backend_submit_ok, readback_available, accelerator, glyph_pixels, actual_checksum)
+
+@allow(primitive_api)
+fn vector_font_runtime_provenance_valid(provenance: FontRuntimeProvenance) -> bool:
+    """Validate runtime non-CPU font offload provenance handles and readback checksum parity."""
+    engine2d_font_runtime_provenance_valid(provenance)
+
+@allow(primitive_api)
+fn vector_font_glyph_pixels_readback_verify(backend: text, width: i64, height: i64, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, accelerator: VectorFontAcceleratorStats, expected_pixels: [u8], actual_pixels: [u8]) -> VectorFontGlyphReadbackEvidence:
+    """Verify runtime readback glyph bytes against expected glyph coverage bytes."""
+    var actual_checksum = 0
+    if actual_pixels.len() == expected_pixels.len() and expected_pixels.len() > 0:
+        actual_checksum = vector_font_glyph_pixels_checksum(actual_pixels)
+        var idx = 0
+        while idx < expected_pixels.len():
+            if actual_pixels[idx] != expected_pixels[idx]:
+                actual_checksum = 0
+                break
+            idx = idx + 1
+    VectorFontGlyphReadbackEvidence.create(backend, width, height, args_ptr, module_or_queue_handle, kernel_or_pipeline_handle, runtime_available, backend_submit_ok, readback_available, accelerator, expected_pixels, actual_checksum)

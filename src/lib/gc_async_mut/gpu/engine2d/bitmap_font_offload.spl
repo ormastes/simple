@@ -14,7 +14,11 @@ use std.gpu.engine2d.generated_kernel_dispatch.{
     generated_2d_operation_provenance,
     generated_2d_submit_result
 }
-use std.gpu.engine2d.backend_lane.{engine2d_backend_lane_preferred_font_offload_candidate}
+use std.gpu.engine2d.backend_lane.{
+    FontRuntimeProvenance,
+    engine2d_backend_lane_preferred_font_offload_candidate,
+    engine2d_font_runtime_provenance_valid
+}
 
 class BitmapFontOffloadEvidence:
     backend_name: text
@@ -190,3 +194,24 @@ fn bitmap_glyph_raster_preferred_mask_readback_evidence(candidates: [text], glyp
         evidence.reason = "no-preferred-font-backend-candidate"
         return evidence
     bitmap_glyph_raster_mask_readback_evidence(backend, glyph_bits, width, height, color, args_ptr, module_or_queue_handle, kernel_or_pipeline_handle, runtime_available, backend_submit_ok, readback_available, actual_checksum)
+
+@allow(primitive_api)
+fn bitmap_font_runtime_provenance_valid(provenance: FontRuntimeProvenance) -> bool:
+    """Validate runtime non-CPU bitmap font offload provenance handles and readback checksum parity."""
+    engine2d_font_runtime_provenance_valid(provenance)
+
+@allow(primitive_api)
+fn bitmap_glyph_raster_mask_readback_verify(backend: text, glyph_bits: [u32], width: i64, height: i64, color: u32, args_ptr: i64, module_or_queue_handle: i64, kernel_or_pipeline_handle: i64, runtime_available: bool, backend_submit_ok: bool, readback_available: bool, actual_pixels: [u32]) -> BitmapGlyphRasterReadbackEvidence:
+    """Verify device readback pixels from bitmap glyph rasterization against expected mask expansion."""
+    val expected_pixels = bitmap_glyph_raster_expected_pixels(glyph_bits, width, height, color)
+    val expected_checksum = bitmap_glyph_raster_checksum(expected_pixels)
+    var actual_checksum = 0
+    if expected_pixels.len() > 0 and actual_pixels.len() == expected_pixels.len():
+        actual_checksum = bitmap_glyph_raster_checksum(actual_pixels)
+        var idx = 0
+        while idx < expected_pixels.len():
+            if actual_pixels[idx] != expected_pixels[idx]:
+                actual_checksum = 0
+                break
+            idx = idx + 1
+    BitmapGlyphRasterReadbackEvidence.create(backend, width, height, args_ptr, module_or_queue_handle, kernel_or_pipeline_handle, runtime_available, backend_submit_ok, readback_available, expected_checksum, actual_checksum)

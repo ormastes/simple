@@ -1,0 +1,56 @@
+# Order DATA reducer for the engine group of a started workload. Not a kill and not authority: the sealed
+# owner reads every progress field from its own retained state, and custody performs the retirement under
+# its own delegated descriptor (linux_fresh_engine_group_retire_v3).
+#
+# Decision (2026-11-27, doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md):
+# what a reaped `start` helper left behind is moved by the group runtime into
+# `<delegatedCgroup>/simple-engine-<start helper identity>`. That group holds the monitor of a container
+# the store calls running, so killing it early poisons the store for every later command. It is retired
+# only after the owner's own Stop, Remove and Absence completed, and until it is retired the charge is kept:
+# no settle and no close. The helper slot is not involved: the start helper retires exactly as before.
+# `stop_completed` is "the owner's own helper saw the workload end": Stop, or on the finite probe lane, which
+# never stops its payload, the completed Wait.
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
+use std.common.build_manager.group_process_stream_profile_v3.GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3
+
+# @allow(primitive_api) reason: closed order flags read from the owner's own retained operations
+pub struct MachineFreshEngineGroupProgressV3:
+    identities: [text]
+    helper_retired: bool
+    stop_completed: bool
+    remove_completed: bool
+    absence_completed: bool
+
+pub fn machine_fresh_engine_group_name_v3(identity: text) -> Result<text, text>:
+    if not builder_digest_valid_v1(identity): return Err("machine-fresh-workload-engine-group-identity")
+    Ok("simple-engine-" + identity)
+
+# The launch the owner actually captured says whether its leader's residue is moved; no action name does.
+# @allow(primitive_api) reason: predicate over the captured launch; bool is the predicate result
+pub fn machine_fresh_engine_group_requested_v3(launch: GroupProcessStreamLaunchV2) -> bool:
+    if launch.profile_v3.is_none(): return false
+    launch.profile_v3.unwrap().leader_residue_mode == GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3
+
+# One owner holds at most four unretired groups; a repeated identity is the same group.
+pub fn machine_fresh_engine_group_record_v3(held: [text], identity: text) -> Result<[text], text>:
+    if not builder_digest_valid_v1(identity): return Err("machine-fresh-workload-engine-group-identity")
+    if held.contains(identity): return Ok(held)
+    if held.len() >= 4: return Err("machine-fresh-workload-engine-group-bound")
+    Ok(held + [identity])
+
+# The group names to retire now, in recording order; empty when the owner never asked for a move.
+pub fn machine_fresh_engine_group_decide_v3(progress: MachineFreshEngineGroupProgressV3) -> Result<[text], text>:
+    if progress.identities.len() == 0: return Ok([])
+    if progress.identities.len() > 4: return Err("machine-fresh-workload-engine-group-bound")
+    if not progress.helper_retired: return Err("machine-fresh-workload-engine-group-helper-active")
+    if not progress.stop_completed or not progress.remove_completed or not progress.absence_completed:
+        return Err("machine-fresh-workload-engine-group-store-live")
+    var names: [text] = []
+    for identity in progress.identities: names.push(machine_fresh_engine_group_name_v3(identity)?)
+    Ok(names)
+
+# A recorded group keeps the charge: the settle preparations and both closes pass only an empty list.
+pub fn machine_fresh_engine_group_settle_gate_v3(identities: [text]) -> Result<(), text>:
+    if identities.len() != 0: return Err("machine-fresh-workload-engine-group-retained")
+    Ok(())

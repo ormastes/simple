@@ -1,6 +1,7 @@
 # LLM Caret Native Closure Admission Failure — 2026-08-11
 
-Status: OPEN (P2)
+Status: fix-implemented-verification-pending (P2)
+waiting-for: native closure binary rebuild
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
 ## Symptom
@@ -132,3 +133,19 @@ for bin/caret, re-run the cached CLI + PTY TUI system checks, and only then
 close this row.
 
 Status stays OPEN (BLOCKED on the sanctioned bootstrap).
+
+---
+
+## 2026-11-27 Fix Applied (Wave 5 Lane W5-4, `work/w5-4-scripts-caret-font-20261127`)
+
+- Closed pure-Simple `simple_core` ABI gaps and Caret import mismatch:
+  - `src/runtime/simple_core/core_fs.spl`: replaced stubbed `rt_file_stat` (`0`) with OS-aware `stat()` returning `st_mtime` (`88` Linux, `48` macOS, `64` FreeBSD, `-1` fallback -> `0`), and replaced hardcoded `entry + 9` in `rt_dir_list` with OS-aware `d_name` offsets (`19` Linux, `21` macOS, `24` FreeBSD, `9` fallback).
+  - `src/runtime/simple_core/core_terminal.spl`: added pure-Simple POSIX providers for `rt_terminal_is_tty`, `rt_terminal_stdout_is_tty`, `rt_terminal_enable_raw_mode`, `rt_terminal_disable_raw_mode`, `rt_terminal_get_size`, `rt_stdin_read_byte`, `rt_stdin_read_chars_text`, `rt_signal_install`, and `rt_atexit_install` without colliding on `core_process.spl`/`core_string.spl`.
+  - `src/runtime/simple_core/core_thread.spl`: added single-thread fail-closed providers for `rt_thread_spawn_isolated*`, `rt_thread_join`, `rt_thread_is_done`, `rt_thread_id`, `rt_thread_free`, `rt_thread_available_parallelism`, `rt_thread_yield`, `rt_thread_sleep_ms`, and `rt_thread_local_*` without duplicating `rt_thread_sleep`/`spl_thread_cpu_count`.
+  - `src/app/llm_caret/gui_metal.spl`: switched `thread_sleep` import from `std.nogc_sync_mut.concurrent.thread` to `std.io_runtime`.
+  - `scripts/check/check-llm-caret-native-closure.shs` and `scripts/check/check-llm-caret-native-closure-host.shs`: expanded forbidden-import checks to cover `rt_signal_install`, `rt_atexit_install`, `rt_stdin_read_chars_text`, and `rt_thread_*`.
+- Host verification:
+  - `sh scripts/check/check-llm-caret-native-closure-host.shs`: PASS.
+  - `test/01_unit/app/llm_caret/caret_native_closure_abi_spec.spl`: PASS (`4 passed, 0 failed`).
+  - `test/03_system/app/llm_caret/feature/llm_caret_native_closure_spec.spl`: `BLOCKED` (`2 blocked`, exit `6`: `simple_core_archive_not_supplied` on Windows seed host).
+- Remaining verification (`waiting-for: native closure binary rebuild`): full self-hosted bootstrap (`libsimple_core.a` rebuild) + live `sh scripts/check/check-llm-caret-native-closure.shs --check`.
