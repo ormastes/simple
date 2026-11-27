@@ -180,12 +180,12 @@ fn nested_tail_match_arm_keeps_payload_type_for_dict_index_receiver() {
     // `Dict<text, Tag>` type and `files[k].label()` reached codegen as a bare
     // method call with 2+ candidates (CODEGEN-AMBIGUOUS-METHOD).
     let source = concat!(
-        "class Tag:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
+        "class Tag:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n    fn entries() -> Dict<text, Tag>?:\n        None\n",
         "class Other:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
-        "fn pick(outer: Dict<text, Tag>?, key: text) -> text:\n",
+        "fn pick(outer: Tag?, key: text) -> text:\n",
         "    val files = match outer:\n",
         "        case Some(a):\n",
-        "            match Some(a):\n",
+        "            match a.entries():\n",
         "                case Some(entries): entries\n",
         "                case None: return \"x\"\n",
         "        case None: return \"y\"\n",
