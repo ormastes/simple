@@ -217,6 +217,38 @@ pub fn tldr_route_import_specs_v1(source: text, include_export_from: bool = fals
             # `export variables.env_get, paths.split_path`, `export mod.*`, and
             # `export pkg.sub.*`: qualified or glob re-exports are import edges of
             # the facade's package or absolute module (bug ..._2026-11-19 update h).
+            # Braced form `export diagnostic_v1.{A, B}` (also multi-line): the
+            # comma split below left `diagnostic_v1.{A`, which is no dotted
+            # path, so the sibling was never planned while the export-route
+            # freeze still made it a readiness edge (bug
+            # file_worker_closure_incomplete_braced_qualified_export_2026-11-27).
+            val ex_body = t.substring(7).trim()
+            val ex_brace = ex_body.index_of(".{")
+            if ex_brace > 0 and _tr_is_ident_or_dotted_v1(ex_body.substring(0, ex_brace)):
+                val ex_prefix = ex_body.substring(0, ex_brace)
+                var ex_inner = ex_body.substring(ex_brace + 2)
+                var ex_close = ex_inner.index_of("}")
+                while ex_close < 0 and i + 1 < lines.len() and not _tr_starts_decl_v1(lines[i + 1].trim()):
+                    i = i + 1
+                    ex_inner = ex_inner + "," + _tr_strip_comment_v1(lines[i])
+                    ex_close = ex_inner.index_of("}")
+                if ex_close >= 0: ex_inner = ex_inner.substring(0, ex_close)
+                var ex_pushed = false
+                for item in ex_inner.split(","):
+                    var name = item.trim()
+                    val item_as = name.index_of(" as ")
+                    if item_as > 0: name = name.substring(0, item_as).trim()
+                    if name == "" or name == "*": continue
+                    ex_pushed = true
+                    _tr_push_spec_edge_v1(out, "." + ex_prefix, name)
+                    if ex_prefix.contains("."):
+                        _tr_push_spec_edge_v1(out, ex_prefix, name)
+                if not ex_pushed:
+                    _tr_push_spec_edge_v1(out, "." + ex_prefix, "")
+                    if ex_prefix.contains("."):
+                        _tr_push_spec_edge_v1(out, ex_prefix, "")
+                i = i + 1
+                continue
             for item in t.substring(7).split(","):
                 var qualified = item.trim()
                 val q_as = qualified.index_of(" as ")
