@@ -9,7 +9,7 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1,
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, immutable_store_v1_list_owner_pins, immutable_store_v1_reclaim_pin_tomb, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1,
     _isv1_publish_root_inner, _isv1_publish_root_prepare, _isv1_publish_root_commit, _isv1_root_compact,
     _isv1_root_head_begin, _isv1_root_head_finish, _isv1_root_scan, _isv1_root_floor_path,
     _isv1_root_claim_path, _isv1_doc_encode, _isv1_collect_inner, _isv1_publish, _isv1_object_path}
@@ -687,6 +687,74 @@ describe "immutable_store_v1 crash and failure safety":
         expect(file_exists(tomb + "/keep")).to_equal(true)
         immutable_store_v1_sweep_staging(root, StoreCountV1(0))
         expect(file_exists(tomb + "/pin/owner")).to_equal(true)
+        _store_cleanup(root)
+
+    it "lists an owner's restored .r<n> pin and lets the owner release it":
+        val root = _store_root("rel-list-r")
+        val a = immutable_store_v1_ingest(root, "list r payload".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "shared", "owner-b", [a.object_key])).to_equal("")
+        val tomb = root + "/staging/pinrel-lr"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/shared", tomb + "/pin")).to_equal(true)
+        expect(immutable_store_v1_pin(root, "shared", "owner-c", [a.object_key])).to_equal("")
+        expect(_isv1_release_pin_finish(root, "shared", "owner-a", tomb)).to_equal("pin-owner-changed")
+        val mine = immutable_store_v1_list_owner_pins(root, "owner-b")
+        expect(mine.len()).to_equal(1)
+        expect(mine[0].pin_id).to_equal("shared.r1")
+        expect(mine[0].location).to_equal("pins")
+        expect(mine[0].refs.len()).to_equal(1)
+        expect(mine[0].refs[0]).to_equal(a.object_key)
+        expect(immutable_store_v1_list_owner_pins(root, "owner-c").len()).to_equal(1)
+        expect(immutable_store_v1_release_pin(root, "shared.r1", "owner-b")).to_equal("")
+        expect(immutable_store_v1_list_owner_pins(root, "owner-b").len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "lists a keep tomb for its owner and reclaims or releases it":
+        val root = _store_root("rel-tomb-reclaim")
+        val a = immutable_store_v1_ingest(root, "tomb reclaim".bytes(), HASH_POLICY_V1_XXH3_128)
+        var long_id = ""
+        while long_id.byte_len() < 126:
+            long_id = long_id + "p"
+        expect(immutable_store_v1_pin(root, long_id, "owner-b", [a.object_key])).to_equal("")
+        val tomb = root + "/staging/pinrel-k1"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/" + long_id, tomb + "/pin")).to_equal(true)
+        expect(immutable_store_v1_pin(root, long_id, "owner-c", [a.object_key])).to_equal("")
+        expect(_isv1_release_pin_finish(root, long_id, "owner-a", tomb)).to_equal("pin-owner-changed-unrestored")
+        expect(immutable_store_v1_list_owner_pins(root, "owner-a").len()).to_equal(0)
+        val mine = immutable_store_v1_list_owner_pins(root, "owner-b")
+        expect(mine.len()).to_equal(1)
+        expect(mine[0].location).to_equal("tomb")
+        expect(mine[0].tomb).to_equal("pinrel-k1")
+        expect(mine[0].pin_id).to_equal(long_id)
+        expect(mine[0].refs[0]).to_equal(a.object_key)
+        # Wrong owner and bad names are refused; the id does not fit, so restore fails and the tomb stays.
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "pinrel-k1", "", StoreFlagV1(true))).to_equal("pin-owner-invalid")
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "pinrel-k1", "owner-a", StoreFlagV1(false))).to_equal("pin-owner-mismatch")
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "other-k1", "owner-b", StoreFlagV1(false))).to_equal("pin-tomb-invalid")
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "pinrel-nope", "owner-b", StoreFlagV1(false))).to_equal("pin-tomb-missing")
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "pinrel-k1", "owner-b", StoreFlagV1(false))).to_equal("pin-tomb-unrestored")
+        expect(file_exists(tomb + "/pin/owner")).to_equal(true)
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "pinrel-k1", "owner-b", StoreFlagV1(true))).to_equal("")
+        expect(is_dir(tomb)).to_equal(false)
+        expect(immutable_store_v1_list_owner_pins(root, "owner-b").len()).to_equal(0)
+        _store_cleanup(root)
+
+    it "reclaims a keep tomb back into pins/ when a name fits":
+        val root = _store_root("rel-tomb-restore")
+        val a = immutable_store_v1_ingest(root, "tomb restore".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "tp", "owner-b", [a.object_key])).to_equal("")
+        val tomb = root + "/staging/pinrel-k2"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/tp", tomb + "/pin")).to_equal(true)
+        file_write_bytes(tomb + "/keep", "id=tp".bytes())
+        expect(immutable_store_v1_pin(root, "tp", "owner-c", [a.object_key])).to_equal("")
+        expect(immutable_store_v1_reclaim_pin_tomb(root, "pinrel-k2", "owner-b", StoreFlagV1(false))).to_equal("")
+        expect(is_dir(tomb)).to_equal(false)
+        val mine = immutable_store_v1_list_owner_pins(root, "owner-b")
+        expect(mine.len()).to_equal(1)
+        expect(mine[0].pin_id).to_equal("tp.r1")
+        expect(immutable_store_v1_release_pin(root, "tp.r1", "owner-b")).to_equal("")
         _store_cleanup(root)
 
     it "sweeps stale staging dirs but keeps fresh ones, and never during dry-run GC":
