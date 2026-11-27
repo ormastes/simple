@@ -1,6 +1,7 @@
 # WM content damage-plan API: specified by two specs, never landed
 
-Status: open. Measured 2026-11-26 on release/1.0.0 `f2f5776b73f`, seed
+Status: fixed (2026-11-27 on `work/w4-6-wm-compositor-damage-20261127`).
+Originally measured 2026-11-26 on release/1.0.0 `f2f5776b73f`, seed
 `cargo-target-wr-seed1126b/release/simple` (sha256 `fb80903917d6d5f5…`).
 
 ## Symptom
@@ -45,12 +46,23 @@ resources-accepted flag.
 So this is not a regression that can be bisected: the specs describe a design
 whose implementation is not in the repository.
 
-## Decision needed
+## Resolution (Option 1 — Implemented 2026-11-27)
 
-1. Implement the plan API beside the delta path (the boundary spec is precise
-   enough to drive it), stating how a frame that carries both a plan and a
-   packed delta is treated; or
-2. retire both specs in favour of the delta path's own coverage
-   (`test/01_unit/os/hosted/hosted_external_web_frame_spec.spl`).
+Implemented Option 1 (landing the damage-plan API alongside the existing packed-delta path):
+- `src/lib/common/ui/window_scene.spl`: exported `WM_CONTENT_DAMAGE_NONE` (`0`), `WM_CONTENT_DAMAGE_LOCAL` (`1`), `WM_CONTENT_DAMAGE_FULL` (`2`); added defaulted fields `producer_revision: i64 = 0`, `damage_mode: i64 = WM_CONTENT_DAMAGE_FULL`, `damage_resources_accepted: bool = false` on `WmContentFrame`; added `_wm_content_damage_rects_overlap`, `_wm_content_damage_rect_in_bounds`, and `wm_content_frame_damage_plan_valid`.
+- `src/os/compositor/simple_web_window_renderer.spl`: extended `simple_web_external_content_frame` and `simple_web_external_content_frame_with_theme_receipt` with optional damage-plan parameters (`producer_revision`, `damage_mode`, `damage_rects`, `damage_resources_accepted`).
+- `src/os/compositor/compositor_engine2d.spl`: added `engine2d_revision_result_payload_cacheable`, `revision_cache_surface_valid`, `web_effective_damage_*`, and `render_web_draw_ir_composition_resources_revision(...)` with 8K payload elision and `composition_damage_between` + `web_draw_ir_consume_damage`.
+- `src/os/compositor/host_compositor_core.spl`: kept packed-delta handling (`frame.base_content_revision != 0 or frame.damage_pixels.len() != 0`) distinct from damage-plan admission, translating valid `LOCAL` plans into clamped parent rects, honoring clean `NONE` updates without false damage, and failing closed to one full parent rect on invalid plans, skipped revisions, unaccepted resources, overlapping rects, or out-of-bounds coordinates; added `has_pending_damage()`.
+- Removed stale `# @tag:in-development` headers from `test/01_unit/os/compositor/host_external_content_damage_boundary_spec.spl` (updating Example 7's theme selector from removed `"glass_dark"` to active-or-default theme) and `test/01_unit/check/wm_external_content_damage_overlap_contract_spec.spl`.
 
-Until then the spec stays red; it has not been tagged or skipped.
+### Verification (`wa3_shared_bin/simple.exe test ... --mode=interpreter`, `SIMPLE_ASSET_ROOT=C:\dev\simple`)
+- `test/01_unit/os/compositor/host_external_content_damage_boundary_spec.spl`: 7/7 passed (`outcome=OK`).
+- `test/01_unit/check/wm_external_content_damage_overlap_contract_spec.spl`: 2/2 passed (`outcome=OK`).
+- `test/01_unit/os/compositor/engine2d_frame_switch_receipt_spec.spl`: 5/5 passed (`outcome=OK`).
+- `test/01_unit/check/web_8k_retained_surface_payload_contract_spec.spl`: 2/2 passed (`outcome=OK`).
+- `test/01_unit/os/compositor/host_content_frame_admission_spec.spl`: 1/1 passed (`outcome=OK`).
+- `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl`: 28/28 passed (`outcome=OK`).
+- `test/01_unit/os/compositor/external_web_frame_theme_identity_guard_spec.spl`: 4/4 passed (`outcome=OK`).
+- `test/01_unit/os/compositor/host_compositor_pending_damage_spec.spl`: 2/2 passed (`outcome=OK`).
+- `test/01_unit/os/compositor/engine2d_compositor_revision_generation_spec.spl`: 2/2 passed (`outcome=OK`).
+- Pre-existing baseline failures outside this change: `engine2d_compositor_revision_cache_spec.spl` 7/8 (example 5 hits duplicate `revision_cache_local_fixture` in spec lines 24/65), `hosted_external_web_frame_spec.spl` 3/4 (example 1 hits unescaped CSS `{...}` at spec line 74; all 3 compositor/delta examples pass), `hosted_web_none_damage_present_gate_source_spec.spl` 0/1 (checks untouched `src/os/hosted/hosted_entry.spl`).
