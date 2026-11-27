@@ -1,0 +1,53 @@
+# Windows AppContainer filesystem-confinement verdict (simple container plan item 4).
+# The confinement itself is the existing SOSIX variant sosix_app_sandbox_run_v1
+# (sosix/windows/app_container_v1.spl: per-run profile, least-privilege grant on the
+# listed dirs only, revoke + profile delete at teardown). This module only turns two of
+# its runs into evidence and is the one place that sets filesystem_confinement from it:
+#   inside run  : child opens a file inside a granted dir  -> must exit 0
+#   outside run : child opens a file outside every grant   -> must exit exactly
+#                 WINDOWS_APPCONTAINER_DENIED_EXIT_V1 (Win32 ERROR_ACCESS_DENIED), not any
+#                 other nonzero, negative or crash code
+#   host read   : performed HERE on the same outside file, so a missing file (which would
+#                 also deny) cannot be passed off as confinement.
+# Both runs must also complete cleanly (empty reason, not timed out). No new FFI.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_result}
+use std.nogc_sync_mut.sosix.app_container_types_v1.{SosixAppSandboxResultV1}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1, ContainerCapabilityFlagV1}
+
+# What the probe child exits with when the open of the target was refused.
+pub const WINDOWS_APPCONTAINER_DENIED_EXIT_V1 = 5
+
+pub enum WindowsAppContainerVerdictV1:
+    Confined
+    NotConfined(reason: text)
+
+fn _run_clean(result: SosixAppSandboxResultV1) -> bool:
+    result.reason == "" and not result.timed_out.value
+
+fn _host_reads(path: text) -> bool:
+    if not file_exists(path): return false
+    match file_read_result(path):
+        Ok(content): content.byte_len() > 0
+        Err(_reason): false
+
+pub fn windows_appcontainer_verdict_v1(inside: SosixAppSandboxResultV1, outside: SosixAppSandboxResultV1,
+        outside_path: text) -> WindowsAppContainerVerdictV1:
+    if not _run_clean(inside): return WindowsAppContainerVerdictV1.NotConfined("inside-run-failed")
+    if not _run_clean(outside): return WindowsAppContainerVerdictV1.NotConfined("outside-run-failed")
+    if inside.exit_code.value != 0: return WindowsAppContainerVerdictV1.NotConfined("inside-read-failed")
+    if not _host_reads(outside_path): return WindowsAppContainerVerdictV1.NotConfined("outside-control-unreadable")
+    if outside.exit_code.value == 0: return WindowsAppContainerVerdictV1.NotConfined("outside-read-succeeded")
+    if outside.exit_code.value != WINDOWS_APPCONTAINER_DENIED_EXIT_V1:
+        return WindowsAppContainerVerdictV1.NotConfined("outside-exit-not-access-denied")
+    WindowsAppContainerVerdictV1.Confined
+
+# Sets filesystem_confinement from the runs themselves (the verdict is recomputed here, so a
+# caller cannot hand in a Confined value); every other outcome leaves it false.
+pub fn windows_appcontainer_apply_runs_v1(report: ContainerCapabilityReportV1, inside: SosixAppSandboxResultV1,
+        outside: SosixAppSandboxResultV1, outside_path: text) -> ContainerCapabilityReportV1:
+    var out = report
+    val confined = match windows_appcontainer_verdict_v1(inside, outside, outside_path):
+        WindowsAppContainerVerdictV1.Confined: true
+        _: false
+    out.filesystem_confinement = ContainerCapabilityFlagV1(confined)
+    out

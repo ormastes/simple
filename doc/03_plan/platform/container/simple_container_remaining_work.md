@@ -46,8 +46,8 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 - Acceptance: engine transcript showing the bound view is writable, saved on stop and destroyed on remove.
 
 ### 4. Windows AppContainer filesystem confinement (Windows host)
-- New FFI surface; needs a C boundary with a Simple twin per `doc/07_guide/os/hal/pure_simple_hal.md` (dual-run gate `scripts/check/check-dual-run-shadow.shs`).
-- Acceptance: a confined process cannot open a path outside its view (negative test), then `filesystem_confinement` may flip to `true`.
+- Built on the existing pure-Simple SOSIX variant `sosix_app_sandbox_run_v1` (`src/lib/nogc_sync_mut/sosix/windows/app_container_v1.spl`); no new FFI and no new `rt_*` (the earlier C/Rust runtime attempt was dropped).
+- **DONE 2026-11-28:** `src/lib/nogc_sync_mut/io/windows_appcontainer_v1.spl` turns an inside run and an outside run into a verdict: Confined only when the inside read exits 0, the outside read exits exactly 5 (access denied, not any other nonzero/negative/crash), both runs are clean, and the verdict code itself reads the same outside file on the host. `windows_appcontainer_apply_runs_v1` recomputes the verdict from the runs and is the only setter of `filesystem_confinement`. Spec `test/01_unit/lib/nogc_sync_mut/sosix/windows_appcontainer_confinement_spec.spl` 6/6 on Windows (positive, negative, crash/negative exit, missing outside file, leak, no ACE or profile left); off Windows it prints SKIP. Not yet consumed by the lane report builder.
 
 ### 5. Other hosts (blocked from this Windows host)
 - Linux namespaces/cgroups + Podman, macOS Seatbelt, FreeBSD jail: run on those hosts or the repo QEMU lanes (untried from here).
