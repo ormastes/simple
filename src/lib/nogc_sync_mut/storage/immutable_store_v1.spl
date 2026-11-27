@@ -427,13 +427,15 @@ fn _isv1_quarantine_find(root: text, key: text) -> text:
 # Reader-side twin of the GC restore: put a verified quarantined copy of a
 # currently reachable key back under objects/ (no-replace).
 fn _isv1_restore_reachable(root: text, key: text):
+    # Probe quarantine first: the common miss has no quarantined copy and then
+    # costs one stat per day dir instead of reading every root and pin.
+    val source = _isv1_quarantine_find(root, key)
+    if source == "":
+        return
     val reachable = match _isv1_reachable(root):
         case Ok(value): value
         case Err(_): return
     if not reachable.contains_key(key):
-        return
-    val source = _isv1_quarantine_find(root, key)
-    if source == "":
         return
     val shard = _isv1_join(root, "objects/" + key.substring(0, 2))
     if not dir_create_all(shard) and not is_dir(shard):
@@ -570,8 +572,21 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
                     if retry_reason != "":
                         return _isv1_ingest_rejected(retry_reason)
                     return _isv1_ingest_ok(key, alias_hex, StoreFlagV1(false))
-                dir_remove_all(stage)
-                return _isv1_ingest_rejected("publish-winner-unreadable")
+                # The winner may have reappeared (a reader restored it from
+                # quarantine, so our retry saw 0): re-read it before giving up.
+                var reread: [u8] = []
+                var reread_ok = false
+                if retried == 0:
+                    match file_read_regular_no_follow_bounded_bytes(object_path, _ISV1_MAX_OBJECT_BYTES):
+                        case Ok(again):
+                            reread = again
+                            reread_ok = true
+                        case Err(_):
+                            pass
+                if not reread_ok:
+                    dir_remove_all(stage)
+                    return _isv1_ingest_rejected("publish-winner-unreadable")
+                reread
         dir_remove_all(stage)
         if winner == bytes:
             val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
@@ -1179,6 +1194,10 @@ fn _isv1_restore_moved(root: text, keys: [text], destinations: [text],
                         file_delete(destinations[i])
                     settled.push(key)
                 elif status == 0:
+                    settled.push(key)
+                elif not file_exists(destinations[i]) and file_exists(target):
+                    # Source missing (-1) and target present: a reader already
+                    # restored it, so the key is settled, not a failure.
                     settled.push(key)
         i = i + 1
     settled
