@@ -46,8 +46,10 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 - Acceptance: engine transcript showing the bound view is writable, saved on stop and destroyed on remove.
 
 ### 4. Windows AppContainer filesystem confinement (Windows host)
-- New FFI surface; needs a C boundary with a Simple twin per `doc/07_guide/os/hal/pure_simple_hal.md` (dual-run gate `scripts/check/check-dual-run-shadow.shs`).
-- Acceptance: a confined process cannot open a path outside its view (negative test), then `filesystem_confinement` may flip to `true`.
+- Built on the existing pure-Simple SOSIX variant `sosix_app_sandbox_run_v1`; no new FFI and no new `rt_*` (an earlier C/Rust runtime attempt was dropped).
+- **Evidence only, flag NOT flipped (2026-11-28).** `src/lib/nogc_sync_mut/sosix/windows/app_container_confinement_probe_v1.spl` runs both sandbox runs itself from (view dir, inside path, outside path): host read of the outside file before and after, inside child read exits 0, outside child read exits 5 ("not readable": missing, empty or any read error; NOT proof of ERROR_ACCESS_DENIED, the host reads rule out a missing file), paths must be disjoint, both runs clean. Spec `test/01_unit/lib/nogc_sync_mut/sosix/app_container_confinement_probe_v1_spec.spl` 5/5 on Windows (confined, missing outside file, mispaired paths refused, AAP-readable system file reported as readable, no ACE or profile left); off Windows it prints SKIP.
+- The probe sets no capability flag: the Windows engine launch path is job + restricted token with `read_confinement: no` (`sosix/windows/containment_launch_v1.spl`), so `filesystem_confinement` must not be asserted from an AppContainer run it does not use.
+- **A real flip needs:** (1) the engine launch goes through the app sandbox; (2) `PureContainerEvidenceV1` gains a read-confinement-observed field fed by this verdict (like `memory_cap_enforced`); (3) the single builder `src/lib/common/contracts/container/pure_backend_v1.spl:70` ANDs it with the support flags.
 
 ### 5. Other hosts (blocked from this Windows host)
 - Linux namespaces/cgroups + Podman, macOS Seatbelt, FreeBSD jail: run on those hosts or the repo QEMU lanes (untried from here).

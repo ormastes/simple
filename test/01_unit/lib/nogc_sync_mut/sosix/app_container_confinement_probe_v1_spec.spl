@@ -1,0 +1,156 @@
+# Windows AppContainer read-confinement evidence probe over the SOSIX app sandbox
+# (sosix_app_sandbox_run_v1). Windows only: off Windows each example prints SKIP and
+# returns (visible, and never evidence). On Windows a missing seed FAILS.
+# Children are copies of the running seed executing test/fixtures/container/app_sandbox_probe.spl
+# `open <path>` (exit 0 readable, 5 not readable). The seed copy + probe sit in a staging dir
+# granted READ; the child cwd is a second dir granted MODIFY; the outside dir is granted to
+# nobody but is readable by Everyone and by the host, so a denial is the AppContainer's.
+use std.spec.{describe, it, expect}
+use std.platform.{is_windows, get_current_dir, get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{env_get, file_exists, file_copy, file_write, getpid, time_now_monotonic_ms}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all, dir_list}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{windows_abi_get_module_file_name_w}
+use std.common.char_from_code_pure.{char_from_code}
+use std.nogc_sync_mut.sosix.windows.security_abi_v1.{sec_alloc_v1, sec_free_v1, sec_local_free_v1, sec_read_ptr_v1, sec_u16_v1, sec_get_dacl_v1, sec_set_entries_v1, sec_set_dacl_v1, sec_access_entry_v1, sec_sid_from_text_v1}
+use std.nogc_sync_mut.sosix.windows.app_container_confinement_probe_v1.{WindowsAppContainerConfinementRequestV1, WindowsAppContainerConfinementVerdictV1, windows_appcontainer_confinement_probe_run_v1}
+
+val RUN_TAG = getpid().to_string() + "_" + time_now_monotonic_ms().to_string()
+
+# Path of the binary running this spec (GetModuleFileNameW of the process), ASCII only; "" off Windows.
+fn running_binary() -> text:
+    if not is_windows(): return ""
+    val buffer = sec_alloc_v1(1040)
+    if buffer == 0: return ""
+    val count = windows_abi_get_module_file_name_w(0, buffer, 520)
+    var out = ""
+    var index = 0
+    while index < count and index < 520:
+        val unit = sec_u16_v1(buffer + index * 2)
+        if unit == 0 or unit > 127: break
+        out = out + char_from_code(unit)
+        index = index + 1
+    sec_free_v1(buffer)
+    out.replace("\\", "/")
+
+val SEED = running_binary()
+
+fn ready() -> bool:
+    is_windows() and file_exists(SEED)
+
+fn skipped() -> bool:
+    if not is_windows():
+        print("SKIP: AppContainer confinement examples require Windows")
+        return true
+    expect(file_exists(SEED)).to_equal(true)
+    false
+
+val BASE = get_temp_dir().replace("\\", "/") + "/ac_confine_" + RUN_TAG
+val STAGE = BASE + "/stage"
+val WORK = BASE + "/work"
+val OUTSIDE = BASE + "/outside"
+
+# Everyone (S-1-1-0) gets read+execute on `path`: readable by a plain user, which is the case
+# the AppContainer must still deny.
+fn grant_everyone_read(path: text) -> bool:
+    val sid = sec_sid_from_text_v1("S-1-1-0")
+    val slot = sec_alloc_v1(8)
+    val entries = sec_alloc_v1(48)
+    var done = false
+    if sid != 0 and slot != 0 and entries != 0:
+        val native = path.replace("/", "\\")
+        val descriptor = sec_get_dacl_v1(native, slot)
+        if descriptor != 0:
+            sec_access_entry_v1(entries, 0, 0x1200A9, 3, sid)
+            val merged = sec_set_entries_v1(1, entries, sec_read_ptr_v1(slot))
+            if merged != 0: done = sec_set_dacl_v1(native, merged)
+            sec_local_free_v1(merged)
+        sec_local_free_v1(descriptor)
+    sec_free_v1(entries)
+    sec_free_v1(slot)
+    sec_local_free_v1(sid)
+    done
+
+# Number of ACEs in the DACL of a path; -1 when unreadable.
+fn ace_count(path: text) -> i64:
+    val slot = sec_alloc_v1(8)
+    if slot == 0: return -1
+    val descriptor = sec_get_dacl_v1(path.replace("/", "\\"), slot)
+    var count = -1
+    if descriptor != 0:
+        val dacl = sec_read_ptr_v1(slot)
+        if dacl != 0: count = sec_u16_v1(dacl + 4)
+    sec_local_free_v1(descriptor)
+    sec_free_v1(slot)
+    count
+
+# Number of sandbox profile folders (sosix-*) currently on disk.
+fn profile_count() -> i64:
+    val packages = env_get("LOCALAPPDATA").unwrap_or("").replace("\\", "/") + "/Packages"
+    var count = 0
+    for entry in dir_list(packages):
+        if entry.starts_with("sosix-"): count = count + 1
+    count
+
+fn setup() -> bool:
+    if not ready(): return false
+    val made = dir_create_all(STAGE) and dir_create_all(WORK) and dir_create_all(OUTSIDE)
+    val probe = get_current_dir().replace("\\", "/") + "/test/fixtures/container/app_sandbox_probe.spl"
+    val staged = file_copy(SEED, STAGE + "/seed.exe") and file_copy(probe, STAGE + "/probe.spl")
+    val files = file_write(OUTSIDE + "/user.txt", "user-private-readable") and file_write(WORK + "/inside.txt", "inside-readable")
+    made and staged and files and grant_everyone_read(OUTSIDE)
+
+val SETUP_OK = setup()
+val WORK_ACES_BEFORE = if SETUP_OK: ace_count(WORK) else: -1
+val STAGE_ACES_BEFORE = if SETUP_OK: ace_count(STAGE) else: -1
+val PROFILES_BEFORE = if SETUP_OK: profile_count() else: -1
+
+fn request_for(tag: text, inside: text, outside: text) -> WindowsAppContainerConfinementRequestV1:
+    WindowsAppContainerConfinementRequestV1(scope: "ac-" + tag, program: STAGE + "/seed.exe",
+        program_args_prefix: ["run", STAGE + "/probe.spl", "args:"], stage_dir: STAGE, view_dir: WORK,
+        out_dir: BASE, inside_path: inside, outside_path: outside)
+
+val real_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("real", WORK + "/inside.txt", OUTSIDE + "/user.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val missing_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("missing", WORK + "/inside.txt", OUTSIDE + "/absent.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val granted_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("granted", WORK + "/inside.txt", WORK + "/inside.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val inside_out_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("inout", OUTSIDE + "/user.txt", OUTSIDE + "/user.txt")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+# AAP-readable system file: granted to no container SID, yet an AppContainer can read it.
+val leaky_verdict = if SETUP_OK: windows_appcontainer_confinement_probe_run_v1(request_for("leaky", WORK + "/inside.txt", "C:/Windows/win.ini")) else: WindowsAppContainerConfinementVerdictV1.NotConfined("not-run")
+val WORK_ACES_AFTER = if SETUP_OK: ace_count(WORK) else: -1
+val STAGE_ACES_AFTER = if SETUP_OK: ace_count(STAGE) else: -1
+val PROFILES_AFTER = if SETUP_OK: profile_count() else: -1
+
+fn not_confined(verdict: WindowsAppContainerConfinementVerdictV1, why: text) -> bool:
+    match verdict:
+        WindowsAppContainerConfinementVerdictV1.NotConfined(reason): reason == why
+        _: false
+
+fn is_confined(verdict: WindowsAppContainerConfinementVerdictV1) -> bool:
+    match verdict:
+        WindowsAppContainerConfinementVerdictV1.Confined: true
+        _: false
+
+describe "windows appcontainer read-confinement evidence probe":
+    it "is Confined: reads inside the view, cannot read the host-readable outside file":
+        if skipped(): return
+        expect(SETUP_OK).to_equal(true)
+        expect(is_confined(real_verdict)).to_equal(true)
+
+    it "is not Confined when the outside file is missing for the host":
+        if skipped(): return
+        expect(not_confined(missing_verdict, "outside-control-unreadable")).to_equal(true)
+
+    it "refuses mispaired paths before any run":
+        if skipped(): return
+        expect(not_confined(granted_verdict, "outside-path-is-granted")).to_equal(true)
+        expect(not_confined(inside_out_verdict, "inside-path-not-in-view")).to_equal(true)
+
+    it "is not Confined when the child can read the outside file":
+        if skipped(): return
+        expect(not_confined(leaky_verdict, "outside-read-succeeded")).to_equal(true)
+
+    it "leaves no grant and no profile behind after the runs":
+        if skipped(): return
+        expect(WORK_ACES_AFTER).to_equal(WORK_ACES_BEFORE)
+        expect(STAGE_ACES_AFTER).to_equal(STAGE_ACES_BEFORE)
+        expect(PROFILES_AFTER).to_equal(PROFILES_BEFORE)
+        dir_remove_all(BASE)
