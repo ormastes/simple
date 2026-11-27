@@ -5,11 +5,11 @@ Audience: compiler and tooling engineers who maintain this spec.
 """
 # @req: REQ-LIB-GC-ASYNC-MUT-001 — stable requirement identity for this spec.
 # @tag: unit, ui, web_render
-# @tag:in-development
 # Tracks: web_render_draw_ir_material_fallback_kind_none_2026-11-27
 
 use std.spec.*
 use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_PURE_SIMPLE, web_render_adapter_request}
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
@@ -42,3 +42,38 @@ describe "web render Draw IR material fallback provenance":
         expect(artifact.material_fallback.kind).to_equal("solid-material")
         expect(artifact.material_fallback.reason).to_equal("cpu-raster-backdrop-sampling-unavailable")
         expect(artifact.material_fallback.material_sha256.len()).to_equal(64)  # oracle: 64 — named expected value from the requirement
+        expect(artifact.material_fallback.material_sha256).to_equal(
+            sha256_text("simple-web-realized-solid-material-v1\n0|kind=solid-material|reason=cpu-raster-backdrop-sampling-unavailable|bg=18,52,86,255|fg=254,220,186,255|backdrop=none|background-image=none")
+        )
+
+    it "fails closed to none when solid-material command is translucent":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Draw IR", "", "", "", 8, 8).with_pixel_output()
+        val embedding = draw_ir_embedding_config("surface", "fallback-translucent", 0, 0, 8, 8, 0, 1000, false)
+        val no_rect = draw_ir_no_rect()
+        val style = [
+            draw_ir_style_prop("backdrop-filter-fallback", "solid-material"),
+            draw_ir_style_prop("background-color", "18,52,86,128"),
+            draw_ir_style_prop("color", "254,220,186,255"),
+            draw_ir_style_prop("background-image", "none")
+        ]
+        val command = draw_ir_box_with_style("fallback-translucent", 0, 0, 8, 8, 0x80123456u32, no_rect, no_rect, no_rect, no_rect, style)
+        val batch = draw_ir_batch("fallback-translucent", DRAW_IR_BACKEND_CPU, embedding, [command])
+        val artifact = web_render_draw_ir_request_to_pixel_artifact(req, draw_ir_composition("fallback-translucent", "fallback-translucent", DRAW_IR_BACKEND_CPU, [batch]), "software")
+
+        expect(artifact.material_fallback.kind).to_equal("none")
+
+    it "fails closed to none when solid-material command carries a background-image gradient":
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "surface", "Draw IR", "", "", "", 8, 8).with_pixel_output()
+        val embedding = draw_ir_embedding_config("surface", "fallback-gradient", 0, 0, 8, 8, 0, 1000, false)
+        val no_rect = draw_ir_no_rect()
+        val style = [
+            draw_ir_style_prop("backdrop-filter-fallback", "solid-material"),
+            draw_ir_style_prop("background-color", "18,52,86,255"),
+            draw_ir_style_prop("color", "254,220,186,255"),
+            draw_ir_style_prop("background-image", "linear-gradient(#123456, #abcdef)")
+        ]
+        val command = draw_ir_box_with_style("fallback-gradient", 0, 0, 8, 8, 0xff123456u32, no_rect, no_rect, no_rect, no_rect, style)
+        val batch = draw_ir_batch("fallback-gradient", DRAW_IR_BACKEND_CPU, embedding, [command])
+        val artifact = web_render_draw_ir_request_to_pixel_artifact(req, draw_ir_composition("fallback-gradient", "fallback-gradient", DRAW_IR_BACKEND_CPU, [batch]), "software")
+
+        expect(artifact.material_fallback.kind).to_equal("none")
