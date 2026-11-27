@@ -577,3 +577,30 @@ fn nested_hollow_then_arm_takes_the_concrete_sibling_type() {
     let Some(HirType::Array { element, .. }) = local_ty(&module, "probe", "r") else { panic!("r must be an array") };
     assert!(matches!(module.types.get(element), Some(HirType::Array { element, .. }) if *element == TypeId::F64));
 }
+
+// A return type borrowed by the untyped-receiver suffix search is a guess. In
+// both declaration orders one of `A.pos` / `B.pos` (tie-length names) is the
+// float one; the float-into-int errors and the int/float join must not fire
+// on it, whichever the tie-break picks.
+#[test]
+fn guessed_float_method_return_never_triggers_float_into_int_errors() {
+    for (first, second) in [("f64", "i64"), ("i64", "f64")] {
+        let classes = format!(
+            "class A:\n    v: {first}\n    fn pos() -> {first}:\n        self.v\nclass B:\n    w: {second}\n    fn pos() -> {second}:\n        self.w\nfn t(i: i64) -> i64:\n    i\n"
+        );
+        for body in [
+            "    val xs = [10, 20, 30]\n    xs[o.pos()]\n",
+            "    val xs = [10, 20, 30]\n    val p = o.pos()\n    xs[p]\n",
+            "    val r: i64 = if c: o.pos() else: 5\n    r\n",
+            "    t(o.pos())\n",
+        ] {
+            let source = format!("{classes}fn probe(o, c: bool) -> i64:\n{body}");
+            let lowered = super::parse_and_lower_lenient(&source);
+            lowered.unwrap_or_else(|e| panic!("{first}/{second} must lower:\n{body}{e}"));
+        }
+    }
+    // The guess does not leak into the next function.
+    let source = "class A:\n    v: f64\n    fn pos() -> f64:\n        self.v\nfn g(o) -> f64:\n    o.pos()\nfn probe(c: bool) -> i64:\n    val r: i64 = if c: 1 else: 2.5\n    r\n";
+    let msg = super::parse_and_lower_lenient(source).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(msg.contains("binding `r` is declared as `i64` but receives `f64`"), "{msg}");
+}

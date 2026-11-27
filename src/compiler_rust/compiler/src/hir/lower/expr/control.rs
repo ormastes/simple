@@ -454,6 +454,7 @@ impl Lowerer {
         match self.module.types.get(ty)? {
             HirType::Bool => Some(0),
             HirType::Int { .. } => Some(JOIN_INT),
+            HirType::Float { .. } if self.guessed_float_in_function.get() => None,
             HirType::Float { .. } => Some(JOIN_FLOAT),
             HirType::String => Some(3),
             HirType::Array { .. } => Some(4),
