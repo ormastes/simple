@@ -2893,7 +2893,13 @@ fn load_module_with_imports_internal(
             if let Some(resolved) = resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new("."))) {
                 // The JIT lane never runs the interpreter loader, so apply its
                 // unprovided braced-use rule here (same message / strict outcome).
-                crate::interpreter::interpreter_module::check_unprovided_use_in_resolved_module(use_stmt, &path, &resolved)?;
+                // When the import is loaded below, check AFTER loading it: the
+                // load seeds the shared parse cache the check reads, so the
+                // check reuses that AST instead of parsing the module a second
+                // time (141 ms of 1.55 s on a 79-module closure, 2026-11-28).
+                if !flatten_imports {
+                    crate::interpreter::interpreter_module::check_unprovided_use_in_resolved_module(use_stmt, &path, &resolved)?;
+                }
                 if flatten_imports {
                     let flatten_this_import = should_flatten_import(use_stmt, &source, &resolved, path.parent().unwrap_or(Path::new(".")));
                     let mut imported = load_module_with_imports_internal(
@@ -2903,6 +2909,7 @@ fn load_module_with_imports_internal(
                         flatten_this_import,
                         target_arch,
                     )?;
+                    crate::interpreter::interpreter_module::check_unprovided_use_in_resolved_module(use_stmt, &path, &resolved)?;
                     if flatten_this_import && resolved.file_name().is_some_and(|name| name == "__init__.spl") {
                         imported.items.extend(load_matching_package_siblings(
                             &resolved,

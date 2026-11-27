@@ -1248,7 +1248,9 @@ pub(crate) fn check_unprovided_use_in_resolved_module(
     // differently (e.g. `std.sffi.dynamic` from a nogc_sync_mut importer is a
     // different file on each lane). Check only when both lanes agree on the file;
     // otherwise this lane's surface is not the one the program actually uses.
-    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    // Memoized canonicalization: a raw `fs::canonicalize` opens a handle per
+    // call on Windows, and this check runs once per braced import.
+    let canon = |p: &Path| super::module_cache::normalize_path_key(p);
     match super::path_resolution::resolve_module_path(&use_stmt.path.segments, importer.parent().unwrap_or(Path::new("."))) {
         Ok(p) if canon(&p) == canon(resolved) => {}
         _ => return Ok(()),

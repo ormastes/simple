@@ -1201,6 +1201,7 @@ impl ExecCore {
         use std::collections::HashSet;
 
         let trace = std::env::var("SIMPLE_NATIVE_BUILD_RUST_TRACE").ok().as_deref() == Some("1");
+        let mut phase = RunPhaseTrace::from_env();
         if trace {
             eprintln!("[rust-jit] start path={}", path.display());
         }
@@ -1239,12 +1240,14 @@ impl ExecCore {
         let mut ast =
             load_module_with_imports(path, &mut HashSet::new()).map_err(|e| format!("module load error: {}", e))?;
         drop(package_symbol_scope);
+        phase.mark("load_module_with_imports");
 
         // Drop wrong-arch @cfg(<arch>) fn variants: the JIT executes on the
         // HOST, and codegen's declare_functions is first-wins by source order,
         // so an unstripped wrong-arch variant declared first would be the one
         // that runs (bug x64_freestanding_cfg_multivariant_misdispatch).
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut ast);
+        phase.mark("cfg_strip");
 
         // Spec files declare their examples at module level and have no `main`.
         // Synthesize the spec entry (module statements in order, then the
@@ -1280,6 +1283,7 @@ impl ExecCore {
                 .contains(&simple_compiler::compilability::FallbackReason::Comprehension)
         })
         .map(|(name, _)| name);
+        phase.mark("compilability");
         if let Some(name) = comprehension_fn {
             return Err(jit_strict_fallback_error_for(
                 "list/dict comprehension has no JIT lowering",
@@ -1349,6 +1353,7 @@ impl ExecCore {
         // References to a private fn of another directory found in the
         // lowered unit; judged below, once it is known the JIT will run it.
         let private_refs = hir::take_private_ref_violations();
+        phase.mark("hir_lower");
         let hir_module = match lowered {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("HIR lowering error", &e, Some(path))),
@@ -1369,6 +1374,7 @@ impl ExecCore {
             Ok(m) => m,
             Err(e) => return Err(jit_strict_fallback_error_for("MIR lowering error", &e, Some(path))),
         };
+        phase.mark("mir_lower");
         if trace {
             eprintln!(
                 "[rust-jit] lowered functions={} externs={}",
@@ -1457,6 +1463,7 @@ impl ExecCore {
 
         // Check for main function
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
+        phase.mark("reach_and_externs");
 
         if !has_main {
             // A demotion too: the JIT entry point calls `main`, so with no
@@ -1483,6 +1490,7 @@ impl ExecCore {
             // From here on the program itself runs: a failure is its verdict,
             // never a reason to fall back and run it again.
             let outcome = evaluate_module(&ast.items).map_err(|e| JitRunError::AlreadyExecuted(format!("{}", e)));
+            phase.mark("interpret_no_main");
             set_current_file(None);
             self.collect_gc();
             return Ok(outcome);
@@ -1561,6 +1569,7 @@ impl ExecCore {
             eprintln!("[rust-jit] compile start");
         }
         em.compile_module(&mir_module)?;
+        phase.mark("jit_compile");
         // The JIT is about to run this program (every demotion to the
         // interpreter, which applies the same rule per call, is behind us).
         // Product code reaching a private fn of another directory is rejected
@@ -1584,6 +1593,7 @@ impl ExecCore {
         simple_runtime::rt_set_jit_runtime(true);
         let exit_code = em.execute("main", &[]);
         simple_runtime::rt_set_jit_runtime(false);
+        phase.mark("execute_main");
         let mut exit_code = exit_code?;
         if trace {
             eprintln!("[rust-jit] execute main done exit={}", exit_code);
@@ -2806,5 +2816,36 @@ mod jit_top_level_statement_tests {
         let module = core.load_module(&plain_out).expect("load");
         assert!(module.interp_snapshot.is_none(), "natively compiled SMF must not carry a snapshot");
         assert_eq!(core.run_smf_with_args(&plain_out, vec![]), Ok(5));
+    }
+}
+
+/// Env-gated phase timer for the `run` JIT lane (`SIMPLE_RUN_PHASE_TRACE=1`).
+///
+/// Prints `[run-phase] <label> +<ms> (total <ms>)` to stderr after each phase
+/// so startup cost can be attributed without an external profiler. Disabled it
+/// costs one env lookup per run.
+struct RunPhaseTrace {
+    start: Option<std::time::Instant>,
+    last: Option<std::time::Instant>,
+}
+
+impl RunPhaseTrace {
+    fn from_env() -> Self {
+        let now = std::env::var_os("SIMPLE_RUN_PHASE_TRACE")
+            .is_some_and(|v| v != "0")
+            .then(std::time::Instant::now);
+        Self { start: now, last: now }
+    }
+
+    fn mark(&mut self, label: &str) {
+        if let (Some(start), Some(last)) = (self.start, self.last) {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "[run-phase] {label} +{:.1}ms (total {:.1}ms)",
+                (now - last).as_secs_f64() * 1e3,
+                (now - start).as_secs_f64() * 1e3
+            );
+            self.last = Some(now);
+        }
     }
 }
