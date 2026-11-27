@@ -20,6 +20,8 @@ use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_wor
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_exited_settlement_v3.*
+use std.common.contracts.container.linux_fresh_workload_probe_v3.LinuxFreshWorkloadProbeAbsenceV3
 use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.MachineFreshEpochRecordV1
 use std.nogc_sync_mut.io.linux_machine_process_origin_v1.linux_machine_process_origin_check_v1
 use std.nogc_sync_mut.io.thread.thread_native_current_id
@@ -850,6 +852,29 @@ pub class MachineFreshWorkloadLifecycleV2:
             state.containment.is_some() and state.captured_subject.is_some(), absence,
             state.uncertain or state.outcome_unknown, state.settled, state.permit)
         val ready = machine_fresh_record_prepare_settlement_v3(progress, record, terminal, at)?
+        fresh_workload_states_v2[self.slot].permit = ready.0.phase
+        fresh_workload_states_v2[self.slot].settlement = Some(ready.0)
+        Ok(ready.1)
+
+    # Exited-start sibling of prepare_settlement_v2 (CPU V2 records only). Every progress field is read
+    # from this owner's own retained state; the reducer binds the custody cohort sample to the record.
+    # @allow(primitive_api) reason: at is the same wall-clock millisecond stamp prepare_settlement_v2 takes
+    pub(package) fn prepare_exited_settlement_v3(terminal: DistributedOperationStateV2,
+            closure: LinuxFreshWorkloadProbeAbsenceV3, at: i64) -> Result<[WalEntry], text>:
+        val state = self.state_v2()?
+        val record = machine_fresh_record_cpu_v3(self.record_v3()?)?
+        if state.probe_custody.is_some() or state.workspace_binding.is_some() or state.primary_custody.is_some():
+            return Err("machine-fresh-workload-exited-settlement-cpu-only")
+        var completed: [bool] = []
+        for name in ["stop", "remove", "absence"]:
+            completed.push(state.operations.contains_key(name) and state.operations[name].state == "completed")
+        val progress = MachineFreshWorkloadExitedSettlementProgressV3(exited_start: self.exited_start_v3()?,
+            helper_retired: state.process.is_none() and state.reference.is_none(),
+            native_held: state.containment.is_some() or state.captured_subject.is_some() or state.extra_containment.len() != 0,
+            stop_completed: completed[0], remove_completed: completed[1], absence_completed: completed[2],
+            uncertain: state.uncertain or state.outcome_unknown or state.closed, settled: state.settled, phase: state.permit)
+        val ready = machine_fresh_workload_prepare_exited_settlement_v3(progress, record, state.epoch, state.native_id,
+            terminal, closure, at)?
         fresh_workload_states_v2[self.slot].permit = ready.0.phase
         fresh_workload_states_v2[self.slot].settlement = Some(ready.0)
         Ok(ready.1)

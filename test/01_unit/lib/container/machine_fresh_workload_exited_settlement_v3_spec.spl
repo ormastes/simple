@@ -1,0 +1,212 @@
+# Pure DATA fixtures over the production exited-start settlement reducer, its cohort-absence binding
+# validator and its release rows. This does not prove installed custody, the native cohort census or a
+# live Podman run; the stateful settle path is exercised only in the guest.
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.nogc_sync_mut.container.machine_fresh_epoch_record_v1.{MachineFreshEpochRecordV1}
+use std.nogc_sync_mut.container.machine_fresh_workload_record_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_exited_settlement_v3.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerExecutionPlanV2, ContainerExecutionRequestV2}
+use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workload_probe_v3.{LinuxFreshWorkloadProbeAbsenceV3,
+    LinuxFreshWorkloadProbeCommandV3, LinuxFreshWorkloadProbeActionV3, linux_fresh_workload_probe_binding_v3}
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.contracts.distributed_operation_state_v2.{DistributedOperationStateV2, distributed_operation_transition_v2}
+
+fn exited_settlement_epoch_v3() -> MachineFreshEpochRecordV1:
+    MachineFreshEpochRecordV1(authority_id: "machine_1", physical_host_id: "host_1",
+        native_machine_id: "linux-machine-id-v1:1234", epoch_id: "installed_epoch_1", epoch_generation: 7,
+        profile_digest: "a".repeat(64), machine_policy_digest: "b".repeat(64), process_identity_digest: "c".repeat(64),
+        principal_id: "linux:uid:20001", service_uid: 20001, service_gid: 20001, manager_unique_name: ":1.23",
+        partition_identity_digest: "d".repeat(64), store_identity_digest: "e".repeat(64),
+        provider_policy_digest: "f".repeat(64), provider_identity_digest: "1".repeat(64),
+        capacity_cpu_millis: 8000, capacity_memory_bytes: 8192,
+        observed_cpu_millis: 4000, observed_memory_bytes: 4096,
+        reserved_cpu_millis: 500, reserved_memory_bytes: 512,
+        outside_cpu_millis: 4000, outside_memory_bytes: 4096,
+        usable_cpu_millis: 3500, usable_memory_bytes: 3584)
+
+fn exited_settlement_scope_v3() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "service_1",
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+
+fn exited_settlement_record_v3() -> MachineFreshWorkloadRecordV2:
+    val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/true"],
+        args: [], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 1024,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = exited_settlement_scope_v3()
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation,
+        native_machine_id: scope.native_machine_id, continuity_mode: scope.continuity_mode,
+        continuity_id: scope.continuity_id)
+    val request = ContainerExecutionRequestV2(plan: plan, request_bytes: linux_oci_retained_request_encode_v1(native).unwrap())
+    machine_fresh_workload_record_v2(exited_settlement_epoch_v3(), "9".repeat(64), scope, request,
+        "linux:uid:20001", "8".repeat(64), 500, 512).unwrap()
+
+fn exited_settlement_native_id_v3() -> text:
+    "3".repeat(64)
+
+fn exited_settlement_terminal_v3() -> DistributedOperationStateV2:
+    val initial = machine_fresh_workload_action_initial_v2(exited_settlement_record_v3(), "absence", 7).unwrap()
+    val executing = distributed_operation_transition_v2(initial, "executing", "").unwrap()
+    distributed_operation_transition_v2(executing, "completed", "a".repeat(64)).unwrap()
+
+# The custody cohort-empty sample this owner would receive for its own record, as modeled DATA.
+fn exited_settlement_closure_v3() -> LinuxFreshWorkloadProbeAbsenceV3:
+    val command = LinuxFreshWorkloadProbeCommandV3(workload: machine_fresh_workload_command_v2(exited_settlement_record_v3(),
+        LinuxFreshWorkloadActionV2.Inspect, exited_settlement_native_id_v3()).unwrap(), action: LinuxFreshWorkloadProbeActionV3.Logs)
+    LinuxFreshWorkloadProbeAbsenceV3(assurance: "enforced-probe-cohort-empty-v3",
+        request_binding_digest: linux_fresh_workload_probe_binding_v3(command).unwrap(),
+        native_id: exited_settlement_native_id_v3(), partition_identity_digest: "d".repeat(64),
+        store_identity_digest: "e".repeat(64), native_machine_id: "linux-machine-id-v1:1234", native_boot_id: "boot_1",
+        excluded_process_identity_digest: "c".repeat(64), service_uid: 20001, subuid_start: 100000, subuid_count: 65536,
+        owner_generation: 7, sample_started_monotonic_ns: 100, sample_finished_monotonic_ns: 200)
+
+fn exited_settlement_ready_v3() -> MachineFreshWorkloadExitedSettlementProgressV3:
+    MachineFreshWorkloadExitedSettlementProgressV3(exited_start: true, helper_retired: true, native_held: false,
+        stop_completed: true, remove_completed: true, absence_completed: true, uncertain: false, settled: false, phase: "idle")
+
+fn exited_settlement_prepare_v3(progress: MachineFreshWorkloadExitedSettlementProgressV3,
+        closure: LinuxFreshWorkloadProbeAbsenceV3) -> Result<text, text>:
+    val ready = machine_fresh_workload_prepare_exited_settlement_v3(progress, exited_settlement_record_v3(),
+        exited_settlement_epoch_v3(), exited_settlement_native_id_v3(), exited_settlement_terminal_v3(), closure, 1)
+    if ready.is_err(): return Err(ready.unwrap_err())
+    Ok(ready.unwrap().0.phase + ":" + str(ready.unwrap().1.len()))
+
+fn exited_settlement_refusal_v3(progress: MachineFreshWorkloadExitedSettlementProgressV3,
+        closure: LinuxFreshWorkloadProbeAbsenceV3) -> text:
+    val ready = exited_settlement_prepare_v3(progress, closure)
+    if ready.is_ok(): "accepted:" + ready.unwrap() else: ready.unwrap_err()
+
+describe "fresh workload V3 exited-start settlement":
+    it "releases the charge of a proven exited start against the custody cohort-empty sample":
+        step("Every owner-retained precondition holds and the custody sample binds to this record")
+        val ready = machine_fresh_workload_prepare_exited_settlement_v3(exited_settlement_ready_v3(), exited_settlement_record_v3(),
+            exited_settlement_epoch_v3(), exited_settlement_native_id_v3(), exited_settlement_terminal_v3(),
+            exited_settlement_closure_v3(), 1)
+        expect(ready.is_ok()).to_equal(true)
+        val reserved = ready.unwrap().0
+        val rows = ready.unwrap().1
+        expect(reserved.phase).to_equal("settlement-reserved")
+        expect(reserved.associated).to_equal(false)
+        expect(reserved.native_retained).to_equal(false)
+        expect(reserved.settled).to_equal(false)
+        step("One evidence row of its own kind precedes the unchanged V2 release rows")
+        expect(rows.len()).to_equal(4)
+        expect(rows[0].table_name).to_equal("machine-fresh-workload-exited-settlements-v3")
+        expect(rows[0].row_key).to_equal(machine_fresh_workload_id_v2(exited_settlement_record_v3()).unwrap())
+        expect(rows[0].data).to_contain("machine-fresh-workload-exited-start-settlement")
+        expect(rows[0].data).to_contain("enforced-probe-cohort-empty-v3")
+        val release = machine_fresh_workload_settle_entries_v2(exited_settlement_record_v3(), exited_settlement_terminal_v3(), 1).unwrap()
+        expect(machine_fresh_workload_rows_equal_v2(rows[1:4], release)).to_equal(true)
+        expect(rows[2].data).to_contain("released")
+        step("The reserved phase finalizes through the existing V2 finalizer")
+        val done = machine_fresh_workload_finalize_settlement_v2(reserved).unwrap()
+        expect(done.settled).to_equal(true)
+        expect(done.phase).to_equal("settled")
+
+    it "refuses every missing owner-retained precondition by name and produces no row":
+        val closure = exited_settlement_closure_v3()
+        var unproven = exited_settlement_ready_v3()
+        unproven.exited_start = false
+        expect(exited_settlement_refusal_v3(unproven, closure)).to_equal("machine-fresh-workload-exited-start-unproven")
+        var held = exited_settlement_ready_v3()
+        held.native_held = true
+        expect(exited_settlement_refusal_v3(held, closure)).to_equal("machine-fresh-workload-exited-settlement-native-held")
+        var helper = exited_settlement_ready_v3()
+        helper.helper_retired = false
+        expect(exited_settlement_refusal_v3(helper, closure)).to_equal("machine-fresh-workload-exited-settlement-helper-active")
+        var stop = exited_settlement_ready_v3()
+        stop.stop_completed = false
+        expect(exited_settlement_refusal_v3(stop, closure)).to_equal("machine-fresh-workload-exited-settlement-cleanup-incomplete")
+        var remove = exited_settlement_ready_v3()
+        remove.remove_completed = false
+        expect(exited_settlement_refusal_v3(remove, closure)).to_equal("machine-fresh-workload-exited-settlement-cleanup-incomplete")
+        var absence = exited_settlement_ready_v3()
+        absence.absence_completed = false
+        expect(exited_settlement_refusal_v3(absence, closure)).to_equal("machine-fresh-workload-exited-settlement-cleanup-incomplete")
+        var uncertain = exited_settlement_ready_v3()
+        uncertain.uncertain = true
+        expect(exited_settlement_refusal_v3(uncertain, closure)).to_equal("machine-fresh-workload-exited-settlement-uncertain")
+        var settled = exited_settlement_ready_v3()
+        settled.settled = true
+        expect(exited_settlement_refusal_v3(settled, closure)).to_equal("machine-fresh-workload-exited-settlement-not-idle")
+        var reserved = exited_settlement_ready_v3()
+        reserved.phase = "settlement-reserved"
+        expect(exited_settlement_refusal_v3(reserved, closure)).to_equal("machine-fresh-workload-exited-settlement-not-idle")
+
+    it "refuses a cohort sample that does not bind to this owner's record, epoch and native id":
+        val ready = exited_settlement_ready_v3()
+        var assurance = exited_settlement_closure_v3()
+        assurance.assurance = "engine-says-gone"
+        expect(exited_settlement_refusal_v3(ready, assurance)).to_equal("machine-fresh-workload-exited-absence-assurance")
+        var binding = exited_settlement_closure_v3()
+        binding.request_binding_digest = "0".repeat(64)
+        expect(exited_settlement_refusal_v3(ready, binding)).to_equal("machine-fresh-workload-exited-absence-request-binding")
+        var native = exited_settlement_closure_v3()
+        native.native_id = "4".repeat(64)
+        expect(exited_settlement_refusal_v3(ready, native)).to_equal("machine-fresh-workload-exited-absence-native-id")
+        var partition = exited_settlement_closure_v3()
+        partition.partition_identity_digest = "0".repeat(64)
+        expect(exited_settlement_refusal_v3(ready, partition)).to_equal("machine-fresh-workload-exited-absence-partition")
+        var store = exited_settlement_closure_v3()
+        store.store_identity_digest = "0".repeat(64)
+        expect(exited_settlement_refusal_v3(ready, store)).to_equal("machine-fresh-workload-exited-absence-store")
+        var machine = exited_settlement_closure_v3()
+        machine.native_machine_id = "linux-machine-id-v1:9999"
+        expect(exited_settlement_refusal_v3(ready, machine)).to_equal("machine-fresh-workload-exited-absence-host-incarnation")
+        var boot = exited_settlement_closure_v3()
+        boot.native_boot_id = "boot_2"
+        expect(exited_settlement_refusal_v3(ready, boot)).to_equal("machine-fresh-workload-exited-absence-host-incarnation")
+        var generation = exited_settlement_closure_v3()
+        generation.owner_generation = 8
+        expect(exited_settlement_refusal_v3(ready, generation)).to_equal("machine-fresh-workload-exited-absence-owner-generation")
+        var process = exited_settlement_closure_v3()
+        process.excluded_process_identity_digest = "0".repeat(64)
+        expect(exited_settlement_refusal_v3(ready, process)).to_equal("machine-fresh-workload-exited-absence-service-identity")
+        var uid = exited_settlement_closure_v3()
+        uid.service_uid = 0
+        expect(exited_settlement_refusal_v3(ready, uid)).to_equal("machine-fresh-workload-exited-absence-service-identity")
+        var unsampled = exited_settlement_closure_v3()
+        unsampled.sample_started_monotonic_ns = 0
+        expect(exited_settlement_refusal_v3(ready, unsampled)).to_equal("machine-fresh-workload-exited-absence-sample-window")
+        var reversed = exited_settlement_closure_v3()
+        reversed.sample_finished_monotonic_ns = 50
+        expect(exited_settlement_refusal_v3(ready, reversed)).to_equal("machine-fresh-workload-exited-absence-sample-window")
+
+    it "refuses a sample taken for another partition or another native id of the same record":
+        val other_id = machine_fresh_workload_prepare_exited_settlement_v3(exited_settlement_ready_v3(), exited_settlement_record_v3(),
+            exited_settlement_epoch_v3(), "4".repeat(64), exited_settlement_terminal_v3(), exited_settlement_closure_v3(), 1)
+        expect(other_id.is_err()).to_equal(true)
+        expect(other_id.unwrap_err()).to_equal("machine-fresh-workload-exited-absence-request-binding")
+        var epoch = exited_settlement_epoch_v3()
+        epoch.partition_identity_digest = "0".repeat(64)
+        val other_epoch = machine_fresh_workload_prepare_exited_settlement_v3(exited_settlement_ready_v3(), exited_settlement_record_v3(),
+            epoch, exited_settlement_native_id_v3(), exited_settlement_terminal_v3(), exited_settlement_closure_v3(), 1)
+        expect(other_epoch.is_err()).to_equal(true)
+        expect(other_epoch.unwrap_err()).to_equal("machine-fresh-workload-exited-absence-partition")
+
+    it "keeps the subject-closure settle unchanged and routes only a proven exited start to the cohort settle":
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        step("The exited settle observes custody itself, never latches on a refusal, and publishes before marking")
+        val at = effects.index_of("fn machine_fresh_workload_settle_exited_start_v3(")
+        expect(at >= 0).to_equal(true)
+        val tail = effects.substring(at, effects.byte_len())
+        val stop = tail.index_of("\n\n")
+        val body = if stop >= 0: tail.substring(0, stop) else: tail
+        expect(body).to_contain("custody.observe_probe_absence_v3(")
+        expect(body).to_contain("state.exited_start_v3()?")
+        expect(body).to_contain("workload_publish_v3(storage, state,")
+        expect(body.contains("unknown_v2")).to_equal(false)
+        expect(body.index_of("workload_publish_v3(") < body.index_of("state.mark_settled_v2()")).to_equal(true)
+        step("The subject settle no longer carries the exited-start refusal")
+        expect(effects.contains("machine-fresh-workload-exited-start-settlement-unproven")).to_equal(false)
+        step("Destroy picks the settle from the owner's own retained evidence")
+        val provider = file_read_text("src/lib/nogc_async_mut/container/providers/linux/fresh_epoch_workload_v2.spl")
+        expect(provider).to_contain("if self.transfer.exited_start_v3()?: self.transfer.settle_exited_start_v3()?")

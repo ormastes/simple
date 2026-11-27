@@ -198,3 +198,11 @@ and already exited (source only, live-unverified). What stops these cases live
 is now settlement: `destroy` of such a workload is refused
 (`container_fresh_route_exited_start_settlement_2026-11-27.md`), so the
 after-each cleanup stays retained. The guest profile skeleton is unchanged.
+
+**Update (2026-11-27, settlement):** `destroy` of an exited start now settles
+(source only, live-unverified): the owner's retained exited samples, its own
+Stop/Remove/Absence and custody's cohort-empty sample release the charge. What
+may still stop these cases live: the unchanged guest profile skeleton, a cohort
+that is not yet empty at `destroy` (plain, retryable refusal), and a workload
+that exits during association (still latches). All three are in
+`container_fresh_route_exited_start_settlement_2026-11-27.md`.

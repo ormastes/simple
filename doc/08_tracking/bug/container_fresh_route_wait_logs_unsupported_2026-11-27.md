@@ -224,9 +224,12 @@ before any row (wrong order, changed request) latches nothing.
   between the sample and the cgroup capture: capture/validation fails and
   latches as before. Only "gone at both samples" and "populated through
   association" are accepted.
-- **Settlement.** See
-  `container_fresh_route_exited_start_settlement_2026-11-27.md`: `destroy` of an
-  exited start is refused, so this fix does not turn the live spec green.
+  The two sub-cases and why they stay open are in the last section of
+  `container_fresh_route_exited_start_settlement_2026-11-27.md`.
+- **Settlement (fixed in source later the same day).** `destroy` of an exited
+  start used to be refused. It now settles on the owner's retained samples, its
+  own Stop/Remove/Absence and custody's cohort-empty sample; see the decision in
+  `container_fresh_route_exited_start_settlement_2026-11-27.md`. Live-unverified.
 
 ### Files
 - `src/lib/nogc_sync_mut/container/machine_fresh_workload_inspect_v2.spl`
