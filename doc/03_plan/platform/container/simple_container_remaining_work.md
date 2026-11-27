@@ -64,6 +64,6 @@ Carried by reference, not duplicated: see the "Open (P2, next increment)" list i
 Landed this run on `release/1.0.0`: #12115-#12143 (store hardening, view conflicts, GC quarantine restore, `rt_dir_sync`, root claim compaction, SCV gc per-run owner). Still open, each tracked in `doc/08_tracking/todo/todo_db.sdn`:
 - Keep-marked pin tombs (`pin-owner-changed-unrestored`) and `pins/<id>.r<n>` restored pins are not surfaced to their owner or reclaimed (todo 476).
 - SCV gc keeps unmarked `scv-gc:` pins forever; ageing them out needs a liveness signal, not a timeout (todo 477).
-- Windows native-build smoke of `dir_sync` never reaches link on this host (two runs, >17 and ~34 min, frontend only) (todo 478).
+- DONE (2026-11-28, todo 478 closed): Windows native-build smoke of `dir_sync` links and prints `true` then `false` (root cause: `type Codegen` alias, see `doc/08_tracking/bug/seed_jit_type_alias_captures_same_named_trait_dispatch_2026-11-28.md`).
 - Storage view junction TOCTOU between parent walk and open; needs handle-relative opens (todo 479).
 - 18 undefined-but-used strict-use imports block flipping `SIMPLE_STRICT_USE` on by default; see `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` (todo 480).

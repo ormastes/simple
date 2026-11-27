@@ -362,4 +362,9 @@ Before: `Function 'CraneliftCodegenState.supports_target' not found`, rc 70. Aft
 
 Full smoke (with the d29-f commits applied; seed r; `SIMPLE_MIR_SHARDING=0`): `native-build smoke.spl -o smoke.exe` rc=0, 209920-byte exe, running it
 prints `true` then `false`. Timeline: shards done at 659 s, worker returned at 892 s (cold init included). Entry was a 3-line print stand-in, not
-`dir_sync` itself. Todo 478 closed. Depends on the d29-f lane (work/native-build-worker-engine-mode-20261127) landing.
+`dir_sync` itself (superseded below). Todo 478 closed.
+
+Real `dir_sync` smoke on the rebased tree (2026-11-28, seed r, same env): entry `test/tmp_dir_sync_smoke/smoke.spl` =
+`print dir_sync(".")` then `print dir_sync("build/definitely-missing-dir-xyz")`. rc=0, 226816-byte exe, running it prints `true` then
+`false`. Worker returned at 939 s. Todo 478 acceptance met; closure stands. Seed bug recorded in
+`seed_jit_type_alias_captures_same_named_trait_dispatch_2026-11-28.md`.
