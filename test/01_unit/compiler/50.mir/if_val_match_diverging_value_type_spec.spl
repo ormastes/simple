@@ -1,0 +1,592 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Value-position `if val ... else: match ...` with diverging arms keeps concrete MIR type
+
+Bug: doc/08_tracking/bug/phase2_llvm_if_val_match_value_void_2026-11-16.md
+`if val retained = self.pending: retained else: match taken: case Err(e): return ...; case Ok(Some(v)): v; case Ok(_): return ...`
+must ignore diverging (`return`/`break`/`continue`/Never) and payloadless arms
+when selecting the merge destination local's MIR type, preserving the concrete
+yielding arm type rather than collapsing the join local to `Unit`/`Never` (void).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_lowering_stmts.{mir_join_slot_is_payloadless, mir_merge_arm_types}
+
+fn lower_fn_mir(source: text, target_fn: text) -> (MirModule, MirFunction?, [text]):
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var errs: [text] = []
+    for e in hir_lowering.errors:
+        errs.push("hir: " + e.message)
+    for e in mir_lowering.errors:
+        errs.push("mir: " + e.message)
+    var found: MirFunction? = None
+    for f in mir.functions.values():
+        if f.name == target_fn or f.name.ends_with("." + target_fn):
+            found = Some(f)
+    (mir, found, errs)
+
+fn local_type_by_id(f: MirFunction, id: i64) -> MirType?:
+    for loc in f.locals:
+        if loc.id.id == id:
+            return Some(loc.type_)
+    None
+
+fn payloadless_def_count(f: MirFunction) -> i64:
+    var count = 0
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Const(dest, _, _):
+                    if val ty = local_type_by_id(f, dest.id):
+                        if mir_join_slot_is_payloadless(ty):
+                            count = count + 1
+                case MirInstKind.Copy(dest, _):
+                    if val ty = local_type_by_id(f, dest.id):
+                        if mir_join_slot_is_payloadless(ty):
+                            count = count + 1
+                case _: ()
+    count
+
+fn count_non_payloadless_copy_dests(f: MirFunction) -> i64:
+    var count = 0
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Copy(dest, _):
+                    if val ty = local_type_by_id(f, dest.id):
+                        if not mir_join_slot_is_payloadless(ty):
+                            count = count + 1
+                case _: ()
+    count
+
+fn count_getfield_base_kinds(f: MirFunction) -> (i64, i64):
+    var non_payloadless = 0
+    var payloadless = 0
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.GetField(_, base, _):
+                    var base_id = -1
+                    match base.kind:
+                        case MirOperandKind.Copy(local):
+                            base_id = local.id
+                        case MirOperandKind.Move(local):
+                            base_id = local.id
+                        case _: ()
+                    if base_id >= 0:
+                        if val ty = local_type_by_id(f, base_id):
+                            if mir_join_slot_is_payloadless(ty):
+                                payloadless = payloadless + 1
+                            else:
+                                non_payloadless = non_payloadless + 1
+                case _: ()
+    (non_payloadless, payloadless)
+
+fn count_struct_typed_copy_dests(f: MirFunction) -> i64:
+    var count = 0
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Copy(dest, _):
+                    if val ty = local_type_by_id(f, dest.id):
+                        match ty.kind:
+                            case MirTypeKind.Struct(_):
+                                count = count + 1
+                            case _: ()
+                case _: ()
+    count
+
+fn ret_payload_is_non_payloadless(f: MirFunction) -> bool:
+    for block in f.blocks:
+        match block.terminator:
+            case MirTerminator.Ret(value):
+                if val op = value:
+                    match op.kind:
+                        case MirOperandKind.Copy(local):
+                            if val ty = local_type_by_id(f, local.id):
+                                if not mir_join_slot_is_payloadless(ty):
+                                    return true
+                        case MirOperandKind.Move(local):
+                            if val ty = local_type_by_id(f, local.id):
+                                if not mir_join_slot_is_payloadless(ty):
+                                    return true
+                        case MirOperandKind.Const(_, ty):
+                            if not mir_join_slot_is_payloadless(ty):
+                                return true
+            case _: ()
+    false
+
+fn block_by_id_map(f: MirFunction) -> Dict<i64, MirBlock>:
+    var out: Dict<i64, MirBlock> = {}
+    for block in f.blocks:
+        out[block.id.id] = block
+    out
+
+fn has_reachable_unreachable_terminator(f: MirFunction) -> bool:
+    if f.blocks.len() == 0:
+        return false
+    val blocks = block_by_id_map(f)
+    var seen: Dict<i64, bool> = {}
+    var work: [i64] = [f.blocks[0].id.id]
+    while work.len() > 0:
+        val bid = work.pop()
+        if seen.has(bid):
+            continue
+        seen[bid] = true
+        if not blocks.has(bid):
+            continue
+        val block: MirBlock = blocks[bid]
+        match block.terminator:
+            case MirTerminator.Unreachable:
+                return true
+            case MirTerminator.Goto(target):
+                if not seen.has(target.id): work.push(target.id)
+            case MirTerminator.If(_, then_, else_):
+                if not seen.has(then_.id): work.push(then_.id)
+                if not seen.has(else_.id): work.push(else_.id)
+            case MirTerminator.Switch(_, targets, default):
+                for sc in targets:
+                    if not seen.has(sc.target.id): work.push(sc.target.id)
+                if not seen.has(default.id): work.push(default.id)
+            case MirTerminator.CallTerminator(_, _, _, normal, unwind, _, _):
+                if not seen.has(normal.id): work.push(normal.id)
+                if val u = unwind:
+                    if not seen.has(u.id): work.push(u.id)
+            case _: ()
+    false
+
+fn has_non_empty_unreachable_block(f: MirFunction) -> bool:
+    for block in f.blocks:
+        match block.terminator:
+            case MirTerminator.Unreachable:
+                if block.instructions.len() > 0:
+                    return true
+            case _: ()
+    false
+
+fn count_incoming_edges(f: MirFunction) -> Dict<i64, i64>:
+    var counts: Dict<i64, i64> = {}
+    for block in f.blocks:
+        var targets: [i64] = []
+        match block.terminator:
+            case MirTerminator.Goto(target):
+                targets.push(target.id)
+            case MirTerminator.If(_, then_, else_):
+                targets.push(then_.id)
+                targets.push(else_.id)
+            case MirTerminator.Switch(_, sc_targets, default):
+                for sc in sc_targets:
+                    targets.push(sc.target.id)
+                targets.push(default.id)
+            case MirTerminator.CallTerminator(_, _, _, normal, unwind, _, _):
+                targets.push(normal.id)
+                if val u = unwind:
+                    targets.push(u.id)
+            case _: ()
+        for tid in targets:
+            if counts.has(tid):
+                counts[tid] = counts[tid] + 1
+            else:
+                counts[tid] = 1
+    counts
+
+fn has_single_incoming_if_merge(f: MirFunction) -> bool:
+    val counts = count_incoming_edges(f)
+    var found = false
+    for block in f.blocks:
+        if val lbl = block.label:
+            if lbl == "merge" or lbl == "if_chain_merge":
+                found = true
+                val c = if counts.has(block.id.id): counts[block.id.id] else: 0
+                if c != 1:
+                    return false
+    found
+
+fn has_i64_ret_value(f: MirFunction) -> bool:
+    for block in f.blocks:
+        match block.terminator:
+            case MirTerminator.Ret(value):
+                if val op = value:
+                    match op.kind:
+                        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                            if val ty = local_type_by_id(f, local.id):
+                                match ty.kind:
+                                    case MirTypeKind.I64: return true
+                                    case _: ()
+                        case MirOperandKind.Const(_, ty):
+                            match ty.kind:
+                                case MirTypeKind.I64: return true
+                                case _: ()
+            case _: ()
+    false
+
+fn has_non_struct_copy_to_struct_dest(f: MirFunction) -> bool:
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Copy(dest, src):
+                    if val dest_ty = local_type_by_id(f, dest.id):
+                        match dest_ty.kind:
+                            case MirTypeKind.Struct(_):
+                                if val src_ty = local_type_by_id(f, src.id):
+                                    match src_ty.kind:
+                                        case MirTypeKind.Struct(_): ()
+                                        case _: return true
+                            case _: ()
+                case _: ()
+    false
+
+describe "value-position if val else match with diverging arms":
+    it "mir_merge_arm_types ignores Unit and Never when merging with concrete types":
+        val struct_ty = MirType(kind: MirTypeKind.Struct(SymbolId(id: 42)))
+        val never_ty = MirType(kind: MirTypeKind.Never)
+        val merged_unit_first = mir_merge_arm_types(MirType.unit(), struct_ty)
+        val merged_never_first = mir_merge_arm_types(never_ty, struct_ty)
+        val merged_unit_second = mir_merge_arm_types(struct_ty, MirType.unit())
+        val merged_never_second = mir_merge_arm_types(struct_ty, never_ty)
+        expect(mir_join_slot_is_payloadless(merged_unit_first)).to_equal(false)
+        expect(mir_join_slot_is_payloadless(merged_never_first)).to_equal(false)
+        expect(mir_join_slot_is_payloadless(merged_unit_second)).to_equal(false)
+        expect(mir_join_slot_is_payloadless(merged_never_second)).to_equal(false)
+
+    it "preserves concrete struct join type across if val + match with returning Err and Ok(_) arms":
+        val src = """
+struct Item:
+    token: i64
+
+class Holder:
+    pending: Item?
+
+fn pull_result(flag: i64) -> Result<Item?, text>:
+    if flag == 0:
+        return Err("fail")
+    if flag == 1:
+        return Ok(Some(Item(token: 77)))
+    Ok(None)
+
+fn drain_like(h: Holder, flag: i64) -> Result<i64, text>:
+    var taken = pull_result(flag)
+    val completion: Item = if val retained = h.pending:
+        retained
+    else:
+        match taken:
+            case Err(error):
+                return Err(error)
+            case Ok(Some(value)):
+                value
+            case Ok(_):
+                return Ok(0)
+    Ok(completion.token)
+
+fn main() -> i64:
+    val h = Holder(pending: None)
+    match drain_like(h, 1):
+        case Ok(v): v
+        case Err(_): -1
+"""
+        val res = lower_fn_mir(src, "drain_like")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+            expect(count_non_payloadless_copy_dests(f)).to_be_greater_than(0)
+            val gf = count_getfield_base_kinds(f)
+            expect(gf.0).to_be_greater_than(0)
+            expect(gf.1).to_equal(0)
+            expect(ret_payload_is_non_payloadless(f)).to_equal(true)
+
+    it "preserves non-void join type when untyped if val + match returns Err and Ok(_)":
+        val src = """
+struct Item:
+    token: i64
+
+class Holder:
+    pending: Item?
+
+fn pull_result(flag: i64) -> Result<Item?, text>:
+    if flag == 0:
+        return Err("fail")
+    if flag == 1:
+        return Ok(Some(Item(token: 77)))
+    Ok(None)
+
+fn drain_untyped(h: Holder, flag: i64) -> Result<i64, text>:
+    var taken = pull_result(flag)
+    val completion = if val retained = h.pending:
+        retained
+    else:
+        match taken:
+            case Err(error):
+                return Err(error)
+            case Ok(Some(value)):
+                value
+            case Ok(_):
+                return Ok(0)
+    Ok(completion.token)
+
+fn main() -> i64:
+    val h = Holder(pending: None)
+    match drain_untyped(h, 1):
+        case Ok(v): v
+        case Err(_): -1
+"""
+        val res = lower_fn_mir(src, "drain_untyped")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+            expect(count_non_payloadless_copy_dests(f)).to_be_greater_than(0)
+            val gf = count_getfield_base_kinds(f)
+            expect(gf.0).to_be_greater_than(0)
+            expect(gf.1).to_equal(0)
+            expect(ret_payload_is_non_payloadless(f)).to_equal(true)
+
+    it "preserves concrete struct join type when yielding struct arm joins returning Err and Ok(_)":
+        val src = """
+struct Item:
+    token: i64
+
+fn pull_flag(flag: i64) -> Result<Item?, text>:
+    if flag == 0:
+        return Err("fail")
+    if flag == 1:
+        return Ok(Some(Item(token: 77)))
+    Ok(None)
+
+fn pick_with_returns(opt: Item?, flag: i64) -> Result<i64, text>:
+    val taken = pull_flag(flag)
+    val completion = if val retained = opt:
+        retained
+    else:
+        match taken:
+            case Err(error):
+                return Err(error)
+            case Ok(Some(_)):
+                Item(token: 77)
+            case Ok(_):
+                return Ok(0)
+    Ok(completion.token)
+
+fn main() -> i64:
+    match pick_with_returns(None, 1):
+        case Ok(v): v
+        case Err(_): -1
+"""
+        val res = lower_fn_mir(src, "pick_with_returns")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+            expect(count_struct_typed_copy_dests(f)).to_be_greater_than(0)
+            expect(ret_payload_is_non_payloadless(f)).to_equal(true)
+
+    it "preserves concrete struct join type when untyped if val + match uses break/continue":
+        val src = """
+struct Item:
+    token: i64
+
+fn step_val(idx: i64, opt: Item?) -> i64:
+    var i = 0
+    var acc = 0
+    while i < 3:
+        i = i + 1
+        val chosen = if val r = opt:
+            r
+        else:
+            match idx:
+                case 0:
+                    continue
+                case 1:
+                    break
+                case _:
+                    Item(token: 99)
+        acc = acc + chosen.token
+    acc
+
+fn main() -> i64:
+    step_val(2, None)
+"""
+        val res = lower_fn_mir(src, "step_val")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+            expect(count_struct_typed_copy_dests(f) > 0).to_equal(true)
+
+    it "handles all-diverging match without fabricating payloadless Const or invalid merge":
+        val src = """
+fn all_div(flag: i64) -> i64:
+    match flag:
+        case 0:
+            return 10
+        case 1:
+            return 20
+        case _:
+            return 30
+
+fn main() -> i64:
+    all_div(1)
+"""
+        val res = lower_fn_mir(src, "all_div")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+
+    it "positive control: mixed non-diverging if val + match preserves concrete type":
+        val src = """
+struct Item:
+    token: i64
+
+fn pick_item(opt: Item?, r: Result<Item, text>) -> i64:
+    val chosen = if val retained = opt:
+        retained
+    else:
+        match r:
+            case Ok(v):
+                v
+            case Err(_):
+                Item(token: 5)
+    chosen.token
+
+fn main() -> i64:
+    pick_item(None, Ok(Item(token: 12)))
+"""
+        val res = lower_fn_mir(src, "pick_item")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+            expect(count_struct_typed_copy_dests(f) > 0).to_equal(true)
+
+    it "terminates cleanly when standalone guarded match diverges on all arms":
+        val src = """
+struct Item:
+    token: i64
+
+fn pick_diverging(flag: i64) -> Item:
+    match flag:
+        case _ if flag == 0:
+            return Item(token: 10)
+        case _ if flag == 1:
+            return Item(token: 20)
+        case _:
+            return Item(token: 30)
+
+fn main() -> i64:
+    pick_diverging(1).token
+"""
+        val res = lower_fn_mir(src, "pick_diverging")
+        val mir = res.0
+        val fn_opt = res.1
+        val errs = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(errs.len()).to_equal(0)
+        expect(fn_opt.?).to_equal(true)
+        if val f = fn_opt:
+            expect(payloadless_def_count(f)).to_equal(0)
+            expect(ret_payload_is_non_payloadless(f)).to_equal(true)
+            expect(has_reachable_unreachable_terminator(f)).to_equal(false)
+            expect(has_non_empty_unreachable_block(f)).to_equal(false)
+            expect(has_i64_ret_value(f)).to_equal(false)
+
+    it "preserves concrete struct join type without falling through when if-val else is an all-diverging guarded match":
+        val src = """
+struct Item:
+    token: i64
+
+fn choose_direct_or_diverge(flag: i64) -> Item:
+    val chosen = if flag > 0:
+        Item(token: 99)
+    else:
+        match flag:
+            case _ if flag == 0:
+                return Item(token: 10)
+            case _:
+                return Item(token: 20)
+    chosen
+
+fn choose_token(opt: Item?, flag: i64) -> i64:
+    val chosen: Item = if val retained = opt:
+        retained
+    else:
+        match flag:
+            case _ if flag == 0:
+                return 10
+            case _:
+                return 20
+    chosen.token
+
+fn main() -> i64:
+    choose_direct_or_diverge(1).token + choose_token(None, 0)
+"""
+        val res1 = lower_fn_mir(src, "choose_direct_or_diverge")
+        expect(res1.0.functions.len() > 0).to_equal(true)
+        expect(res1.2.len()).to_equal(0)
+        expect(res1.1.?).to_equal(true)
+        if val f1 = res1.1:
+            expect(payloadless_def_count(f1)).to_equal(0)
+            expect(ret_payload_is_non_payloadless(f1)).to_equal(true)
+            expect(has_reachable_unreachable_terminator(f1)).to_equal(false)
+            expect(has_non_empty_unreachable_block(f1)).to_equal(false)
+            expect(has_i64_ret_value(f1)).to_equal(false)
+            expect(has_non_struct_copy_to_struct_dest(f1)).to_equal(false)
+            expect(has_single_incoming_if_merge(f1)).to_equal(true)
+
+        val res2 = lower_fn_mir(src, "choose_token")
+        expect(res2.0.functions.len() > 0).to_equal(true)
+        expect(res2.2.len()).to_equal(0)
+        expect(res2.1.?).to_equal(true)
+        if val f2 = res2.1:
+            expect(payloadless_def_count(f2)).to_equal(0)
+            expect(has_reachable_unreachable_terminator(f2)).to_equal(false)
+            expect(has_non_empty_unreachable_block(f2)).to_equal(false)
+            expect(has_single_incoming_if_merge(f2)).to_equal(true)
+            val gf = count_getfield_base_kinds(f2)
+            expect(gf.0).to_be_greater_than(0)
+            expect(gf.1).to_equal(0)

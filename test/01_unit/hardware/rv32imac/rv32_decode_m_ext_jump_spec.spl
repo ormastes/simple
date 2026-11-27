@@ -1,21 +1,18 @@
-# @tag:in-development
-# Tracks: rv32imac_decode_spec_needs_m_extension_and_jump_branch_decode_2026-11-27
 """
 # RV32 Decode: M-Extension and Jump/Branch Decode
 
 **Feature IDs:** #RV32-DECODE-001
 **Category:** Hardware
-**Status:** In Development
+**Status:** Implemented
 
 ## Overview
 
-Cases split from rv32_decode_spec.spl that need decoder support riscv_common
-does not have yet: the M-extension MUL ALU op, and an opcode-aware
-`decode_branch_op(opcode, funct3)` that also maps JAL/JALR and returns None
-for a non-branch opcode.
+Covers M-extension ALU decode (`MUL`..`REMU`) and opcode-aware
+`decode_branch_op(opcode, funct3)` mapping `OP_BRANCH`, `OP_JAL`, `OP_JALR`,
+and `BranchOp.None` for non-branch opcodes.
 """
 
-import std.spec
+use std.spec.*
 
 use hardware.riscv_common.core.riscv_decode.*
 use hardware.riscv_common.pkg.riscv_isa_pkg.*
@@ -24,6 +21,21 @@ use hardware.riscv_common.pkg.riscv_types_pkg.*
 describe "ALU Operation Decode (M extension)":
     it "maps MUL correctly":
         expect(decode_alu_op(OP_OP, 0, 0x01)).to_equal(AluOp.Mul)
+
+    it "maps MULH, MULHSU, MULHU correctly":
+        expect(decode_alu_op(OP_OP, 1, F7_MULDIV)).to_equal(AluOp.Mulh)
+        expect(decode_alu_op(OP_OP, 2, F7_MULDIV)).to_equal(AluOp.Mulhsu)
+        expect(decode_alu_op(OP_OP, 3, F7_MULDIV)).to_equal(AluOp.Mulhu)
+
+    it "maps DIV, DIVU, REM, REMU correctly":
+        expect(decode_alu_op(OP_OP, 4, F7_MULDIV)).to_equal(AluOp.Div)
+        expect(decode_alu_op(OP_OP, 5, F7_MULDIV)).to_equal(AluOp.Divu)
+        expect(decode_alu_op(OP_OP, 6, F7_MULDIV)).to_equal(AluOp.Rem)
+        expect(decode_alu_op(OP_OP, 7, F7_MULDIV)).to_equal(AluOp.Remu)
+
+    it "does not misdecode I-type OP_IMM with funct7=0x01 as M-extension":
+        # 0x13 = OP_OP_IMM (ADDI with immediate bit pattern whose [31:25] == 0x01)
+        expect(decode_alu_op(0x13, 0, F7_MULDIV)).to_equal(AluOp.Add)
 
 describe "Branch Operation Decode":
     """
@@ -44,3 +56,12 @@ describe "Branch Operation Decode":
 
     it "returns None for non-branch":
         expect(decode_branch_op(OP_OP, 0)).to_equal(BranchOp.None)
+        expect(decode_branch_op(0x03, 0)).to_equal(BranchOp.None)
+        expect(decode_branch_op(0x37, 0)).to_equal(BranchOp.None)
+
+    it "maps BLT, BGE, BLTU, BGEU and invalid branch funct3":
+        expect(decode_branch_op(OP_BRANCH, F3_BLT)).to_equal(BranchOp.Blt)
+        expect(decode_branch_op(OP_BRANCH, F3_BGE)).to_equal(BranchOp.Bge)
+        expect(decode_branch_op(OP_BRANCH, F3_BLTU)).to_equal(BranchOp.Bltu)
+        expect(decode_branch_op(OP_BRANCH, F3_BGEU)).to_equal(BranchOp.Bgeu)
+        expect(decode_branch_op(OP_BRANCH, 2)).to_equal(BranchOp.None)

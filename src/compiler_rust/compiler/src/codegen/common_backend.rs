@@ -670,6 +670,9 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // Emitted by `inline_runtime_len_value` for the text arm of a
             // user-facing `.len()` (code points, ADR-005 item 5).
             | "rt_string_char_count"
+            // `inline_runtime_len_value` calls it for heap tag 4 (a Rust
+            // RuntimeTuple) on an erased `.len()` receiver.
+            | "rt_tuple_len"
             | "rt_string_bytes"
             // Erased numeric conversions synthesize these calls during
             // Cranelift lowering, so they can be absent from MIR call names.

@@ -50,12 +50,19 @@ pub(crate) fn get_vreg_or_default<M: Module>(
 /// calls it instead of loading the offset-8 BYTE length; `None` (baremetal C
 /// cores without that symbol) keeps the byte load. Bug:
 /// text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03.
+///
+/// `tuple_len` is the declared `rt_tuple_len` func ref: heap tag 4 is a
+/// `RuntimeTuple` in the Rust runtime but an enum in the C core, so the tag is
+/// not decoded inline; the runtime answers the arity, or -1 for a non-tuple.
+/// `None` keeps the -1 sentinel. Bug:
+/// seed_jit_any_typed_tuple_len_returns_minus_one_2026-11-27.
 pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
     baremetal: bool,
     fam_arrays: bool,
     string_cp_len: Option<cranelift_codegen::ir::FuncRef>,
+    tuple_len: Option<cranelift_codegen::ir::FuncRef>,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -113,8 +120,26 @@ pub(crate) fn inline_runtime_len_value(
     } else {
         has_len_rt
     };
-    builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
-    builder.seal_block(type_block);
+    if let Some(tuple_len_ref) = tuple_len {
+        let other_block = builder.create_block();
+        let tuple_block = builder.create_block();
+        builder.ins().brif(has_len, len_block, &[], other_block, &[]);
+        builder.seal_block(type_block);
+
+        builder.switch_to_block(other_block);
+        let is_tag4 = builder.ins().icmp_imm(IntCC::Equal, object_type, 4);
+        builder.ins().brif(is_tag4, tuple_block, &[], done_block, &[invalid]);
+        builder.seal_block(other_block);
+
+        builder.switch_to_block(tuple_block);
+        let call = adapted_call(builder, tuple_len_ref, &[value]);
+        let arity = builder.inst_results(call)[0];
+        builder.ins().jump(done_block, &[arity]);
+        builder.seal_block(tuple_block);
+    } else {
+        builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
+        builder.seal_block(type_block);
+    }
 
     builder.switch_to_block(len_block);
     // Text: code-point count via the runtime (ASCII fast path inside it);
@@ -191,6 +216,19 @@ pub(crate) fn string_cp_len_ref<M: Module>(
         return None;
     }
     let id = *ctx.runtime_funcs.get("rt_string_char_count")?;
+    Some(ctx.module.declare_func_in_func(id, builder.func))
+}
+
+/// `rt_tuple_len` for `inline_runtime_len_value`; hosted targets only, like
+/// `string_cp_len_ref` (baremetal tag 4 has no tuple contract).
+pub(crate) fn tuple_len_ref<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+) -> Option<cranelift_codegen::ir::FuncRef> {
+    if ctx.baremetal {
+        return None;
+    }
+    let id = *ctx.runtime_funcs.get("rt_tuple_len")?;
     Some(ctx.module.declare_func_in_func(id, builder.func))
 }
 

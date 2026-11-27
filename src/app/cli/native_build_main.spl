@@ -68,7 +68,7 @@ use std.io_runtime.{getpid}
 use std.io_runtime.{time_now_monotonic_ms}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims}
-use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, parse_shard_reap_v1, PARSE_SHARD_DEATH_GRACE_MS_V1,
+use app.cli.shard_worker_reap_v1.{shard_worker_confirm_kill_v1, shard_worker_reaped_stopped_v1, parse_shard_reap_v1, PARSE_SHARD_DEATH_GRACE_MS_V1,
     shard_pool_poll_quantum_v1, shard_pool_headroom_probe_due_v1, shard_child_wait_bounded_v1}
 use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal, native_build_signal_name, native_build_exit_cause_field_v1, native_build_is_dll_init_failed_v1}
 use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1, file_worker_pool_addressable_budget_kb_v1,
@@ -1603,7 +1603,12 @@ fn run_ledger_shards(label: text, flag: text, queue_env: text, owner_env: text,
             armed_claims = kept_armed
             # -1 is a wait error, not proof of exit. Even a false liveness
             # probe also means invalid handle; require a real reap result.
-            var owner_stopped = if label == "hir-shard": hir_stopped else: pid <= 0 or (code != -2 and code != -1 and not process_is_running(pid))
+            var owner_stopped = hir_stopped
+            if label != "hir-shard":
+                var probe_running = false
+                if pid > 0:
+                    probe_running = process_is_running(pid)
+                owner_stopped = shard_worker_reaped_stopped_v1(pid, code, probe_running)
             if label != "hir-shard" and not owner_stopped and pid > 0:
                 owner_stopped = shard_worker_confirm_kill_v1(pid, process_kill(pid))
                 if not owner_stopped:
@@ -2184,6 +2189,24 @@ pub fn native_build_focused_capsule_shards_v1(base: [text], args: [text], allow_
 # passes it replaces (HIR count, MIR per-worker budget; the smaller wins).
 # Returns the MIR ledger to link from, "fail" (including a refused pool), or ""
 # (no verdict; the per-file route refuses it in bootstrap_main).
+# Pure classifier for HIR shard disablement in the per-file worker pool.
+pub fn native_build_hir_disabled_reason_v1(hir_cache_env: text, parse_sharding_env: text, hir_sharding_env: text) -> text:
+    if hir_cache_env == "0":
+        return "SIMPLE_HIR_CACHE=0"
+    if native_build_hir_shard_policy_v1(parse_sharding_env, hir_sharding_env) == 0:
+        return "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
+    ""
+
+# Formats per-file pool refusal text, explaining why SIMPLE_HIR_CACHE=0 disables
+# positional/per-file sharding and pointing to valid cache-off routes.
+pub fn native_build_pool_refusal_message_v1(refusal: text, hir_disabled_by: text, args: [text]) -> text:
+    if refusal == "":
+        return ""
+    if hir_disabled_by != "SIMPLE_HIR_CACHE=0":
+        return refusal
+    val route_label = if args.contains("--entry-closure"): "per-file route" else: "positional/per-file route"
+    "{refusal} (the {route_label} requires the HIR cache to share lowered HIR across workers; unset SIMPLE_HIR_CACHE=0 to keep the parallel per-file pool, or pass SIMPLE_FILE_WORKERS=0 with --entry-closure or SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 for cache-off compilation)"
+
 fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout_ms: i64) -> text:
     # Admission-only argv: an unrequested thread count defaults to the host CPU
     # count (native_file_worker_pool_request_v1). Children keep the original argv.
@@ -2199,9 +2222,10 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     val hir_count = native_build_hir_shard_count(admit_args)
     val mir_parallel = native_build_shard_threads(admit_args, pool_mir_kb)
     var parallel = if hir_count < mir_parallel: hir_count else: mir_parallel
-    val hir_disabled_by = if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0": "SIMPLE_HIR_CACHE=0"
-        elif native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "", env_get("SIMPLE_HIR_SHARDING") ?? "") == 0: "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING"
-        else: ""
+    val hir_disabled_by = native_build_hir_disabled_reason_v1(
+        env_get("SIMPLE_HIR_CACHE") ?? "",
+        env_get("SIMPLE_PARSE_SHARDING") ?? "",
+        env_get("SIMPLE_HIR_SHARDING") ?? "")
     # Fail closed: a refused pool is an error, never a two-pass or in-process fallback.
     val refusal = file_worker_pool_refusal_v1(hir_count, mir_parallel, admit_avail_kb,
         pool_hir_kb, pool_mir_kb, admit_requested, hir_disabled_by,
@@ -2216,8 +2240,9 @@ fn run_file_worker_pool_v1(base: [text], args: [text], simple_bin: text, timeout
     if serial_low_memory or serial_memory:
         parallel = 1
     if refusal != "" and not serial_low_memory and not serial_memory:
-        eprint refusal
-        _shard_aggregate_fail_reason_v1 = refusal
+        val full_refusal = native_build_pool_refusal_message_v1(refusal, hir_disabled_by, args)
+        eprint full_refusal
+        _shard_aggregate_fail_reason_v1 = full_refusal
         return "fail"
     val hir_queue = shard_ledger_queue_dir(args, "queue", "hir-shard")
     val mir_queue = shard_ledger_queue_dir(args, "mir-queue", "mir-shard")

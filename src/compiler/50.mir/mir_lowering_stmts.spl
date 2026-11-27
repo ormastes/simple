@@ -414,6 +414,12 @@ fn mir_stmts_should_upgrade_array_mir_type(current_mir: MirType?, target_mir: Mi
             cur_elem.kind == MirTypeKind.I64 and mir_stmts_mir_elem_is_non_i64(target_mir)
         case _: false
 
+fn mir_join_slot_is_unit(slot_type: MirType) -> bool:
+    """True only when an if/if-chain/match join slot is genuinely Unit/void.
+    Distinct from Never (diverging arms) so value joins never drop concrete
+    yielding arms while Unit slots never receive scalar Const or Copy defs."""
+    compiler_value_discriminant<MirTypeKind>(slot_type.kind) == compiler_value_discriminant<MirTypeKind>(MirTypeKind.Unit)
+
 fn mir_join_slot_is_payloadless(slot_type: MirType) -> bool:
     """True when an if/if-chain merge slot of this MIR type has no runtime
     payload (Unit / Never): it must never receive a `Const 0` default def."""
@@ -452,6 +458,12 @@ fn mir_merge_arm_types(first: MirType, second: MirType) -> MirType:
     incumbent carries no information (`mir_elem_type_is_unspecific`), so a
     genuinely i64-element array is never retyped and the arm chosen for the
     merge is otherwise unchanged."""
+    # Payloadless (Unit / Never) arms carry no value; never let them eclipse
+    # a value-yielding sibling branch at the merge destination.
+    if mir_join_slot_is_payloadless(first):
+        return second
+    if mir_join_slot_is_payloadless(second):
+        return first
     # An unresolved first arm (a match/Result-payload tail the lowering could
     # not type) defaults to bare I64; a struct-typed later arm is strictly
     # more specific, so keep it. Otherwise `val x = if c: <match..> else:
@@ -3973,7 +3985,9 @@ impl MirLowering:
                             var b_err = self.builder
                             val dummy = b_err.emit_const_int(0)
                             self.builder = b_err
-                            return MirMethodCallOperands(operands: [dummy], writebacks: [])
+                            for _a in args:
+                                operands = operands.push(mir_operand_copy(dummy))
+                            return MirMethodCallOperands(operands: operands, writebacks: [])
                 self.error_fatal("named call with omitted parameter default requires matching receiver operands", Some(args[0].span))
                 return MirMethodCallOperands(operands: operands, writebacks: [])
             if plan.source_kind != 2 and plan.source_kind != 4:
@@ -5387,15 +5401,16 @@ impl MirLowering:
         # Typed from expected when known; else arm-type inference below
         # retypes at the merge (same fix as the match dispatches: an i64
         # default made print decimal-render text results of value-position
-        # ifs).
-        val result_slot_type = self.match_result_mir_type(expected_type)
+        # ifs). An else-less if is Unit-typed and never defines a value slot.
+        val if_has_else: bool = else_ != None
+        val result_slot_type = if if_has_else: self.match_result_mir_type(expected_type) else: MirType.unit()
         val result = b.new_temp(result_slot_type)
         # bug=native_const_type_void_unit_tail_if_join_2026-11-13: a Unit slot
-        # (unit fn tail, expected Some(Unit)) never takes a `Const 0` def; read
-        # that from the slot type value, not from `expected_type == None` or a
-        # `local_mir_type_of ?? i64` re-lookup (native Phase 2 miscompiled one
-        # of them and emitted E-BACKEND-LLVM-CONST-TYPE "cannot define void").
+        # (unit fn tail, expected Some(Unit), or else-less if) never takes a
+        # `Const 0` or `Copy` def; read that from the slot type value, not from
+        # `expected_type == None` or a `local_mir_type_of ?? i64` re-lookup.
         val result_slot_payloadless = mir_join_slot_is_payloadless(result_slot_type)
+        val result_slot_unit = mir_join_slot_is_unit(result_slot_type)
         var inferred_known = false
         var inferred_ty = MirType.i64()
         var merged_arm_locals: [LocalId] = []
@@ -5410,7 +5425,7 @@ impl MirLowering:
         # a second `Const 0` on the same `result` local when all arms are unit;
         # a duplicate `Const` forces `ssa_alloca_transform_blocks` to slot an
         # unused join temp on unit-fn `if`/`elif`/`else` tails.
-        val emitted_default_def = self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless
+        val emitted_default_def = if_has_else and self.join_needs_default_def_v1(expected_type) and not result_slot_payloadless
         if emitted_default_def:
             b.emit_const(result, MirConstValue.Int(0), MirType.i64())
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
@@ -5443,12 +5458,9 @@ impl MirLowering:
             if then_result.?:
                 val then_local_fb = LocalId(id: 0)
                 val then_local = then_result ?? then_local_fb
-                # A Unit-typed arm result (statement-form print, etc.) has no
-                # real value to merge -- copying it into the i64 result slot
-                # would force an `alloca void` in the backend. Leave
-                # result_defined false; the merge block below falls back to
-                # a const-0 def in that case.
-                if not self.local_is_unit(then_local):
+                # A Unit/Never arm result or Unit/else-less join slot never copies
+                # into `result` (avoids `Copy` defining `void` / `Never` poisoning).
+                if if_has_else and not result_slot_unit and not self.merge_result_is_payloadless(then_local):
                     b3.emit_copy(result, then_local)
                     self.propagate_branch_collection_marks(then_local, result)
                     merged_arm_locals = merged_arm_locals.push(then_local)
@@ -5480,7 +5492,7 @@ impl MirLowering:
                 if else_result.?:
                     val else_local_fb = LocalId(id: 0)
                     val else_local = else_result ?? else_local_fb
-                    if not self.local_is_unit(else_local):
+                    if not result_slot_unit and not self.merge_result_is_payloadless(else_local):
                         b5.emit_copy(result, else_local)
                         self.propagate_branch_collection_marks(else_local, result)
                         merged_arm_locals = merged_arm_locals.push(else_local)
@@ -5496,6 +5508,7 @@ impl MirLowering:
             self.builder = b5
         else:
             var b5 = self.builder
+            result_defined = true
             b5.terminate_goto(merge_block)
             merge_has_incoming = true
             self.builder = b5
@@ -5517,9 +5530,9 @@ impl MirLowering:
         # undefined downstream (NULL llvm::Value* -> ICmp SIGSEGV in llvm-lib).
         # Define it in the merge block only if the dominating entry block did
         # not already emit the default Const 0.
-        if not result_defined and not emitted_default_def and not result_slot_payloadless:
+        if if_has_else and not result_defined and not emitted_default_def and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known and not mir_join_slot_is_payloadless(inferred_ty):
+        if inferred_known and if_has_else and not result_slot_unit and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
 
         var joined_result = result
@@ -5581,6 +5594,7 @@ impl MirLowering:
         # Option compare / `local_mir_type_of ?? i64` re-lookup is the
         # miscompile-prone path; a non-optional MirType match is not.
         val result_slot_payloadless = mir_join_slot_is_payloadless(result_type)
+        val result_slot_unit = mir_join_slot_is_unit(result_type)
         # bug=mir_lower_child_tasks_append_access_violation_2026-10-19: same as
         # lower_if -- a statement-position chain with an else whose arms mix a
         # unit statement and a value-yielding one defines `result` on one merge
@@ -5682,7 +5696,7 @@ impl MirLowering:
                 if arm_result.?:
                     val arm_fallback = LocalId(id: 0)
                     val arm_local = arm_result ?? arm_fallback
-                    if chain_has_else and not self.local_is_unit(arm_local):
+                    if chain_has_else and not result_slot_unit and not self.merge_result_is_payloadless(arm_local):
                         b_then.emit_copy(result, arm_local)
                         self.propagate_branch_collection_marks(arm_local, result)
                         merged_arm_locals = merged_arm_locals.push(arm_local)
@@ -5711,7 +5725,7 @@ impl MirLowering:
                 if else_result.?:
                     val else_fallback = LocalId(id: 0)
                     val else_local = else_result ?? else_fallback
-                    if not self.local_is_unit(else_local):
+                    if not result_slot_unit and not self.merge_result_is_payloadless(else_local):
                         b_else.emit_copy(result, else_local)
                         self.propagate_branch_collection_marks(else_local, result)
                         merged_arm_locals = merged_arm_locals.push(else_local)
@@ -5745,7 +5759,7 @@ impl MirLowering:
         self.builder.switch_to_block(merge_block)
         if not result_defined and not emitted_default_def and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known and chain_has_else and not mir_join_slot_is_payloadless(inferred_ty):
+        if inferred_known and chain_has_else and not result_slot_unit and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
 
         var joined_result = result
@@ -5902,6 +5916,30 @@ impl MirLowering:
         # General case: iterator protocol lowering
         self.lower_for_iterator(var_, iter, body, source_span)
 
+    fn range_bound_int_hir_type(expr: HirExpr) -> HirType?:
+        """Recover a concrete integer HirType from a for-range bound even before 30.types
+        populates HirExpr.type_ on Cast (`0u64`) or typed parameter/local references."""
+        if expr.has_type_:
+            val expr_ty: HirType = expr.type_
+            match expr_ty.kind:
+                case HirTypeKind.Int(_, _): return Some(expr_ty)
+                case _: ()
+        match expr.kind:
+            case HirExprKind.Cast(_, cast_target):
+                match cast_target.kind:
+                    case HirTypeKind.Int(_, _): return Some(cast_target)
+                    case _: ()
+            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                val bound = self.find_local(symbol.id)
+                if bound.id >= 0:
+                    if val bound_hir = self.find_local_hir_type(bound.id):
+                        val bound_hir_ty: HirType = bound_hir
+                        match bound_hir_ty.kind:
+                            case HirTypeKind.Int(_, _): return Some(bound_hir_ty)
+                            case _: ()
+            case _: ()
+        None
+
     me lower_for_range(
         var_: SymbolId,
         start: HirExpr?,
@@ -5926,19 +5964,17 @@ impl MirLowering:
         # Derive loop counter type from bound HirExpr types before emitting any code.
         # This preserves u64 (and other non-i64 integer) counter types end-to-end.
         var loop_ty = MirType.i64()
-        # NOT `case Some(...)`. HirExpr.type_ is declared `HirType` -- FLAT, not
-        # even nullable (hir_definitions.spl:529), with `has_type_` as "the
-        # authoritative presence bit" per its own docstring. An Option arm can
-        # therefore NEVER match here, which made the u64 preservation promised
-        # by the comment above dead code: loop_ty always kept its i64 default.
+        var loop_hir_ty = HirType(kind: HirTypeKind.Int(64, true), span: source_span)
+        var resolved_bound_hir: HirType? = None
         if val end_expr = end:
-            if end_expr.has_type_:
-                val end_ty: HirType = end_expr.type_
-                loop_ty = self.lower_type(end_ty)
-        elif val start_expr = start:
-            if start_expr.has_type_:
-                val start_ty: HirType = start_expr.type_
-                loop_ty = self.lower_type(start_ty)
+            resolved_bound_hir = self.range_bound_int_hir_type(end_expr)
+        if resolved_bound_hir == None:
+            if val start_expr = start:
+                resolved_bound_hir = self.range_bound_int_hir_type(start_expr)
+        if val int_hir = resolved_bound_hir:
+            val int_hir_ty: HirType = int_hir
+            loop_hir_ty = int_hir_ty
+            loop_ty = self.lower_type(int_hir_ty)
 
         # Lower start value (default to typed 0)
         var start_local: LocalId = 0
@@ -5986,6 +6022,7 @@ impl MirLowering:
             self.error_fatal("for range loop variable has no resolved symbol", Some(body.span))
         else:
             self.bind_local(range_var_id, counter)
+            self.remember_local_hir_type(counter.id, loop_hir_ty, 0, 0)
 
         # Create loop blocks
         var b_blocks = self.builder
@@ -6708,4 +6745,4 @@ impl MirLowering:
 # ============================================================================
 
 # Methods are attached to MirLowering via impl block above.
-# No separate exports needed -- they are accessed through MirLowering instances.
+export mir_join_slot_is_unit, mir_join_slot_is_payloadless, mir_merge_arm_types

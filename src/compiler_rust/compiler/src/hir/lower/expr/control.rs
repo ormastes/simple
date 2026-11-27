@@ -1106,6 +1106,272 @@ impl Lowerer {
         })
     }
 
+    /// Bare-name runtime id of each user enum declaring a `Some` or `None`
+    /// variant, with its `Some` discriminant when it has one. Such values are
+    /// not the raw form of an optional, so a bare `Some` arm over an untyped
+    /// subject only matches them through their own `Some` variant. Cached per
+    /// type-registry size: it is consulted for every erased `Some` arm.
+    pub(crate) fn user_option_shaped_enums(&mut self) -> std::sync::Arc<Vec<(i64, Option<i64>)>> {
+        let count = self.module.types.type_count();
+        if let Some((at, cached)) = &self.user_option_shaped_cache {
+            if *at == count {
+                return std::sync::Arc::clone(cached);
+            }
+        }
+        let builtin_global_option = self.global_option_is_builtin();
+        let mut out: Vec<(i64, Option<i64>)> = Vec::new();
+        for (tid, ty) in self.module.types.iter() {
+            let HirType::Enum {
+                name,
+                variants,
+                generic_params,
+                ..
+            } = ty
+            else {
+                continue;
+            };
+            // Only the builtin is exempt; a user `enum Option` is an ordinary
+            // enum (sharing runtime id 1 with the builtin on the JIT lane).
+            if (name == "Option" && (!generic_params.is_empty() || builtin_global_option))
+                || !variants.iter().any(|(v, _)| v == "Some" || v == "None")
+            {
+                continue;
+            }
+            let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
+            if out.iter().any(|(seen, _)| *seen == id) {
+                continue;
+            }
+            let some_disc = variants
+                .iter()
+                .any(|(v, _)| v == "Some")
+                .then(|| self.owner_variant_discriminant(tid, Some(name.as_str()), "Some", "hir user Some arm"));
+            out.push((id, some_disc));
+        }
+        // Enums seen only through the project-wide table count too.
+        if let Some(defs) = self.global_enum_defs.as_ref() {
+            for (name, variants) in defs.iter() {
+                if super::super::lowerer::global_def_is_builtin_option(name, variants)
+                    || !variants.iter().any(|(v, _)| v == "Some" || v == "None")
+                {
+                    continue;
+                }
+                let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
+                if out.iter().any(|(seen, _)| *seen == id) {
+                    continue;
+                }
+                let owner = self.module.types.lookup(name).unwrap_or(TypeId::ANY);
+                let some_disc = variants
+                    .iter()
+                    .any(|(v, _)| v == "Some")
+                    .then(|| self.owner_variant_discriminant(owner, Some(name.as_str()), "Some", "hir user Some arm"));
+                out.push((id, some_disc));
+            }
+        }
+        let out = std::sync::Arc::new(out);
+        self.user_option_shaped_cache = Some((count, std::sync::Arc::clone(&out)));
+        out
+    }
+
+    /// `rt_enum_check_variant(subject, enum_id, disc)`: the one enum-identity
+    /// test the native-project lane re-points at the qualified runtime name
+    /// (`requalify_enum_check_variant_ids`); a bare `rt_enum_id` compare is not.
+    fn erased_check_variant(subject: &HirExpr, enum_id: i64, disc: HirExpr) -> HirExpr {
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_check_variant".to_string(),
+                args: vec![
+                    subject.clone(),
+                    HirExpr {
+                        kind: HirExprKind::Integer(enum_id),
+                        ty: TypeId::I64,
+                    },
+                    disc,
+                ],
+            },
+            ty: TypeId::BOOL,
+        }
+    }
+
+    /// `LetIn(id = rt_enum_id(subject), id < 2 ? fast : slow(..))`: raw words
+    /// (-1), Result (0) and Option (1) skip the per-enum tests; user enum ids
+    /// are always >= 2.
+    fn erased_enum_id_split(
+        subject: &HirExpr,
+        ctx: &mut FunctionContext,
+        ty: TypeId,
+        fast: HirExpr,
+        slow: HirExpr,
+    ) -> HirExpr {
+        let id_idx = ctx.locals.len();
+        ctx.add_local("$some_arm_enum_id".to_string(), TypeId::I64, Mutability::Immutable);
+        HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: id_idx,
+                value: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_id".to_string(),
+                        args: vec![subject.clone()],
+                    },
+                    ty: TypeId::I64,
+                }),
+                body: Box::new(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(HirExpr {
+                            kind: HirExprKind::Binary {
+                                op: BinOp::Lt,
+                                left: Box::new(HirExpr {
+                                    kind: HirExprKind::Local(id_idx),
+                                    ty: TypeId::I64,
+                                }),
+                                right: Box::new(HirExpr {
+                                    kind: HirExprKind::Integer(2),
+                                    ty: TypeId::I64,
+                                }),
+                            },
+                            ty: TypeId::BOOL,
+                        }),
+                        then_branch: Box::new(fast),
+                        else_branch: Some(Box::new(slow)),
+                    },
+                    ty,
+                }),
+            },
+            ty,
+        }
+    }
+
+    /// Arm-test guard for a bare `Some` over an untyped subject: a value of a
+    /// user enum declaring `Some`/`None` passes only through its own `Some`
+    /// variant. `None` when no such enum is in scope.
+    /// seed_jit_any_match_bare_some_arm_takes_user_enum_unit_variant_2026-11-27
+    pub(crate) fn erased_some_arm_guard(&mut self, subject: &HirExpr, ctx: &mut FunctionContext) -> Option<HirExpr> {
+        let shaped = self.user_option_shaped_enums();
+        if shaped.is_empty() {
+            return None;
+        }
+        let disc_idx = ctx.locals.len();
+        ctx.add_local("$some_arm_enum_disc".to_string(), TypeId::I64, Mutability::Immutable);
+        let disc = || HirExpr {
+            kind: HirExprKind::Local(disc_idx),
+            ty: TypeId::I64,
+        };
+        let bin = |op: BinOp, left: HirExpr, right: HirExpr| HirExpr {
+            kind: HirExprKind::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+            ty: TypeId::BOOL,
+        };
+        let mut all_ok: Option<HirExpr> = None;
+        for &(enum_id, some_disc) in shaped.iter() {
+            // Not this enum (the value's own discriminant under E's identity
+            // fails), or it is E's `Some` variant.
+            let not_e = HirExpr {
+                kind: HirExprKind::Unary {
+                    op: UnaryOp::Not,
+                    operand: Box::new(Self::erased_check_variant(subject, enum_id, disc())),
+                },
+                ty: TypeId::BOOL,
+            };
+            let ok = match some_disc {
+                None => not_e,
+                Some(d) => bin(
+                    BinOp::Or,
+                    bin(
+                        BinOp::Eq,
+                        disc(),
+                        HirExpr {
+                            kind: HirExprKind::Integer(d),
+                            ty: TypeId::I64,
+                        },
+                    ),
+                    not_e,
+                ),
+            };
+            all_ok = Some(match all_ok {
+                None => ok,
+                Some(prev) => bin(BinOp::And, prev, ok),
+            });
+        }
+        let slow = HirExpr {
+            kind: HirExprKind::LetIn {
+                local_idx: disc_idx,
+                value: Box::new(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_discriminant".to_string(),
+                        args: vec![subject.clone()],
+                    },
+                    ty: TypeId::I64,
+                }),
+                body: Box::new(all_ok?),
+            },
+            ty: TypeId::BOOL,
+        };
+        let fast = HirExpr {
+            kind: HirExprKind::Bool(true),
+            ty: TypeId::BOOL,
+        };
+        Some(Self::erased_enum_id_split(subject, ctx, TypeId::BOOL, fast, slow))
+    }
+
+    /// Binding for a bare `Some(v)` over an untyped subject: the payload of a
+    /// user enum's own `Some`, else `rt_unwrap_or_self` (Option payload, or the
+    /// raw `T?` word itself).
+    pub(crate) fn erased_some_arm_binding(
+        &mut self,
+        subject: &HirExpr,
+        payload_ty: TypeId,
+        ctx: &mut FunctionContext,
+    ) -> HirExpr {
+        let unwrap = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_unwrap_or_self".to_string(),
+                args: vec![subject.clone()],
+            },
+            ty: payload_ty,
+        };
+        let shaped = self.user_option_shaped_enums();
+        let mut chain = unwrap.clone();
+        let mut any_some_owner = false;
+        for &(enum_id, some_disc) in shaped.iter() {
+            let Some(d) = some_disc else {
+                continue;
+            };
+            any_some_owner = true;
+            chain = HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(Self::erased_check_variant(
+                        subject,
+                        enum_id,
+                        HirExpr {
+                            kind: HirExprKind::Integer(d),
+                            ty: TypeId::I64,
+                        },
+                    )),
+                    then_branch: Box::new(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_enum_payload".to_string(),
+                            args: vec![subject.clone()],
+                        },
+                        ty: payload_ty,
+                    }),
+                    else_branch: Some(Box::new(chain)),
+                },
+                ty: payload_ty,
+            };
+        }
+        if !any_some_owner {
+            return unwrap;
+        }
+        // A user `enum Option` shares id 1 with the builtin on the JIT lane,
+        // so the id split cannot skip its payload read.
+        if shaped.iter().any(|&(enum_id, _)| enum_id < 2) {
+            return chain;
+        }
+        Self::erased_enum_id_split(subject, ctx, payload_ty, unwrap, chain)
+    }
+
     /// Arm test for a top-level builtin-optional `case Some(p):`: presence
     /// (`rt_is_some`) AND the refutable payload sub-patterns, read through the
     /// same dual-representation slot as the nested `Ok(Some(..))` path in
@@ -1144,13 +1410,28 @@ impl Lowerer {
             }
             _ => None,
         };
-        let presence = HirExpr {
+        let mut presence = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: "rt_is_some".to_string(),
-                args: vec![subject_ref],
+                args: vec![subject_ref.clone()],
             },
             ty: TypeId::BOOL,
         };
+        // An untyped subject can hold a user enum that declares `Some`/`None`
+        // itself; the interpreter matches such a value only through its own
+        // `Some` variant, so `Opt.Nope` must not take the arm.
+        if subject_ty == TypeId::ANY {
+            if let Some(guard) = self.erased_some_arm_guard(&subject_ref, ctx) {
+                presence = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(presence),
+                        right: Box::new(guard),
+                    },
+                    ty: TypeId::BOOL,
+                };
+            }
+        }
         match deeper {
             None => presence,
             Some(inner_test) => HirExpr {

@@ -804,6 +804,7 @@ var named_type_current_module: text = ""
 
 fn named_type_set_current_module(path: text):
     named_type_current_module = path
+    unit_decl_current_module = path
 
 fn named_type_module_at(type_id: i64) -> text:
     if type_id < named_type_modules.len():
@@ -1032,11 +1033,26 @@ var unit_decl_roles: [text] = []
 var unit_decl_short_symbols: [text] = []
 var unit_decl_underlying_type_tags: [i64] = []
 var unit_decl_alias_ofs: [text] = []
+var unit_decl_modules: [text] = []
+var unit_decl_current_module: text = ""
+var unit_decl_last_conflict_msg: text = ""
 # Origin syntax: "" for the canonical `unit` spelling, "newunit" / "newtype"
 # for the deprecated spellings that lower into the same record (SPL-UNIT-001 /
 # SPL-UNIT-003 are raised at the parse site, never here).
 var unit_decl_initialized: bool = false
 var unit_decl_legacy_origins: [text] = []
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_set_current_module(path: text):
+    unit_decl_current_module = path
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_get_current_module() -> text:
+    unit_decl_current_module
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_last_conflict_error() -> text:
+    unit_decl_last_conflict_msg
 
 pub fn unit_decl_pool_reset():
     unit_decl_names = []
@@ -1045,6 +1061,8 @@ pub fn unit_decl_pool_reset():
     unit_decl_underlying_type_tags = []
     unit_decl_alias_ofs = []
     unit_decl_legacy_origins = []
+    unit_decl_modules = []
+    unit_decl_last_conflict_msg = ""
     unit_decl_initialized = true
     unit_constraint_pool_reset()
 
@@ -1061,21 +1079,27 @@ pub struct UnitDeclPoolSnapshot:
     underlying_type_tags: [i64]
     alias_ofs: [text]
     legacy_origins: [text]
+    modules: [text]
+    current_module: text
     constraints: UnitConstraintPoolSnapshot
 
 pub fn unit_decl_pool_save() -> UnitDeclPoolSnapshot:
     if not unit_decl_initialized:
         return UnitDeclPoolSnapshot(initialized: false, names: [], roles: [],
             short_symbols: [], underlying_type_tags: [], alias_ofs: [],
-            legacy_origins: [], constraints: unit_constraint_pool_save())
+            legacy_origins: [], modules: [], current_module: unit_decl_current_module,
+            constraints: unit_constraint_pool_save())
     UnitDeclPoolSnapshot(initialized: true, names: unit_decl_names, roles: unit_decl_roles,
         short_symbols: unit_decl_short_symbols,
         underlying_type_tags: unit_decl_underlying_type_tags,
         alias_ofs: unit_decl_alias_ofs, legacy_origins: unit_decl_legacy_origins,
+        modules: unit_decl_modules, current_module: unit_decl_current_module,
         constraints: unit_constraint_pool_save())
 
 pub fn unit_decl_pool_restore(snap: UnitDeclPoolSnapshot):
     unit_constraint_pool_restore(snap.constraints)
+    unit_decl_current_module = snap.current_module
+    unit_decl_last_conflict_msg = ""
     if not snap.initialized:
         unit_decl_initialized = false
         return
@@ -1085,29 +1109,61 @@ pub fn unit_decl_pool_restore(snap: UnitDeclPoolSnapshot):
     unit_decl_underlying_type_tags = snap.underlying_type_tags
     unit_decl_alias_ofs = snap.alias_ofs
     unit_decl_legacy_origins = snap.legacy_origins
+    unit_decl_modules = snap.modules
     unit_decl_initialized = true
 
-pub fn unit_decl_find(name: text) -> i64:
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_module_at(idx: i64) -> text:
+    if idx >= 0 and idx < unit_decl_modules.len():
+        return unit_decl_modules[idx]
+    ""
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_find_in_module(module_path: text, name: text) -> i64:
     if not unit_decl_initialized:
         return -1
     var i = 0
     while i < unit_decl_names.len():
-        if unit_decl_names[i] == name:
+        if unit_decl_names[i] == name and unit_decl_module_at(i) == module_path:
             return i
         i = i + 1
     -1
+
+pub fn unit_decl_find(name: text) -> i64:
+    if not unit_decl_initialized:
+        return -1
+    # Precedence: the current module's own declaration, then the first
+    # registration of that bare name (backward compatibility for unqualified callers).
+    var first = -1
+    var i = 0
+    while i < unit_decl_names.len():
+        if unit_decl_names[i] == name:
+            if unit_decl_module_at(i) == unit_decl_current_module:
+                return i
+            if first < 0:
+                first = i
+        i = i + 1
+    first
+
+# @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
+pub fn unit_decl_find_by_suffix_in_module(module_path: text, suffix: text) -> i64:
+    if not unit_decl_initialized or suffix == "": return -1
+    var first = -1
+    var i = 0
+    while i < unit_decl_short_symbols.len():
+        if unit_decl_short_symbols[i] == suffix:
+            if unit_decl_module_at(i) == module_path:
+                return i
+            if first < 0:
+                first = i
+        i = i + 1
+    first
 
 # Row index of the unit declared `as suffix`, or -1 (suffix-less units and
 # unknown suffixes). Used by the literal checks for `70000_pt`.
 # @allow(primitive_api) frontend unit pool API: rows are raw i64 indexes and text names, matching the sibling unit_decl_* pool surface
 pub fn unit_decl_find_by_suffix(suffix: text) -> i64:
-    if not unit_decl_initialized or suffix == "": return -1
-    var i = 0
-    while i < unit_decl_short_symbols.len():
-        if unit_decl_short_symbols[i] == suffix:
-            return i
-        i = i + 1
-    -1
+    unit_decl_find_by_suffix_in_module(unit_decl_current_module, suffix)
 
 fn unit_decl_register(name: text, role: text, short_symbol: text, underlying_type_tag: i64, alias_of: text) -> i64:
     unit_decl_register_origin(name, role, short_symbol, underlying_type_tag, alias_of, "")
@@ -1115,13 +1171,40 @@ fn unit_decl_register(name: text, role: text, short_symbol: text, underlying_typ
 pub fn unit_decl_register_origin(name: text, role: text, short_symbol: text, underlying_type_tag: i64, alias_of: text, legacy_origin: text) -> i64:
     if not unit_decl_initialized:
         unit_decl_pool_reset()
-    val existing = unit_decl_find(name)
+    unit_decl_last_conflict_msg = ""
+    val existing = unit_decl_find_in_module(unit_decl_current_module, name)
     if existing >= 0:
-        unit_decl_roles[existing] = role
-        unit_decl_short_symbols[existing] = short_symbol
-        unit_decl_underlying_type_tags[existing] = underlying_type_tag
-        unit_decl_alias_ofs[existing] = alias_of
-        unit_decl_legacy_origins[existing] = legacy_origin
+        val same_decl = (
+            unit_decl_roles[existing] == role and
+            unit_decl_short_symbols[existing] == short_symbol and
+            unit_decl_underlying_type_tags[existing] == underlying_type_tag and
+            unit_decl_alias_ofs[existing] == alias_of and
+            unit_decl_legacy_origins[existing] == legacy_origin
+        )
+        if same_decl:
+            return existing
+        # Derived unit parsing registers a placeholder nominal row first and
+        # immediately refines it to role "derived" with its formula.
+        val derived_refinement = (
+            unit_decl_roles[existing] == "nominal" and
+            role == "derived" and
+            unit_decl_underlying_type_tags[existing] == underlying_type_tag and
+            unit_decl_short_symbols[existing] == "" and
+            short_symbol == "" and
+            unit_decl_legacy_origins[existing] == legacy_origin
+        )
+        if derived_refinement:
+            unit_decl_roles[existing] = role
+            unit_decl_alias_ofs[existing] = alias_of
+            return existing
+        if legacy_origin == "newunit" and unit_decl_legacy_origins[existing] == "newunit":
+            unit_decl_roles[existing] = role
+            unit_decl_short_symbols[existing] = short_symbol
+            unit_decl_underlying_type_tags[existing] = underlying_type_tag
+            unit_decl_alias_ofs[existing] = alias_of
+            unit_decl_legacy_origins[existing] = legacy_origin
+            return existing
+        unit_decl_last_conflict_msg = "conflicting unit declaration `" + name + "` in module `" + unit_decl_current_module + "`"
         return existing
     val idx = unit_decl_names.len()
     unit_decl_names.push(name)
@@ -1130,6 +1213,9 @@ pub fn unit_decl_register_origin(name: text, role: text, short_symbol: text, und
     unit_decl_underlying_type_tags.push(underlying_type_tag)
     unit_decl_alias_ofs.push(alias_of)
     unit_decl_legacy_origins.push(legacy_origin)
+    while unit_decl_modules.len() < idx:
+        unit_decl_modules.push("")
+    unit_decl_modules.push(unit_decl_current_module)
     idx
 
 pub fn unit_decl_count() -> i64:
@@ -1858,6 +1944,7 @@ pub fn type_pools_promote_hir_owners() -> bool:
         promoted = _type_pool_promote_root_i64([unit_decl_underlying_type_tags]) and promoted
         promoted = _type_pool_promote_root_text([unit_decl_alias_ofs]) and promoted
         promoted = _type_pool_promote_root_text([unit_decl_legacy_origins]) and promoted
+        promoted = _type_pool_promote_root_text([unit_decl_modules]) and promoted
     promoted = unit_constraint_promote_transient_owner() and promoted
     promoted
 
@@ -2285,6 +2372,10 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
         else:
             rebuilt_modules.push("")
     named_type_modules = rebuilt_modules
+    var rebuilt_unit_modules: [text] = []
+    for _ in 0..unit_decl_names.len():
+        rebuilt_unit_modules.push(unit_decl_current_module)
+    unit_decl_modules = rebuilt_unit_modules
     true
 
 # Live line chunks of this family's CLEAR pools, in dump order (see
@@ -2333,6 +2424,8 @@ pub struct FlatPoolState:
     unit_decl_underlying_type_tags: [i64]
     unit_decl_alias_ofs: [text]
     unit_decl_legacy_origins: [text]
+    unit_decl_modules: [text]
+    unit_decl_current_module: text
     fn_sig_names: [text]
     fn_sig_param_names: [[text]]
     fn_sig_param_types: [[i64]]
@@ -2401,6 +2494,8 @@ pub fn flat_pool_state_take() -> FlatPoolState:
         unit_decl_underlying_type_tags: unit_decl_underlying_type_tags,
         unit_decl_alias_ofs: unit_decl_alias_ofs,
         unit_decl_legacy_origins: unit_decl_legacy_origins,
+        unit_decl_modules: unit_decl_modules,
+        unit_decl_current_module: unit_decl_current_module,
         fn_sig_names: fn_sig_names,
         fn_sig_param_names: fn_sig_param_names,
         fn_sig_param_types: fn_sig_param_types,
@@ -2471,6 +2566,8 @@ pub fn flat_pool_state_install(s: FlatPoolState):
     unit_decl_underlying_type_tags = s.unit_decl_underlying_type_tags
     unit_decl_alias_ofs = s.unit_decl_alias_ofs
     unit_decl_legacy_origins = s.unit_decl_legacy_origins
+    unit_decl_modules = s.unit_decl_modules
+    unit_decl_current_module = s.unit_decl_current_module
     fn_sig_names = s.fn_sig_names
     fn_sig_param_names = s.fn_sig_param_names
     fn_sig_param_types = s.fn_sig_param_types

@@ -58,3 +58,13 @@ fn jit_tuple_len_bounds_an_i64_counter() {
     let source = "fn main() -> i64:\n    val t = (7, 40, 3)\n    val n = t.len()\n    var c = 0\n    var i = 0\n    while i < n:\n        c = c + t[i]\n        i = i + 1\n    c\n";
     assert_eq!(jit_evaluate(source), 50);
 }
+
+/// A tuple reaching `.len()` through an `any` slot or an untyped parameter
+/// takes the runtime-dispatched length, whose inline fast path knew text,
+/// arrays and dicts but answered -1 for a tuple.
+/// Bug: seed_jit_any_typed_tuple_len_returns_minus_one_2026-11-27
+#[test]
+fn jit_tuple_len_through_any_and_untyped_parameter() {
+    let source = "fn count(x) -> i64:\n    x.len()\nfn main() -> i64:\n    val t = (7, 40, 3)\n    val a: any = t\n    a.len() * 100 + count(t) * 10 + count([1, 2])\n";
+    assert_eq!(jit_evaluate(source), 332);
+}

@@ -1,0 +1,48 @@
+"""
+# Native-Build SIMPLE_HIR_CACHE=0 Refusal Specification
+
+**Tracks:** `native_build_hir_cache_0_disables_positional_route_sharding_2026-11-09`
+**Category:** CLI / Native Build
+
+Verifies `native_build_hir_disabled_reason_v1` and `native_build_pool_refusal_message_v1`:
+when `SIMPLE_HIR_CACHE=0` disables HIR sharding, the per-file worker pool refuses
+fail-closed (never silently enabling HIR sharding without cached identities) and
+guides positional and `--entry-closure` callers to either unset `SIMPLE_HIR_CACHE=0`
+or use an explicit cache-off single-process path.
+"""
+
+use std.spec.*
+use app.cli.native_build_main.{
+    native_build_hir_disabled_reason_v1,
+    native_build_pool_refusal_message_v1
+}
+use app.cli.file_worker_pool_refusal.{file_worker_pool_refusal_v1}
+
+describe "native-build HIR cache=0 refusal messaging":
+    it "classifies SIMPLE_HIR_CACHE=0 ahead of shard policy flags":
+        expect(native_build_hir_disabled_reason_v1("0", "", "")).to_equal("SIMPLE_HIR_CACHE=0")
+        expect(native_build_hir_disabled_reason_v1("0", "0", "0")).to_equal("SIMPLE_HIR_CACHE=0")
+        expect(native_build_hir_disabled_reason_v1("", "0", "")).to_equal("SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING")
+        expect(native_build_hir_disabled_reason_v1("", "", "0")).to_equal("SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING")
+        expect(native_build_hir_disabled_reason_v1("1", "1", "1")).to_equal("")
+
+    it "guides positional callers on why HIR cache is required and how to run cache-off":
+        val base_refusal = file_worker_pool_refusal_v1(0, 4, 49251808, 6815744, 9000000, 8, "SIMPLE_HIR_CACHE=0")
+        val msg = native_build_pool_refusal_message_v1(base_refusal, "SIMPLE_HIR_CACHE=0", ["my_entry.spl", "-o", "out.bin"])
+        expect(msg.starts_with(base_refusal)).to_equal(true)
+        expect(msg.contains("SIMPLE_HIR_CACHE=0")).to_equal(true)
+        expect(msg.contains("positional/per-file route requires the HIR cache")).to_equal(true)
+        expect(msg.contains("unset SIMPLE_HIR_CACHE=0")).to_equal(true)
+        expect(msg.contains("SIMPLE_FILE_WORKERS=0 with --entry-closure")).to_equal(true)
+        expect(msg.contains("SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1")).to_equal(true)
+
+    it "labels explicit --entry-closure callers as per-file route":
+        val base_refusal = file_worker_pool_refusal_v1(0, 4, 49251808, 6815744, 9000000, 8, "SIMPLE_HIR_CACHE=0")
+        val msg = native_build_pool_refusal_message_v1(base_refusal, "SIMPLE_HIR_CACHE=0", ["--entry-closure", "--entry", "src/app/cli/main.spl"])
+        expect(msg.contains("the per-file route requires the HIR cache")).to_equal(true)
+        expect(msg.contains("positional/per-file")).to_equal(false)
+
+    it "leaves non-HIR-cache refusals and empty refusals unchanged":
+        expect(native_build_pool_refusal_message_v1("", "SIMPLE_HIR_CACHE=0", ["a.spl"])).to_equal("")
+        val policy_refusal = file_worker_pool_refusal_v1(0, 4, 49251808, 6815744, 9000000, 8, "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING")
+        expect(native_build_pool_refusal_message_v1(policy_refusal, "SIMPLE_PARSE_SHARDING/SIMPLE_HIR_SHARDING", ["a.spl"])).to_equal(policy_refusal)

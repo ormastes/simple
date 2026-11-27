@@ -1751,12 +1751,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_observation_v4_cancel_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_collect_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_ack_collect_value", &[I64, I64], &[I64]),
-    // rt_process_is_running(pid) -> bool (as i64: 0/1)
-    RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
+    // rt_process_is_running(pid) -> bool
+    RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I8]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
     RuntimeFuncSpec::new("rt_process_wait", &[I64, I64], &[I64]),
-    // rt_process_kill(pid) -> bool (as i64: 0/1)
-    RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
+    // rt_process_kill(pid) -> bool
+    RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I8]),
     // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_async_value", &[I64, I64], &[I64]),
@@ -1772,8 +1772,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
-    // rt_process_exists(pid) -> bool (as i64: 0/1)
-    RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
+    // rt_process_exists(pid) -> bool
+    RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I8]),
     // rt_getpid() -> process id
     RuntimeFuncSpec::new("rt_getpid", &[], &[I64]),
     // =========================================================================
@@ -3226,6 +3226,15 @@ mod tests {
         let start = spec_for("rt_process_owned_v3_start_pinned_value").unwrap();
         assert_eq!(start.params, [I64, I64, I64, I64, I64, I64]);
         assert_eq!(start.returns, [I64]);
+    }
+
+    #[test]
+    fn process_bool_sffi_specs_use_i8_return_abi() {
+        for name in ["rt_process_is_running", "rt_process_kill", "rt_process_exists"] {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing process bool spec: {name}"));
+            assert_eq!(spec.params, [I64], "{name} params");
+            assert_eq!(spec.returns, [I8], "{name} must use I8 to match extern \"C\" fn -> bool");
+        }
     }
 
     #[test]

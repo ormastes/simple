@@ -10776,3 +10776,57 @@ fn build_use_map_module_import_keeps_underscore_edged_segments() {
     assert_eq!(use_map.get("n.dotted").map(String::as_str), Some("pkg__p_dot__n__dotted"));
     assert!(use_map.get("m.helper").is_none());
 }
+
+/// The erased bare-`Some` guard and binder name user enums through the same
+/// identity the qualified constructors stamp (`pkg.owner.Opt`), so a native
+/// build refuses `Opt.Nope` and binds `Opt.Some(4)`'s payload.
+/// seed_jit_any_match_bare_some_arm_takes_user_enum_unit_variant_2026-11-27
+#[test]
+fn erased_some_arm_user_enum_identity_survives_runtime_name_qualification() {
+    let source = "enum Opt:\n    Some(i64)\n    Nope\n\nfn g(x) -> i64:\n    match x:\n        Some(v): return v\n        None: return -5\n    -9\n\nfn h(x) -> i64:\n    match x:\n        Some(v): return 1\n        _: return 2\n    -9\n\nfn main() -> i64:\n    g(Opt.Some(4)) * 10 + h(Opt.Nope)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    mir.local_globals.insert("Opt".to_string());
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 42);
+}
+
+/// Same, for a local user `enum Option` (bare id 1 is never re-pointed, but
+/// qualification stamps `pkg.owner.Option`) and a generic Some-owner.
+#[test]
+fn erased_some_arm_binds_user_option_and_generic_owner_after_qualification() {
+    let source = "enum Option:\n    Some(i64)\n    None\n\nenum Bi<T>:\n    Some(T)\n    None\n\nfn g(x) -> i64:\n    match x:\n        Some(v): return v\n        None: return -5\n    -9\n\nfn main() -> i64:\n    val b: Bi<i64> = Bi.Some(7)\n    g(Option::Some(42)) * 10 + g(b)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    for name in ["Option", "Bi"] {
+        mir.local_globals.insert(name.to_string());
+    }
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 427);
+}

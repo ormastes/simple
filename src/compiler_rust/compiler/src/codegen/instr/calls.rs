@@ -15,7 +15,7 @@ use super::core::{compile_builtin_io_call, vreg_is_signed};
 use super::helpers::{
     adapted_call, array_cap_i64, array_items_base, array_len_i64, call_runtime_0, call_runtime_1, call_runtime_2,
     call_runtime_3, create_cstring_constant, decode_byte_from_slot, get_vreg_or_default,
-    inline_runtime_array_len_value, inline_runtime_len_value, store_array_len, string_cp_len_ref,
+    inline_runtime_array_len_value, inline_runtime_len_value, store_array_len, string_cp_len_ref, tuple_len_ref,
 };
 use super::{InstrContext, InstrResult};
 
@@ -648,7 +648,8 @@ fn compile_inline_len<M: Module>(
         inline_runtime_array_len_value(builder, value, ctx.fam_arrays)
     } else {
         let cp_len = string_cp_len_ref(ctx, builder);
-        inline_runtime_len_value(builder, value, ctx.baremetal, ctx.fam_arrays, cp_len)
+        let tuple_len = tuple_len_ref(ctx, builder);
+        inline_runtime_len_value(builder, value, ctx.baremetal, ctx.fam_arrays, cp_len, tuple_len)
     };
     ctx.vreg_values.insert(*dest, result);
     Ok(true)
