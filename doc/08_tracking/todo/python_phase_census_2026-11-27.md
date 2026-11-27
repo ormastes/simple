@@ -23,6 +23,13 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 - PERF_LANE: 6 (owned by the perf lane)
 - PRE_P2_ONLY: 20
 
+## Reconciliation (base `.py` files vs table rows, 2026-11-28)
+
+`git ls-tree -r origin/release/1.0.0 | grep '\.py$'` = 122 files; table = 104 rows. 122 - 21 + 3 = 104.
+
+- 21 base files not in the table, all out of scope per the Scope line: 20 under `src/compiler_rust/vendor/**` (criterion, encoding_rs, matrixmultiply, nanorand, tch x10, unicode-normalization, unicode-segmentation x2, unicode-width, unicode-width-0.1.14, walkdir) and 1 under `test/05_perf/fixtures/**` (`interpreter_startup/hello.py`). No uncovered file, so no row added.
+- 3 table rows not in the base `.py` list: `scripts/check/sdk-observer-evidence-v1.py` and `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` (PORTED, `.py` already deleted on base, rows kept as history) and `build/review/p3fix-caret2-20261111-logs/devhub_interpreter_driver.py` (not tracked on base; review-log artifact row kept from the original census).
+
 ## Files
 
 | file | class | callers | note |
