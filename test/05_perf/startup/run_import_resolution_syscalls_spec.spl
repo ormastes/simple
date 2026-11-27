@@ -12,6 +12,9 @@ Deterministic guard (counts, not wall time -- the shared host is too noisy for
 a wall budget): `SIMPLE_PROFILE=1` prints
 `[resolve-stats] ... stat_misses=N stat_syscalls=M probe_dir_listings=L`.
 Fails closed when the line is missing or the closure is implausibly small.
+`shared_parses=` guards the single-parse fix on every platform, and the
+`[rust-jit] reachability` line pins that AST pruning
+(`mir/ast_reachability.rs`) never removes a function MIR would keep.
 """
 
 use std.spec.*
@@ -19,13 +22,19 @@ use std.io_runtime.{process_run, host_os}
 
 val FIXTURE: text = "test/05_perf/startup/run_import_probe_fixture.spl"
 
-fn field(report: text, key: text) -> i64:
+fn line_field(report: text, prefix: text, key: text) -> i64:
     for line in report.split("\n"):
-        if line.starts_with("[resolve-stats]"):
+        if line.starts_with(prefix):
             for tok in line.split(" "):
                 if tok.starts_with(key + "="):
                     return tok.substring(key.len() + 1, tok.len()).trim().to_i64()
     -1
+
+fn field(report: text, key: text) -> i64:
+    line_field(report, "[resolve-stats]", key)
+
+fn reach_field(report: text, key: text) -> i64:
+    line_field(report, "[rust-jit] reachability", key)
 
 describe "run import resolution filesystem probes":
     it "answers most candidate misses without a stat syscall on Windows":
@@ -46,3 +55,27 @@ describe "run import resolution filesystem probes":
         else:
             expect(syscalls).to_equal(misses)
             expect(listings).to_equal(0)
+
+    it "parses every imported module once on every platform":
+        # The unprovided-use check reuses the loader's seeded AST; a regression
+        # back to a second parse per module shows up as shared_parses > 0.
+        val r = process_run("sh", ["-c", "SIMPLE_PROFILE=1 \"${SIMPLE_BIN:-bin/simple}\" run " + FIXTURE + " 2>&1"])
+        val parses = field(r.0, "shared_parses")
+        print "[perf] run import shared parses={parses}"
+        expect(parses).to_equal(0)
+
+    it "AST pruning drops imported bodies without changing MIR reachability":
+        val base = "SIMPLE_NATIVE_BUILD_RUST_TRACE=1 \"${SIMPLE_BIN:-bin/simple}\" run " + FIXTURE + " 2>&1"
+        val off = process_run("sh", ["-c", "SIMPLE_JIT_AST_PRUNE=0 " + base]).0
+        val on = process_run("sh", ["-c", base]).0
+        val off_fns = reach_field(off, "functions")
+        val on_fns = reach_field(on, "functions")
+        val off_reach = reach_field(off, "reachable")
+        val on_reach = reach_field(on, "reachable")
+        print "[perf] mir functions off={off_fns} on={on_fns} reachable off={off_reach} on={on_reach}"
+        expect(off_fns > 0).to_equal(true)
+        # Pruned something...
+        expect(on_fns < off_fns).to_equal(true)
+        # ...and nothing MIR reachability would have kept.
+        expect(off_reach > 0).to_equal(true)
+        expect(on_reach).to_equal(off_reach)

@@ -43,7 +43,7 @@ pub fn print_resolve_stats() {
         let dir_lists = DIR_LIST_CALLS.load(Ordering::Relaxed);
         let hit_rate = if calls > 0 { (hits * 100) / calls } else { 0 };
         eprintln!(
-            "[resolve-stats] calls={} cache_hits={} hit_rate={}% dir_list={} stat_calls={} stat_misses={} stat_syscalls={} probe_dir_listings={}",
+            "[resolve-stats] calls={} cache_hits={} hit_rate={}% dir_list={} stat_calls={} stat_misses={} stat_syscalls={} probe_dir_listings={} shared_parses={}",
             calls,
             hits,
             hit_rate,
@@ -51,7 +51,8 @@ pub fn print_resolve_stats() {
             STAT_CALLS.load(Ordering::Relaxed),
             STAT_MISSES.load(Ordering::Relaxed),
             crate::fs_probe::METADATA_CALLS.load(Ordering::Relaxed),
-            crate::fs_probe::DIR_LISTINGS.load(Ordering::Relaxed)
+            crate::fs_probe::DIR_LISTINGS.load(Ordering::Relaxed),
+            super::module_cache::SHARED_SOURCE_PARSES.load(Ordering::Relaxed)
         );
     }
 }
