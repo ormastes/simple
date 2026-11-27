@@ -2029,7 +2029,7 @@ impl MirLowering:
         self.builder = b_d
         if val default_symbol = default_binding:
             if default_symbol == None:
-                self.error("match default binding has no resolved symbol", None)
+                self.error_fatal("match default binding has no resolved symbol", None)
             else:
                 self.bind_local(default_symbol.id, scrut_local)
         val def_result = self.lower_block_expected(default_body, expected_type)
@@ -2180,7 +2180,7 @@ impl MirLowering:
         # binding's symbol to the scrutinee local before lowering.
         if val default_symbol = default_binding:
             if default_symbol == None:
-                self.error("match default binding has no resolved symbol", None)
+                self.error_fatal("match default binding has no resolved symbol", None)
             else:
                 self.bind_local(default_symbol.id, scrut_local)
         val def_result = self.lower_block_expected(default_body, expected_type)
@@ -3688,7 +3688,7 @@ impl MirLowering:
                 return elookup
             val known_variants = self.enum_variant_names(elookup)
             val known_text = known_variants.join(", ")
-            self.error("enum match: nested pattern enum '{elookup}' has no variant '{variant}' (known variants: {known_text})", Some(span))
+            self.error_fatal("enum match: nested pattern enum '{elookup}' has no variant '{variant}' (known variants: {known_text})", Some(span))
             return ""
         # Scan the QUALIFIED keyspace so the owner count is truthful (see
         # `variant_owner_keys`). Returns a runtime_name; callers that need the
@@ -3706,7 +3706,7 @@ impl MirLowering:
         if owner_count > 1:
             self.error_fatal("enum match: bare nested variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(span))
         else:
-            self.error("enum match: unknown nested variant '{variant}' (no registered enum declares it)", Some(span))
+            self.error_fatal("enum match: unknown nested variant '{variant}' (no registered enum declares it)", Some(span))
         ""
 
     me emit_deep_literal_test(value_local: LocalId, lit_expr: HirExpr, next_block: BlockId, span: Span, typed_value: MirType? = None, nil_optional_slot: bool = false):
@@ -3725,7 +3725,7 @@ impl MirLowering:
             case NilLit:
                 if not nil_optional_slot:
                     self.builder = bt
-                    self.error("enum match: nil sub-pattern requires a declared optional payload slot", Some(span))
+                    self.error_fatal("enum match: nil sub-pattern requires a declared optional payload slot", Some(span))
                     return
                 # Same boxed/flat Optional presence predicate as normal == nil.
                 # The declared slot proof excludes raw scalar bits such as 3.
@@ -3738,7 +3738,7 @@ impl MirLowering:
                     cmp_local = none_local
                 else:
                     self.builder = bt
-                    self.error("enum match: nil sub-pattern presence predicate has no result", Some(span))
+                    self.error_fatal("enum match: nil sub-pattern presence predicate has no result", Some(span))
                     return
             case IntLit(int_want, _):
                 var ik = LocalId(id: -1)
@@ -3804,7 +3804,7 @@ impl MirLowering:
                 supported = false
         if not supported:
             self.builder = bt
-            self.error("enum match: unsupported literal kind inside an enum payload (int/bool/text literal sub-patterns are lowered here) — unsupported construct", Some(span))
+            self.error_fatal("enum match: unsupported literal kind inside an enum payload (int/bool/text literal sub-patterns are lowered here) — unsupported construct", Some(span))
             return
         val lit_ok_block = bt.new_block(Some("ematch_deep_ok"))
         bt.terminate_if(mir_operand_copy(cmp_local), lit_ok_block, next_block)
@@ -3897,7 +3897,7 @@ impl MirLowering:
                 # native word storage; it is not the multi-argument enum box.
                 # Reuse the existing typed pointer recovery and GetField path.
                 if semantic_capture < 0 or semantic_node < 0:
-                    self.error("enum match: nested tuple pattern requires retained declared tuple authority", Some(pat.span))
+                    self.error_fatal("enum match: nested tuple pattern requires retained declared tuple authority", Some(pat.span))
                     return
                 val node = self.enum_semantic_captures[semantic_capture].semantic.pattern_nodes[semantic_node]
                 val tuple_carrier = self.enum_semantic_tuple_carrier_v1(node.expected_type, 0)
@@ -3928,7 +3928,7 @@ impl MirLowering:
                 # payload (depth-1 Tuple/Struct are flattened at HIR by
                 # flatten_enum_match_arm and never reach here), Range, Or,
                 # Error: still unsupported — loud, never an always-match.
-                self.error("enum match: unsupported nested sub-pattern kind inside an enum payload (nested enum variants, int/bool/text literals, bindings and wildcards are lowered here) — unsupported construct", Some(pat.span))
+                self.error_fatal("enum match: unsupported nested sub-pattern kind inside an enum payload (nested enum variants, int/bool/text literals, bindings and wildcards are lowered here) — unsupported construct", Some(pat.span))
 
     me emit_enum_payload_deep(enum_local: LocalId, payload: HirPatternPayload?, payload_fn: text, next_block: BlockId, top_level: bool, span: Span, slot_owner: text, slot_variant: text, semantic_capture: i64 = -1, semantic_node: i64 = -1, subject_payload_owner: text = "", subject_payload_optional: bool = false, slot_enum_type: HirType? = None, subject_payload_type: HirType? = None):
         """Runtime tests + nested binds for the payload sub-patterns of one
@@ -4323,7 +4323,7 @@ impl MirLowering:
                             v_ok = false
                 case _: ()
             if not v_ok:
-                self.error("B5b Phase 2 not yet implemented: guarded match with an arm that is not an int literal, binding or wildcard", Some(v_arm.pattern.span))
+                self.error_fatal("B5b Phase 2 not yet implemented: guarded match with an arm that is not an int literal, binding or wildcard", Some(v_arm.pattern.span))
                 var b_rej = self.builder
                 val t_rej = b_rej.new_temp(MirType.unit())
                 self.builder = b_rej
@@ -4881,7 +4881,7 @@ impl MirLowering:
                 case Enum(etype, variant, epayload):
                     val pattern_owner = self.enum_match_type_owner_key(etype)
                     if scrut_enum_lookup != "" and pattern_owner != "" and pattern_owner != scrut_enum_lookup:
-                        self.error(
+                        self.error_fatal(
                             "enum match: pattern owner '{pattern_owner}' does not match subject owner '{scrut_enum_lookup}'",
                             Some(arm.pattern.span)
                         )
@@ -4934,7 +4934,7 @@ impl MirLowering:
                         # compile error instead of a silent wrong-enum borrow.
                         val known_variants = self.enum_variant_names(lookup_key)
                         val known_text = known_variants.join(", ")
-                        self.error("enum match: '{enum_name}' has no variant '{variant}' (known variants: {known_text}); function={self.mir_tag_probe_active_function} module={self.current_module_id} subject_owner={scrut_enum_lookup} subject_symbol={scrut_enum_symbol_id} subject_local={scrut_local.id} subject_at={scrutinee.span.file}:{scrutinee.span.line}:{scrutinee.span.col}", Some(arm.pattern.span))
+                        self.error_fatal("enum match: '{enum_name}' has no variant '{variant}' (known variants: {known_text}); function={self.mir_tag_probe_active_function} module={self.current_module_id} subject_owner={scrut_enum_lookup} subject_symbol={scrut_enum_symbol_id} subject_local={scrut_local.id} subject_at={scrutinee.span.file}:{scrutinee.span.line}:{scrutinee.span.col}", Some(arm.pattern.span))
                     elif d < 0 and scrut_enum_lookup != "" and self.enum_variant_discriminant(scrut_enum_lookup, variant) >= 0:
                         # Bare arm, scrutinee type known: its enum owns the
                         # variant, whatever other enums also declare it.
@@ -5003,7 +5003,7 @@ impl MirLowering:
                             val subject_hint = self.enum_match_ambiguity_subject_hint(scrutinee, scrutinee_enum_type)
                             self.error_fatal("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}; {subject_hint}", Some(arm.pattern.span))
                         else:
-                            self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
+                            self.error_fatal("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
                     enum_discs = enum_discs.push(d)
                     enum_binds = enum_binds.push(enum_pat_binding_syms(epayload))
                     enum_bind_pos = enum_bind_pos.push(enum_pat_binding_positions(epayload))
@@ -5029,7 +5029,7 @@ impl MirLowering:
                             val prev_shape = shared_bind_shape[tc_id]
                             if prev_shape != "" and tc_shape != "" and prev_shape != tc_shape:
                                 val tc_name = self.symbols.symbol_name_scalar_raw(tc_id)
-                                self.error("enum match: or-pattern binding '{tc_name}' has type {prev_shape} in {shared_bind_variant[tc_id]} but {tc_shape} in {variant}; every alternative must bind it with the same type", Some(arm.pattern.span))
+                                self.error_fatal("enum match: or-pattern binding '{tc_name}' has type {prev_shape} in {shared_bind_variant[tc_id]} but {tc_shape} in {variant}; every alternative must bind it with the same type", Some(arm.pattern.span))
                             elif prev_shape == "":
                                 shared_bind_shape[tc_id] = tc_shape
                                 shared_bind_variant[tc_id] = variant
@@ -5100,7 +5100,7 @@ impl MirLowering:
                         case HirExprKind.NilLit: nil_arm = true
                         case _: ()
                     if not nil_arm:
-                        self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
+                        self.error_fatal("enum match: unsupported arm pattern", Some(arm.pattern.span))
                     else:
                         val nil_lookup_key = if enum_key != "": enum_key else: enum_name
                         var nil_d: i64 = -1
@@ -5119,7 +5119,7 @@ impl MirLowering:
                                 if enum_name == "":
                                     enum_name = self.enum_bare_of(none_owner)
                         if nil_d < 0:
-                            self.error("enum match: `case nil` arm has no None variant on enum '{enum_name}'", Some(arm.pattern.span))
+                            self.error_fatal("enum match: `case nil` arm has no None variant on enum '{enum_name}'", Some(arm.pattern.span))
                         val nil_binds: [SymbolId] = []
                         val nil_bind_pos: [i64] = []
                         enum_discs = enum_discs.push(nil_d)
@@ -5147,7 +5147,7 @@ impl MirLowering:
                         unsupported_span = arm.span
                     if unsupported_span.file == "" and unsupported_span.line <= 0:
                         unsupported_span = scrutinee.span
-                    self.error("enum match: unsupported arm pattern ({unsupported_kind}; module {self.current_module_id})", Some(unsupported_span))
+                    self.error_fatal("enum match: unsupported arm pattern ({unsupported_kind}; module {self.current_module_id})", Some(unsupported_span))
             ai = ai + 1
 
         # ---- Option dual-ABI normalization (bug: Dict.get / any raw-or-nil
@@ -5911,7 +5911,7 @@ impl MirLowering:
                     gd_precedes_enum_arm = true
             val gd_arm: HirMatchArm = arms[gd_idx]
             if gd_precedes_enum_arm:
-                self.error("enum match: a guarded catch-all arm must come after every variant arm", Some(gd_arm.span))
+                self.error_fatal("enum match: a guarded catch-all arm must come after every variant arm", Some(gd_arm.span))
             self.enum_semantic_resume_v1(enum_semantic_capture)
             self.enum_semantic_start_pattern_v1(enum_semantic_capture, gd_arm.pattern)
             if enum_semantic_capture >= 0 and self.builder.enum_semantic_node < 0:
@@ -6677,7 +6677,7 @@ impl MirLowering:
             self.error_fatal("enum construction: unregistered declaration '{enum_qkey}'", Some(type_.span))
             return self.builder.emit_const_int(0)
         if not self.enum_has_variants(enum_key):
-            self.error("enum construction: unregistered enum '{enum_name}'", None)
+            self.error_fatal("enum construction: unregistered enum '{enum_name}'", None)
             var be = self.builder
             val te = be.emit_const_int(0)
             self.builder = be
