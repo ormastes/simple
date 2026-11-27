@@ -66,10 +66,12 @@ why it looked like a lowering bug and why the interpreter was right.
 - Pure-Simple backend: already safe. Cranelift adapter re-extends narrow
   import results by declared return (`cl_import_result_narrow_plan`), and
   LLVM declares externs with their declared `i1` return.
-- Named gap (not decided here): `rt_terminal_{enable,disable}_raw_mode`,
-  `rt_terminal_is_tty`, `rt_terminal_stdout_is_tty` return `bool` in C but a
-  tagged `RuntimeValue` from the Rust provider, so neither I8 nor I64 is
-  right for both lanes. They are a listed exception in the guard.
+- Terminal lane gap closed (2026-11-28, owner decision): the core-C native
+  link uses `runtime_terminal.c` (C `bool`), simple_core's twins and every
+  `.spl` caller are `-> bool`. Only the Rust provider was a tagged
+  `RuntimeValue`. Tagging C would have broken the raw-bool callers, so the
+  Rust provider now returns plain `bool` and all four specs are I8.
+  `runtime_h_bool_returns_use_i8_abi` has no exceptions.
 
 ## Remaining
 

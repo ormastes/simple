@@ -2215,9 +2215,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_term_enable_ansi", &[], &[I64]), // () -> RuntimeValue (bool)
     RuntimeFuncSpec::new("rt_term_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i32, i32)
     RuntimeFuncSpec::new("rt_terminal_get_size", &[], &[I64]), // () -> RuntimeValue (tuple of i64, i64)
-    RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
-    RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I64]), // () -> RuntimeValue (bool)
-    RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_enable_raw_mode", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
+    RuntimeFuncSpec::new("rt_terminal_disable_raw_mode", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
+    RuntimeFuncSpec::new("rt_terminal_is_tty", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
     RuntimeFuncSpec::new("rt_terminal_is_tty_handle", &[I64], &[I8]), // (fd) -> C bool
     RuntimeFuncSpec::new("rt_terminal_signal_scope_begin", &[], &[I64]), // () -> opaque handle
     RuntimeFuncSpec::new("rt_terminal_read_byte_interruptible", &[I64], &[I64]), // handle -> byte/outcome
@@ -2645,7 +2645,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_trim_start_matches", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_zfill", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_take", &[I64, I64], &[I64]),
-    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I64]), // () -> RuntimeValue (bool)
+    RuntimeFuncSpec::new("rt_terminal_stdout_is_tty", &[], &[I8]), // () -> C bool (C, Rust and simple_core lanes agree)
     RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_xxh3_128_text", &[I64], &[I64]), // text -> 32-hex XXH3-128
@@ -3251,27 +3251,18 @@ mod tests {
     /// caller's saved RBX bits 8..31 leaked into the result and
     /// `not process_is_running(pid)` read false for an exited child
     /// (doc/08_tracking/bug/seed_native_inline_if_else_or_chain_false_2026-11-27.md).
-    /// Every `bool` prototype in runtime.h with a spec must use I8 unless it is
-    /// a named exception below. Parser limit: only single-line prototypes that
+    /// Every `bool` prototype in runtime.h with a spec must use I8, with no
+    /// exceptions: the Rust and simple_core twins return plain `bool` too.
+    /// Parser limit: only single-line prototypes that
     /// START with `bool` are seen (no `extern`/`static inline`/macro prefix, no
     /// split declarations) -- runtime.h has none of those forms today.
     #[test]
     fn runtime_h_bool_returns_use_i8_abi() {
-        // Rust provider returns a tagged RuntimeValue while the C runtime
-        // returns `bool`, so neither I8 nor I64 is right for both lanes. Named
-        // gap in the bug doc above; not decided here.
-        const LANE_CONFLICT: &[&str] = &[
-            "rt_terminal_disable_raw_mode",
-            "rt_terminal_enable_raw_mode",
-            "rt_terminal_is_tty",
-            "rt_terminal_stdout_is_tty",
-        ];
         let header_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/runtime.h");
         let header = std::fs::read_to_string(&header_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", header_path.display()));
         let mut checked = 0usize;
         let mut wrong = Vec::new();
-        let mut stale = Vec::new();
         for line in header.lines() {
             let Some(rest) = line.trim_start().strip_prefix("bool") else {
                 continue;
@@ -3285,11 +3276,8 @@ mod tests {
             }
             let Some(spec) = spec_for(name) else { continue };
             checked += 1;
-            let is_i8 = spec.returns == [I8];
-            match (LANE_CONFLICT.contains(&name), is_i8) {
-                (false, false) => wrong.push(format!("{name} returns {:?}", spec.returns)),
-                (true, true) => stale.push(name.to_string()),
-                _ => {}
+            if spec.returns != [I8] {
+                wrong.push(format!("{name} returns {:?}", spec.returns));
             }
         }
         assert!(checked > 0, "no `bool rt_*` prototype in runtime.h matched a spec");
@@ -3297,7 +3285,6 @@ mod tests {
             wrong.is_empty(),
             "C `bool` runtime imports must declare an I8 return: {wrong:?}"
         );
-        assert!(stale.is_empty(), "LANE_CONFLICT entries now I8; remove them: {stale:?}");
     }
 
     #[test]
