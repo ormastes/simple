@@ -75,3 +75,5 @@ mod nogc_sigil_new_test;
 mod inline_if_as_cast_else_test;
 #[cfg(test)]
 mod if_expr_newline_arm_trailing_else_test;
+#[cfg(test)]
+mod elif_inline_assign_test;
