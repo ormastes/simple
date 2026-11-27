@@ -59,6 +59,10 @@ fn weak_expr(expr: &HirExpr) -> Option<bool> {
         HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
         HirExprKind::Block(stmts) => weak_stmts(stmts),
         HirExprKind::LetIn { body, .. } => weak_expr(body),
+        // `Some([])` is as weak as `[]`: the Option wrapper adds no element evidence.
+        HirExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "Some") => {
+            weak_expr(&args[0])
+        }
         HirExprKind::If {
             then_branch,
             else_branch: Some(else_branch),
@@ -138,6 +142,10 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
 fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayRepeat { .. } => true,
+        // `Some([x; 0])` keeps the repeat evidence through the Option wrapper.
+        Expr::Call { callee, args, .. } if args.len() == 1 && matches!(callee.as_ref(), Expr::Identifier(n) if n == "Some") => {
+            ast_expr_tail_is_array_repeat(&args[0].value)
+        }
         Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
         Expr::If {
             then_branch,
@@ -307,6 +315,9 @@ impl Lowerer {
     /// Both types are arrays, or both are dicts: only then may a weak empty
     /// literal defer to its sibling (an unrelated aggregate keeps the default).
     fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        if let (Some(pa), Some(pb)) = (self.result_like_payload_type(a), self.result_like_payload_type(b)) {
+            return self.same_collection_kind(pa, pb);
+        }
         matches!(
             (self.module.types.get(a), self.module.types.get(b)),
             (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))

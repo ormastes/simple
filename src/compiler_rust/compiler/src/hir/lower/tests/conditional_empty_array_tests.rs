@@ -288,3 +288,51 @@ fn weak_empty_rule_ignores_ill_kinded_and_explicit_repeat_siblings() {
         assert_eq!(element, TypeId::I64, "{body}");
     }
 }
+
+fn local_type<'a>(module: &'a crate::hir::HirModule, name: &str) -> &'a HirType {
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let local = function.locals.iter().find(|l| l.name == name).unwrap();
+    module.types.get(local.ty).unwrap()
+}
+
+fn option_payload<'a>(module: &'a crate::hir::HirModule, ty: &'a HirType) -> &'a HirType {
+    let HirType::Enum { name, variants, .. } = ty else { panic!("expected Option enum, got {ty:?}") };
+    assert_eq!(name, "Option");
+    let (_, Some(payload)) = variants.iter().find(|(v, _)| v == "Some").unwrap() else { panic!("Some has no payload") };
+    module.types.get(payload[0]).unwrap()
+}
+
+#[test]
+fn option_wrapped_empty_array_defers_to_concrete_sibling_in_if_and_match() {
+    let if_forms = ["if c: Some([]) else: Some(xs)", "if c: Some(xs) else: Some([])"];
+    let match_forms = [
+        "match k:\n        case 0: Some([])\n        case _: Some(xs)",
+        "match k:\n        case 0: Some(xs)\n        case _: Some([])",
+    ];
+    for expression in if_forms.iter().chain(match_forms.iter()) {
+        let source = format!(
+            "fn probe(xs: [f64], c: bool, k: i64) -> f64:\n    val r = {expression}\n    match r:\n        case Some(v): v[0]\n        case None: 0.0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let r_ty = local_type(&module, "r");
+        let HirType::Array { element, .. } = option_payload(&module, r_ty) else { panic!("{expression}: payload is not an array") };
+        assert_eq!(*element, TypeId::F64, "{expression}: join must keep the concrete sibling's element type");
+        let HirType::Array { element, .. } = local_type(&module, "v") else { panic!("{expression}: v is not an array") };
+        assert_eq!(*element, TypeId::F64, "{expression}");
+    }
+}
+
+#[test]
+fn option_wrapped_arrays_do_not_defer_when_not_weak_or_not_collections() {
+    // `Some([x; 0])` is an explicit repeat (never weak); `Some([])` vs `Some([])` and
+    // `Some([])` vs `Some(5)` keep the first arm's own type.
+    for expression in ["if c: Some([\"t\"; 0]) else: Some(xs)", "if c: Some([]) else: Some(5)"] {
+        let source = format!(
+            "fn probe(xs: [f64], c: bool) -> i64:\n    val r = {expression}\n    0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let r_ty = local_type(&module, "r");
+        let HirType::Array { element, .. } = option_payload(&module, r_ty) else { panic!("{expression}: payload is not an array") };
+        assert_ne!(*element, TypeId::F64, "{expression}: must not adopt the sibling element type");
+    }
+}

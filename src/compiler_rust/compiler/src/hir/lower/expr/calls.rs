@@ -89,7 +89,7 @@ impl Lowerer {
                     };
                     let ty = match (name.as_str(), payload_ty) {
                         ("Some", Some(payload_ty))
-                            if matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. })) =>
+                            if matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. } | HirType::Array { .. } | HirType::Dict { .. })) =>
                         {
                             self.module.types.register(HirType::Enum {
                                 name: "Option".to_string(),
