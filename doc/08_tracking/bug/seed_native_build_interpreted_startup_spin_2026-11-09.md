@@ -1,7 +1,7 @@
 # Seed native-build interpreted startup spin — 2026-11-09
 
 Bug id: `seed_native_build_interpreted_startup_spin_2026-11-09`
-Severity: P1 · Status: BLOCKED 2026-11-11 (lane p3-seedA) — persists at HEAD,
+Severity: P1 · Status: fix-implemented-verification-pending (`waiting-for:` aarch64 cold-cache `native-build` repro; prior 2026-11-11 `BLOCKED` note below) — persists at HEAD,
   root cause locus confirmed to be the seed-INTERPRETED pure-Simple driver
   (`src/lib/scv/compile_source_inventory_*.spl` + the parse-closure publication
   walk), NOT a `src/compiler_rust` defect; closing it needs the original aarch64
@@ -224,4 +224,21 @@ aarch64 cold-startup closure requirement):
    `examples/01_getting_started/hello_native.spl` completes (or is proven to
    make bounded progress) with the fix, with RSS/cache-object evidence.
 
-Disposition: BLOCKED. Header flipped open → BLOCKED 2026-11-11 (lane p3-seedA).
+Disposition: fix-implemented-verification-pending (`waiting-for:` aarch64 cold-cache `native-build` repro on `examples/01_getting_started/hello_native.spl`). Note: prior 2026-11-11 `BLOCKED` disposition (lane p3-seedA) superseded by 2026-11-27 fixes below.
+
+## 2026-11-27 Fix Implemented (`fix-implemented-verification-pending`)
+
+Micro-benchmarks in `simple.exe --mode=interpreter` identified and eliminated pure-CPU startup hot spots in SCV cold initialization, encode/decode, visibility validation, and parse-closure publication:
+- `src/lib/scv/compile_source_inventory_core.spl`:
+  - `compile_source_inventory_identity_cmp_v1`: replaced byte-by-byte `byte_at` loop with native UTF-8 string comparison (`if left == right: 0 elif left < right: -1 else: 1`; measured 33x speedup in 5000x benchmark).
+  - `compile_source_inventory_digest_valid_v1` & `src/lib/common/build_manager/contracts.spl` `builder_digest_valid_v1`: fast-pathed empty SHA-256 and replaced 64-iteration byte loops / `[u8]` allocations with `byte_len() == 64` + lowercase hex strip (measured 6.6x speedup in 5000x benchmark).
+  - `compile_source_inventory_path_valid_v1`: guarded `value.split("/")` with `value.contains("..")` so clean paths avoid array allocation.
+  - `compile_source_inventory_whole_text_canonical_v1` & `compile_source_inventory_whole_text_rows_v1`: replaced per-comment/per-match `split("\n")` / `join("\n")` allocations with `index_of("\n")` + `substring`.
+  - `compile_source_inventory_initial_events_v1`, `compile_source_inventory_encode_v1`, `compile_source_inventory_sort_v1`, `src/lib/scv/compile_source_inventory.spl` (`decode_content_v1`, `snapshot_rows_v1`), and `src/app/compiler_entrypoint/inventory_events.spl` (`_compiler_inventory_event_for_path_cost_v1` + cold-init loop): avoided per-entry `transient_scope_begin`/`end` churn, avoided 7-element array joins per row, and replaced value-copying `arr = arr.push(...)` reassignments in hot loops with in-place `.push(...)`.
+- `src/compiler/00.common/cache/visibility_manifest_read_v1.spl`, `src/app/io/_CliCompile/native_build_closure.spl`, `src/compiler/80.driver/driver_source_pipeline_loading.spl`:
+  - Replaced byte-by-byte `visibility_manifest_path_valid_v1` / `visibility_manifest_parent_v1` loops with native string checks / `rfind("/")` (measured 13.2x speedup in 2000x benchmark).
+  - Added `visibility_manifest_roots_valid_v1` and `visibility_manifest_reads_prevalidated_v1` so BFS/loader loops validate `snapshot_root` and `roots` once instead of re-validating every root on every file.
+- `src/compiler/80.driver/driver_build/native_entry_closure_owner.spl`: eliminated duplicate full-manifest `split("\n")` and second Dict build in `native_entry_closure_admit_v1`.
+- Periodic progress heartbeats added unconditionally for large cold batches: `[scv] cold-init scan progress`, `[scv] cold-apply start/progress/done`, `[scv] decode progress`, and `[native-build] closure progress` (every 500 modules).
+- Verified with unit/micro-benchmark specs in `simple.exe --mode=interpreter`: `test/01_unit/lib/scv/compile_source_inventory_startup_perf_spec.spl` (6/6), `test/01_unit/compiler/driver/visibility_manifest_read_v1_spec.spl` (10/10), `test/01_unit/app/compiler_entrypoint/entry_closure_staged_selection_spec.spl` (3/3), `test/01_unit/lib/scv/compile_source_inventory_validation_scratch_spec.spl` (8/8).
+- **waiting-for:** original aarch64 cold-cache `native-build` repro of `examples/01_getting_started/hello_native.spl` with RSS/cache-object evidence before marking closed.

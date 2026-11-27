@@ -10,7 +10,8 @@ use std.io_runtime.{time_now_monotonic_ms}
 use std.nogc_sync_mut.io.process_ops.{process_wait, process_kill_tree, process_is_running}
 use compiler.driver.driver_build.build_outcome.{
     BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
-    build_outcome_kind_label}
+    build_outcome_kind_label, build_outcome_capture_worker_stderr_v1,
+    build_outcome_unit_attribution_v1}
 
 @unsafe(reason: "native CPU-count ABI", capabilities: [ffi])
 extern fn spl_thread_cpu_count() -> i64
@@ -480,6 +481,62 @@ impl ParallelBuilder:
     me add_unit(path: text, dependencies: [i64]) -> i64:
         self.graph.add_unit(path, dependencies)
 
+    # Shared result accounting and diagnostic capture between `--threads 1`
+    # in-process compilation and batch compilation so both paths emit
+    # identical module attribution and capture failure details in `diagnostics/`.
+    me _record_compile_outcome(build_unit: BuildUnit, result: Result<text, text>,
+                               errors: [(text, text)], outputs: [text]) -> ([(text, text)], [text]):
+        var next_errors = errors
+        var next_outputs = outputs
+        match result:
+            case Ok(output):
+                var collect_error: text = ""
+                # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
+                if self.has_owner_collect:
+                    # Bind the closure-valued field to a local before
+                    # calling it. Invoking the field directly on the
+                    # receiver is resolved as a METHOD call on
+                    # ParallelBuilder and fails the multi-module native
+                    # build on both backends with "method
+                    # `owner_collect_fn` not found on class
+                    # `ParallelBuilder`". See
+                    # doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
+                    val owner_collect = self.owner_collect_fn
+                    collect_error = owner_collect(build_unit.path, output)
+                if collect_error != "":
+                    val diag_path = build_outcome_capture_worker_stderr_v1(
+                        build_unit.path, build_unit.id, 1, false, collect_error, "")
+                    eprint(build_outcome_unit_attribution_v1(
+                        build_unit.id, build_unit.path, 1, false, diag_path, collect_error))
+                    self.graph.mark_failed(build_unit.id, collect_error)
+                    next_errors = next_errors.push((build_unit.path, collect_error))
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed,
+                        failed: self.stats.failed + 1,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+                else:
+                    self.graph.mark_completed(build_unit.id, Some(output))
+                    next_outputs = next_outputs.push(output)
+                    self.stats = BuildStats(total_units: self.stats.total_units,
+                        completed: self.stats.completed + 1,
+                        failed: self.stats.failed,
+                        skipped: self.stats.skipped,
+                        parallel_batches: self.stats.parallel_batches)
+            case Err(msg):
+                val diag_path = build_outcome_capture_worker_stderr_v1(
+                    build_unit.path, build_unit.id, 1, false, msg, "")
+                eprint(build_outcome_unit_attribution_v1(
+                    build_unit.id, build_unit.path, 1, false, diag_path, msg))
+                self.graph.mark_failed(build_unit.id, msg)
+                next_errors = next_errors.push((build_unit.path, msg))
+                self.stats = BuildStats(total_units: self.stats.total_units,
+                    completed: self.stats.completed,
+                    failed: self.stats.failed + 1,
+                    skipped: self.stats.skipped,
+                    parallel_batches: self.stats.parallel_batches)
+        (next_errors, next_outputs)
+
     me build(compile_fn: fn(text) -> Result<text, text>) -> BuildResult:
         """Execute the build using the provided compile function.
 
@@ -533,45 +590,9 @@ impl ParallelBuilder:
 
                 self.graph.mark_in_progress(id)
                 val result = compile_fn(build_unit.path)
-                match result:
-                    case Ok(output):
-                        var collect_error: text = ""
-                        # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
-                        if self.has_owner_collect:
-                            # Bind the closure-valued field to a local before
-                            # calling it. Invoking the field directly on the
-                            # receiver is resolved as a METHOD call on
-                            # ParallelBuilder and fails the multi-module native
-                            # build on both backends with "method
-                            # `owner_collect_fn` not found on class
-                            # `ParallelBuilder`". See
-                            # doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
-                            val owner_collect = self.owner_collect_fn
-                            collect_error = owner_collect(build_unit.path, output)
-                        if collect_error != "":
-                            self.graph.mark_failed(id, collect_error)
-                            errors = errors.push((build_unit.path, collect_error))
-                            self.stats = BuildStats(total_units: self.stats.total_units,
-                                completed: self.stats.completed,
-                                failed: self.stats.failed + 1,
-                                skipped: self.stats.skipped,
-                                parallel_batches: self.stats.parallel_batches)
-                        else:
-                            self.graph.mark_completed(id, Some(output))
-                            outputs = outputs.push(output)
-                            self.stats = BuildStats(total_units: self.stats.total_units,
-                                completed: self.stats.completed + 1,
-                                failed: self.stats.failed,
-                                skipped: self.stats.skipped,
-                                parallel_batches: self.stats.parallel_batches)
-                    case Err(msg):
-                        self.graph.mark_failed(id, msg)
-                        errors = errors.push((build_unit.path, msg))
-                        self.stats = BuildStats(total_units: self.stats.total_units,
-                            completed: self.stats.completed,
-                            failed: self.stats.failed + 1,
-                            skipped: self.stats.skipped,
-                            parallel_batches: self.stats.parallel_batches)
+                val (next_errors, next_outputs) = self._record_compile_outcome(build_unit, result, errors, outputs)
+                errors = next_errors
+                outputs = next_outputs
         else:
             # Real dispatch: when the caller has configured a process spawn
             # dispatcher (set_spawn_dispatch), route straight through
@@ -635,39 +656,9 @@ impl ParallelBuilder:
                     while chunk_idx < chunk_end:
                         val build_unit = ready[chunk_idx]
                         val result = compile_fn(build_unit.path)
-                        match result:
-                            case Ok(output):
-                                var collect_error: text = ""
-                                # stage2 workaround: Option<fn> unwrap + _N placeholder closure miscompile (sweep 2026-11-04)
-                                if self.has_owner_collect:
-                                    # Same closure-field-call defect as above;
-                                    # bind to a local before invoking.
-                                    val owner_collect = self.owner_collect_fn
-                                    collect_error = owner_collect(build_unit.path, output)
-                                if collect_error != "":
-                                    self.graph.mark_failed(build_unit.id, collect_error)
-                                    errors = errors.push((build_unit.path, collect_error))
-                                    self.stats = BuildStats(total_units: self.stats.total_units,
-                                        completed: self.stats.completed,
-                                        failed: self.stats.failed + 1,
-                                        skipped: self.stats.skipped,
-                                        parallel_batches: self.stats.parallel_batches)
-                                else:
-                                    self.graph.mark_completed(build_unit.id, Some(output))
-                                    outputs = outputs.push(output)
-                                    self.stats = BuildStats(total_units: self.stats.total_units,
-                                        completed: self.stats.completed + 1,
-                                        failed: self.stats.failed,
-                                        skipped: self.stats.skipped,
-                                        parallel_batches: self.stats.parallel_batches)
-                            case Err(msg):
-                                self.graph.mark_failed(build_unit.id, msg)
-                                errors = errors.push((build_unit.path, msg))
-                                self.stats = BuildStats(total_units: self.stats.total_units,
-                                    completed: self.stats.completed,
-                                    failed: self.stats.failed + 1,
-                                    skipped: self.stats.skipped,
-                                    parallel_batches: self.stats.parallel_batches)
+                        val (next_errors, next_outputs) = self._record_compile_outcome(build_unit, result, errors, outputs)
+                        errors = next_errors
+                        outputs = next_outputs
                         chunk_idx = chunk_idx + 1
 
                     batch_idx = chunk_end
@@ -1015,12 +1006,16 @@ impl ParallelBuilder:
                         outcomes.record(BuildUnitOutcome.ok(unit_id, unit_path, wall_ms, peak_kb))
                         self.graph.mark_completed(unit_id, Some(declared))
                 else:
+                    val diag_path = build_outcome_capture_worker_stderr_v1(
+                        unit_path, unit_id, status, timed_out, "", "")
                     val record = BuildUnitOutcome.from_status(
                         unit_id, unit_path, status, timed_out, wall_ms, peak_kb, "")
                     outcomes.record(record)
                     # The graph tracks "did not produce an artifact"; the OUTCOME
                     # set is what preserves the failed / unverified distinction.
                     self.graph.mark_failed(unit_id, build_outcome_kind_label(record.kind))
+                    eprint(build_outcome_unit_attribution_v1(
+                        unit_id, unit_path, status, timed_out, diag_path, record.attribution_line()))
                     if self.config.verbose:
                         print record.attribution_line()
 

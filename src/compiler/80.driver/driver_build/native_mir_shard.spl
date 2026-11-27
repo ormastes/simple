@@ -29,6 +29,15 @@ use std.nogc_sync_mut.io_runtime.{file_read_bytes_result, file_hash_sha256_or_em
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_inventory}
 use std.nogc_sync_mut.io.disk_bound.{disk_bound_mark_dir_used, disk_bound_keyed_hex_name_v1}
 use compiler.driver.driver_build.native_cache_lease.{NativeCacheLease, native_cache_sweep_with_lease}
+use compiler.driver.driver_build.native_file_worker_v1.{
+    native_file_worker_error_reason_publish_v1,
+    native_file_worker_in_flight_claims_v1}
+use compiler.driver.driver_build.build_outcome.{
+    build_outcome_abnormal_exit_label_v1,
+    build_outcome_diagnostics_dir_v1,
+    build_outcome_write_diag_artifact_v1,
+    build_outcome_unit_attribution_v1}
+use compiler.driver.driver_mir_shard_hir_residency_v1.{mir_shard_hir_residency_abort_context_v1}
 
 # Native cache scope retention (driver_aot_native_output.spl) removes scope
 # directories idle past its window. A build's children must never run it: a
@@ -667,3 +676,62 @@ pub fn native_cache_scope_midbuild_sweep_v1(lease: NativeCacheLease, current: te
     val explicit_keep = env_get_nullable("SIMPLE_NATIVE_CACHE_SCOPES_KEEP") ?? ""
     val keep = native_cache_scopes_keep_for_v1(explicit_keep, mir_shard_count_raw)
     native_cache_sweep_with_lease(lease, current, keep, min_age_s)
+
+# Active non-terminal module claims owned by `owner` in `queue`.
+pub fn native_mir_shard_in_flight_modules_v1(queue: text, owner: text) -> [text]:
+    native_file_worker_in_flight_claims_v1(queue, owner)
+
+fn _native_mir_shard_extract_diag_path_v1(line: text) -> text:
+    val marker = line.index_of(" diag=")
+    if marker < 0:
+        return ""
+    val after = line.substring(marker + 6)
+    val detail_pos = after.index_of(" detail=")
+    if detail_pos < 0: after else: after.substring(0, detail_pos)
+
+# Capture stderr + active module attribution + HIR residency context into
+# `diagnostics/` and publish an owner reason receipt BEFORE sealing claims.
+# reason: raw process exit status characterizes the abnormal MIR worker termination
+@allow(primitive_api)
+pub fn native_mir_shard_attribute_abort_v1(queue: text, owner: text, code: i64,
+        stderr_text: text, diag_dir: text = "") -> text:
+    val in_flight = native_mir_shard_in_flight_modules_v1(queue, owner)
+    val module_summary = if in_flight.len() == 0: "<before-first-claim>" else: in_flight.join(", ")
+    val label = build_outcome_abnormal_exit_label_v1(code, false)
+    val residency = mir_shard_hir_residency_abort_context_v1()
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1(queue)
+    val threads = (env_get_nullable("SIMPLE_NATIVE_BUILD_THREADS") ?? "").trim().to_i64() ?? 0
+    val line = native_mir_shard_diagnostic_parity_v1(
+        module_summary, threads, code, stderr_text, target_dir,
+        "queue={queue} {residency}", owner)
+    val artifact_path = _native_mir_shard_extract_diag_path_v1(line)
+    if queue != "" and owner != "":
+        var reason_msg = "mir-shard child exited {code} ({label}) modules=[{module_summary}]"
+        if artifact_path != "":
+            reason_msg = reason_msg + " diag={artifact_path}"
+        val _pub = native_file_worker_error_reason_publish_v1(queue, owner, reason_msg)
+    line
+
+# `--threads 1` in-process diagnostic parity with sharded codegen/MIR workers:
+# both lanes emit identical module attribution and capture stderr in `diagnostics/`.
+# reason: thread count and exit code drive parity attribution formatting
+@allow(primitive_api)
+pub fn native_mir_shard_diagnostic_parity_v1(module_name: text, threads: i64,
+        code: i64, stderr_text: text, diag_dir: text = "",
+        detail_extra: text = "", owner_tag: text = "") -> text:
+    val mode = if threads <= 1: "in-process-threads-1" else: "sharded-threads-{threads}"
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1("")
+    val prefix = if owner_tag != "": "mir-worker-abort" else: "mir-diag"
+    val slot_label = if owner_tag != "": owner_tag else: mode
+    val full_detail = if detail_extra != "":
+        "{detail_extra} threads={threads} mode={mode}"
+    else:
+        "threads={threads} mode={mode}"
+    val diag_path = build_outcome_write_diag_artifact_v1(
+        target_dir, prefix, module_name, slot_label,
+        code, false, full_detail, stderr_text)
+    val attr_extra = if owner_tag != "":
+        "owner={owner_tag} mode={mode}"
+    else:
+        "mode={mode}"
+    build_outcome_unit_attribution_v1(0, module_name, code, false, diag_path, attr_extra)

@@ -1,0 +1,158 @@
+use std.spec.*
+use std.scv.compile_source_inventory_core.{
+    COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1,
+    CompileSourceEventV1,
+    CompileSourceInventoryEntryV1,
+    compile_source_inventory_identity_cmp_v1,
+    compile_source_inventory_digest_valid_v1,
+    compile_source_inventory_path_valid_v1,
+    compile_source_inventory_strip_comments_v1,
+    compile_source_inventory_facet_rows_from_canonical_v1,
+    compile_source_inventory_whole_text_eligible_v1,
+    compile_source_inventory_whole_text_canonical_v1,
+    compile_source_inventory_whole_text_rows_v1,
+    compile_source_inventory_initial_events_v1,
+    compile_source_inventory_encode_v1
+}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_decode_v1
+}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use compiler.common.cache.visibility_manifest_read_v1.{
+    visibility_manifest_path_valid_v1,
+    visibility_manifest_parent_v1,
+    visibility_manifest_roots_valid_v1,
+    visibility_manifest_reads_v1,
+    visibility_manifest_reads_prevalidated_v1
+}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+
+fn make_hex64(fill: text) -> text:
+    var out = ""
+    var i = 0
+    while i < 64:
+        out = out + fill
+        i = i + 1
+    out
+
+fn make_startup_events(count: i64) -> [CompileSourceEventV1]:
+    val d1 = make_hex64("a")
+    val empty_d = COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1
+    var events: [CompileSourceEventV1] = []
+    var i = 0
+    while i < count:
+        val idx_s = i.to_text()
+        events.push(CompileSourceEventV1(
+            "git", "create",
+            "src/mod_{idx_s}/file_{idx_s}.spl",
+            d1, d1, empty_d, empty_d, empty_d, 100 + i))
+        i = i + 1
+    events
+
+describe "scv cold startup hot-path regression and micro-benchmark":
+    it "preserves UTF-8 lexicographic ordering in identity_cmp_v1":
+        expect(compile_source_inventory_identity_cmp_v1("src/a.spl", "src/a.spl")).to_equal(0)
+        expect(compile_source_inventory_identity_cmp_v1("src/a.spl", "src/b.spl")).to_equal(-1)
+        expect(compile_source_inventory_identity_cmp_v1("src/b.spl", "src/a.spl")).to_equal(1)
+        expect(compile_source_inventory_identity_cmp_v1("src/a.spl", "src/a.spl/x")).to_equal(-1)
+        expect(compile_source_inventory_identity_cmp_v1("src/café/a.spl", "src/z.spl")).to_equal(-1)
+        expect(compile_source_inventory_identity_cmp_v1("src/café/a.spl", "src/ca/a.spl")).to_equal(1)
+        expect(compile_source_inventory_identity_cmp_v1("src/café/a.spl", "src/cafè/a.spl")).to_equal(1)
+
+    it "validates digests identically in both scv and build_manager contracts":
+        val empty_d = COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1
+        val lower_d = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val upper_d = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+        val bad_chr = "0123456789abcdeg0123456789abcdef0123456789abcdef0123456789abcdef"
+        val short_d = "0123456789abcdef"
+        # UTF-8 string whose byte_len == 64 (63 ASCII + 2-byte U+00E9 = 65? Wait: 62 ASCII + é = 64 bytes, 63 chars)
+        val utf8_64b = make_hex64("a").substring(0, 62) + "\u{e9}"
+        expect(compile_source_inventory_digest_valid_v1(empty_d)).to_equal(true)
+        expect(builder_digest_valid_v1(empty_d)).to_equal(true)
+        expect(compile_source_inventory_digest_valid_v1(lower_d)).to_equal(true)
+        expect(builder_digest_valid_v1(lower_d)).to_equal(true)
+        expect(compile_source_inventory_digest_valid_v1(upper_d)).to_equal(false)
+        expect(builder_digest_valid_v1(upper_d)).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1(bad_chr)).to_equal(false)
+        expect(builder_digest_valid_v1(bad_chr)).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1(short_d)).to_equal(false)
+        expect(builder_digest_valid_v1(short_d)).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1(utf8_64b)).to_equal(false)
+        expect(builder_digest_valid_v1(utf8_64b)).to_equal(false)
+
+    it "validates path double-dot filenames without breaking parent traversal rejection":
+        expect(compile_source_inventory_path_valid_v1("src/foo..bar.spl")).to_equal(true)
+        expect(compile_source_inventory_path_valid_v1("src/../a.spl")).to_equal(false)
+        expect(compile_source_inventory_path_valid_v1("../a.spl")).to_equal(false)
+        expect(compile_source_inventory_path_valid_v1("src/..")).to_equal(false)
+
+    it "matches visibility manifest prevalidated reads with full reads":
+        val snap = "/snapshot"
+        val roots = ["/snapshot/src"]
+        val src = "/snapshot/src/pkg/sub/a.spl"
+        val d_src = make_hex64("a")
+        val d_pkg = make_hex64("b")
+        var inv: Dict<text, text> = {}
+        inv[src] = d_src
+        inv["/snapshot/src/pkg/__init__.spl"] = d_pkg
+        var sel: Dict<text, text> = {}
+        sel[src] = d_src
+        sel["/snapshot/src/pkg/__init__.spl"] = d_pkg
+
+        expect(visibility_manifest_roots_valid_v1(snap, roots)).to_equal("")
+        expect(visibility_manifest_roots_valid_v1(snap, [])).to_equal("visibility-manifest-source-root-missing")
+        expect(visibility_manifest_roots_valid_v1(snap, ["/other/src"])).to_equal("visibility-manifest-root-invalid")
+        expect(visibility_manifest_path_valid_v1("//server/share/café/mod.spl")).to_equal(true)
+        expect(visibility_manifest_path_valid_v1("/snapshot/café/../mod.spl")).to_equal(false)
+        expect(visibility_manifest_parent_v1("/snapshot/café/a.spl")).to_equal("/snapshot/café")
+        expect(visibility_manifest_parent_v1("main.spl")).to_equal("")
+        expect(visibility_manifest_parent_v1("/ab/c")).to_equal("/ab")
+        expect(visibility_manifest_parent_v1("/os/a.spl")).to_equal("/os")
+        expect(visibility_manifest_parent_v1("C:/a/b")).to_equal("C:/a")
+        expect(visibility_manifest_parent_v1("C:/a")).to_equal("")
+
+        val full = visibility_manifest_reads_v1(src, snap, roots, "r1:d1", inv, sel)
+        val fast = visibility_manifest_reads_prevalidated_v1(src, snap, "r1:d1", inv, sel)
+        expect(full.is_ok()).to_equal(true)
+        expect(fast.is_ok()).to_equal(true)
+        expect(fast.unwrap().reads.len()).to_equal(full.unwrap().reads.len())
+        expect(fast.unwrap().reads[1].manifest_path).to_equal(full.unwrap().reads[1].manifest_path)
+        expect(fast.unwrap().reads[1].content_sha256).to_equal(full.unwrap().reads[1].content_sha256)
+
+    it "matches whole_text canonical and facet rows on comment-heavy source":
+        val source = "# comment 1\nuse std.spec.*\n# comment 2\nval x = 1\npub fn f(): 0\nexport x\n# trailing\n"
+        expect(compile_source_inventory_whole_text_eligible_v1(source)).to_equal(true)
+        val ref_canon = compile_source_inventory_strip_comments_v1(source)
+        val fast_canon = compile_source_inventory_whole_text_canonical_v1(source)
+        expect(fast_canon).to_equal(ref_canon)
+        expect(compile_source_inventory_whole_text_rows_v1(fast_canon, ["export ", "pub "])).to_equal(
+            compile_source_inventory_facet_rows_from_canonical_v1(ref_canon, "export"))
+        expect(compile_source_inventory_whole_text_rows_v1(fast_canon, ["val ", "var ", "init "])).to_equal(
+            compile_source_inventory_facet_rows_from_canonical_v1(ref_canon, "initializer"))
+        expect(compile_source_inventory_whole_text_rows_v1(fast_canon, ["use ", "impl ", "provider "])).to_equal(
+            compile_source_inventory_facet_rows_from_canonical_v1(ref_canon, "provider"))
+
+    it "roundtrips cold batch without quadratic blowup":
+        val ev100 = make_startup_events(100)
+        val ev400 = make_startup_events(400)
+        val t0 = time_now_unix_micros()
+        val inv100 = compile_source_inventory_initial_events_v1(ev100)
+        val enc100 = compile_source_inventory_encode_v1(inv100!)
+        val dec100 = compile_source_inventory_decode_v1(enc100)
+        val dt100 = time_now_unix_micros() - t0
+
+        val t1 = time_now_unix_micros()
+        val inv400 = compile_source_inventory_initial_events_v1(ev400)
+        val enc400 = compile_source_inventory_encode_v1(inv400!)
+        val dec400 = compile_source_inventory_decode_v1(enc400)
+        val dt400 = time_now_unix_micros() - t1
+
+        expect(inv100 != nil).to_equal(true)
+        expect(dec100.valid).to_equal(true)
+        expect(dec100.inventory!.entries.len()).to_equal(100)
+        expect(inv400 != nil).to_equal(true)
+        expect(dec400.valid).to_equal(true)
+        expect(dec400.inventory!.entries.len()).to_equal(400)
+        # 4x batch size should scale well below 8x time (quadratic would be 16x)
+        val bounded = dt100 <= 0 or dt400 <= dt100 * 8 + 100000
+        expect(bounded).to_equal(true)

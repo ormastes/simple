@@ -37,6 +37,17 @@ pub fn summary_marker_symbol_64(font_size: i32) -> i32:
 pub fn summary_marker_inline_width(font_size: i32) -> i32:
     (summary_marker_symbol_64(font_size) + font_size * 4 * 64 / 10 + 32) / 64
 
+# The same advance at device scale k, in milli CSS px. Chrome zooms the symbol
+# (0.66em of the device font) but adds the inside marker's 0.4em end margin at
+# the CSS font size, each truncated to 1/64 device px (Chrome 159, 16 px):
+# k=1 16.9375, k=2 13.75, k=4 48.625 device px = 12.15625 CSS px.
+# reason: font size and scale are layout scalars; result in milli CSS px.
+# @allow(primitive_api)
+pub fn summary_marker_inline_milli(font_size: i32, k: i32) -> i64:
+    val kk = if k < 1: 1 else: k
+    val device_64 = (font_size * kk * 66 * 64 / 100 + font_size * 4 * 64 / 10) as i64
+    device_64 * 1000 / ((64 * kk) as i64)
+
 # Bounded collapsed-border style precedence, from lowest to highest.
 # An empty style is the same as an absent/none edge. Unknown styles fail the
 # bounded admission instead of silently selecting the wrong border.
@@ -2339,6 +2350,27 @@ pub fn form_control_label_device_dy(node: HNode, st: Style) -> i32:
     if k <= 1 or node.tag != "select":
         return 0
     form_control_device_baseline_delta(node, st, k, 0)
+
+# A `<textarea>` value's lines at device scale k > 1 (Chrome 159, 13.333px
+# DejaVu Sans Mono at k=4): Chrome stacks them on the face's DEVICE `normal`
+# line (63 px, baseline 50 below the line top), the box already holds rows x
+# that line (`form_control_device_extra_h`). The value is laid out outside the
+# inline baseline pass, so record what that pass would: the device strut delta
+# plus the painter term for every line, and the per-line device step beyond
+# k x the CSS line (63 - 60 = 3 px, 750 milli CSS px) for lines 2..n.
+# reason: node index and count are layout-table scalars.
+# @allow(primitive_api)
+pub fn textarea_value_device_lines_record(node_count: i32, i: i32, st: Style):
+    val k = g_layout_device_scale
+    if k <= 1 or i < 0 or i >= node_count:
+        return
+    val dy = inline_line_strut_baseline_offset_device(st, k) - k * inline_line_strut_baseline_offset(st) + text_device_painter_dy(st, k)
+    text_device_dy_record(node_count, i, dy, dy)
+    val step = (style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000) / k
+    if step != 0:
+        text_line_steps_set(node_count, i, 0, step)
+        text_line_steps_set(node_count, i, 1, 0)
+        text_line_steps_set(node_count, i, 2, 0)
 
 # A `normal` line of `st` centred in a box of box_h CSS px (the media
 # controls' time text). Chrome centres it in DEVICE px with the half px

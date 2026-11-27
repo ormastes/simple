@@ -246,6 +246,79 @@ nlines() {
 # Returns 0 always; the CALLER decides the verdict, so a helper that dies
 # mid-way cannot be mistaken for a clean scan.
 # ---------------------------------------------------------------------------
+# promisor_remote <repo> : prints the promisor remote of a blob-filtered
+# (partial) clone, nothing for a full clone. Current git records it as
+# remote.<name>.promisor=true; older git as extensions.partialclone=<name>.
+promisor_remote() {
+    _pr=$(git -C "$1" config --get-regexp '^remote\..*\.promisor$' 2>/dev/null |
+        awk '$2 == "true" { n = $1; sub(/^remote\./, "", n); sub(/\.promisor$/, "", n); print n; exit }')
+    [ -n "$_pr" ] || _pr=$(git -C "$1" config --get extensions.partialclone 2>/dev/null)
+    printf '%s' "$_pr"
+}
+
+# raw_rows <repo> <old> <new> : in-scope `path<TAB>status<TAB>old-oid<TAB>new-oid`
+# rows of one edge. Tree-only (`--raw --no-renames`), so it never reads a blob.
+raw_rows() {
+    git -C "$1" diff --raw --no-renames --no-abbrev "$2" "$3" 2>/dev/null \
+        | awk -F'\t' '{ split($1, a, " "); print $2 "\t" substr(a[5], 1, 1) "\t" a[3] "\t" a[4] }' \
+        | grep -E "$SCOPE_RE" | grep -Ev "$EXCLUDE_RE" | sort -u
+}
+
+# prefetch_blobs <repo> <work> : in a blob-filtered clone, fetch every blob the
+# scan is about to read in ONE request. Without it each `git diff -U0` /
+# `git cat-file blob` below is its own lazy fetch: the required fast-gates job
+# (sparse checkout => blob:none) spent >400 single-blob fetches and blew the
+# 240 s tier budget on a 61-commit merge PR (#12180) that scans in 18 s on a
+# full clone. This only moves bytes earlier: a blob it misses, or a failed
+# batch, still arrives by lazy fetch, so the verdict cannot change.
+prefetch_blobs() {
+    _pf_repo=$1; _pf=$2/prefetch
+    _pf_remote=$(promisor_remote "$_pf_repo")
+    [ -n "$_pf_remote" ] || return 0
+    mkdir -p "$_pf/x" || return 0
+    : > "$_pf/oids"
+    while IFS= read -r _pf_c; do
+        [ -n "$_pf_c" ] || continue
+        _pf_p=$(git -C "$_pf_repo" rev-parse --quiet --verify "$_pf_c^1" 2>/dev/null)
+        [ -n "$_pf_p" ] || continue
+        raw_rows "$_pf_repo" "$_pf_p" "$_pf_c" > "$_pf/c"
+        [ -s "$_pf/c" ] || continue
+        cut -f3,4 "$_pf/c" | tr '\t' '\n' >> "$_pf/oids"
+        cut -f1 "$_pf/c" | sort -u > "$_pf/changed"
+        git -C "$_pf_repo" rev-list --max-count="$WINDOW" --first-parent "$_pf_p" 2>/dev/null > "$_pf/window"
+        while IFS= read -r _pf_x; do
+            [ -n "$_pf_x" ] || continue
+            if [ ! -f "$_pf/x/$_pf_x" ]; then
+                _pf_xp=$(git -C "$_pf_repo" rev-parse --quiet --verify "$_pf_x^1" 2>/dev/null)
+                [ -n "$_pf_xp" ] || _pf_xp=$EMPTY_TREE
+                raw_rows "$_pf_repo" "$_pf_xp" "$_pf_x" > "$_pf/x/$_pf_x.tmp"
+                # Mirror the bulk-ancestor skip (2x: --no-renames lists both
+                # ends of a rename, so this count can exceed the scan's own).
+                [ "$(nlines "$_pf/x/$_pf_x.tmp")" -le $((BULK_MAX * 2)) ] || : > "$_pf/x/$_pf_x.tmp"
+                mv "$_pf/x/$_pf_x.tmp" "$_pf/x/$_pf_x"
+            fi
+            [ -s "$_pf/x/$_pf_x" ] || continue
+            awk -F'\t' 'NR == FNR { c[$0] = 1; next } ($1 in c) { print $3; print $4 }' \
+                "$_pf/changed" "$_pf/x/$_pf_x" >> "$_pf/oids"
+        done < "$_pf/window"
+    done < "$2/commits"
+    sort -u "$_pf/oids" | grep -v '^0*$' > "$_pf/want"
+    # --batch-all-objects lists local objects only; it never lazy-fetches.
+    git -C "$_pf_repo" cat-file --batch-all-objects --unordered \
+        --batch-check='%(objectname)' 2>/dev/null | sort -u > "$_pf/have"
+    comm -23 "$_pf/want" "$_pf/have" > "$_pf/missing"
+    [ -s "$_pf/missing" ] || return 0
+    if git -C "$_pf_repo" -c fetch.negotiationAlgorithm=noop fetch "$_pf_remote" \
+            --no-tags --no-write-fetch-head --recurse-submodules=no \
+            --filter=blob:none --quiet --stdin < "$_pf/missing" >/dev/null 2>&1; then
+        printf 'check-no-stale-snapshot-rewind: prefetched %s blob(s) in one batched fetch\n' \
+            "$(nlines "$_pf/missing")" >&2
+    else
+        echo "check-no-stale-snapshot-rewind: NOTE batched blob prefetch failed; falling back to per-blob lazy fetches" >&2
+    fi
+    return 0
+}
+
 scan() {
     _repo=$1
     _range=$2
@@ -266,6 +339,7 @@ scan() {
 
     _ncommits=0
     _nrewinds=0
+    prefetch_blobs "$_repo" "$_work"
     : > "$_work/findings"
 
     while IFS= read -r C; do
@@ -727,6 +801,43 @@ This reverts commit $_parent_sha."
         echo "  [selftest FAIL] two-file declared revert ignored"; _fail=$((_fail + 1))
     fi
     WINDOW=$_saved_window
+    # --- fixture 10: blob-filtered clone reads its blobs in ONE fetch -----
+    # The required fast-gates job runs in a sparse (blob:none) checkout. Six
+    # commits that each need parent/child/contributor blobs must cost one
+    # batched fetch, not one lazy fetch per read, and must give the same
+    # per-commit output as a full clone.
+    FR=$_st/partial_remote; mkfixture "$FR"
+    mkdir -p "$FR/src"
+    git -C "$FR" config uploadpack.allowFilter true
+    git -C "$FR" config uploadpack.allowAnySHA1InWant true
+    gen_lines 60 base > "$FR/src/a.spl"; fx_commit "$FR" "base"
+    for n in 1 2 3 4 5 6 7; do
+        gen_lines 20 "p$n" >> "$FR/src/a.spl"; gen_lines 30 "q$n" > "$FR/src/b$n.spl"
+        fx_commit "$FR" "feat: step $n"
+    done
+    gen_lines 60 base > "$FR/src/a.spl"; fx_commit "$FR" "stale rewrite of a.spl"
+    scan "$FR" "HEAD~6..HEAD" > "$_st/partial_full.out"; _ran=$((_ran + 1))
+    cp "$TMPROOT/result" "$_st/partial_full.result"
+    FP=$_st/partial_clone
+    git clone -q --no-checkout --filter=blob:none "file://$FR" "$FP" >/dev/null 2>&1
+    _pblobs() { git -C "$FP" cat-file --batch-all-objects --batch-check='%(objecttype)' 2>/dev/null | grep -c '^blob$'; }
+    _before=$(_pblobs)
+    GIT_TRACE2_EVENT=$_st/partial.trace; export GIT_TRACE2_EVENT
+    scan "$FP" "HEAD~6..HEAD" > "$_st/partial_clone.out" 2>/dev/null; _ran=$((_ran + 1))
+    unset GIT_TRACE2_EVENT
+    _fetches=$(grep '"event":"start"' "$_st/partial.trace" 2>/dev/null | grep -c '"fetch"')
+    # The per-read lazy path costs 7 fetches on this fixture (measured). The
+    # bound is 3, not exactly 1, so a git that splits or retries the batch
+    # cannot fail every scan; a git without trace2 skips the count only.
+    if [ "$_before" != 0 ] || [ "$(_pblobs)" -eq 0 ]; then
+        echo "  [selftest FAIL] blob-filtered fixture is vacuous (blobs before=$_before, after=$(_pblobs))"; _fail=$((_fail + 1))
+    elif [ -s "$_st/partial.trace" ] && [ "$_fetches" -gt 3 ]; then
+        echo "  [selftest FAIL] blob-filtered scan made $_fetches fetches, want at most 3 (batched)"; _fail=$((_fail + 1))
+    elif ! cmp -s "$_st/partial_full.out" "$_st/partial_clone.out" \
+        || ! cmp -s "$_st/partial_full.result" "$TMPROOT/result" \
+        || ! grep -q '1 rewound file' "$_st/partial_clone.out"; then
+        echo "  [selftest FAIL] blob-filtered scan differs from the full-clone scan"; _fail=$((_fail + 1))
+    fi
     if [ "$_ran" -eq 0 ]; then
         echo "  [selftest FAIL] no fixture ran"
         return 1

@@ -64,7 +64,70 @@ All evidence below comes from the Rust seed interpreter. It is diagnostic only a
 | Native runner qualification | Bootstrap owner | Source-matched self-hosted CLI deployed. Stage-2 verification of `06ba866385d5`: `compiler_cli_build` TIMEOUT (21603 s), `test_runner_build` FAIL at library-unit packaging, still failing on `3dd00937c329`, which contains the `9acdac6f849` workaround; the CLI build there failed with `FILE-WORKER-E-CLOSURE-INCOMPLETE` (`doc/08_tracking/bug/stage2_test_runner_libunit_project_name_missing_2026-11-27.md`) | `sh scripts/bootstrap/bootstrap-from-scratch.sh`, then rerun the specs below with `bin/simple test` |
 | Enrolled Linux Host (provision, startup, V6 attach, installer) | Linux host operator (root) + bootstrap owner | `/etc/simple/container` profiles, a systemd unit with `Delegate=yes`, protected key and credential stores, the six `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*` variables, `SIMPLE_LINUX_ATTACH_V6_READY`, `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT`, per `continuation_20261116/verify_queue/linux_fixture_preflight.md` | `bin/simple test test/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.spl` (and `linux_agent_attachment_v6_spec.spl`, `test/03_system/tools/linux_service_native_identity_v3_spec.spl`) |
 | Caret SSH gateway / real remote host | Orchestrator verification | A compiled `simple-orchestrator` peer and the `SIMPLE_CARET_SSH_ACCEPTANCE_*` fixture | `bin/simple test test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl` |
-| Shared-API Linux Podman route (workspace, limits, exec/TTY, cleanup) | Container owner (root) | Installed machine policy under `/etc/simple/container` and `/var/lib/simple/container`; no live spec exists yet (`simple_container_api_v2_spec` and `oci_execution_options_effects_spec` cover only argv and refusals) | Author a live spec through `SimpleContainerApiV2` once the policy is installed |
+| Shared-API Linux Podman route (workspace, limits, exec/TTY, cleanup) | Container owner (root) | Installed machine policy under `/etc/simple/container` and `/var/lib/simple/container`, an operator-supplied fresh-owner launch template (no in-repo producer), and a registry-pulled `busybox:1.36` (its RepoDigest is the default image; the route pulls it). Live spec authored, not yet run live: `test/03_system/app/container/feature/podman_shared_api_live_spec.spl` (6 cases: workspace bind + read-only, cgroup CPU/memory, workload stdout/exit, primary TTY, label-exact cleanup, pre-effect refusal). Seed 2026-11-27 on this host: rc=6, `outcome=BLOCKED ... executed=6 ... blocked=6`, reason `installed Simple Container machine policy missing: /etc/simple/container`. API gaps: the fresh route's first profile refuses build roots and terminal modes, so the workspace and TTY cases are expected to fail until a workspace or primary TTY is reachable without an admin-signed manifest; secondary exec refuses TTY and needs an issued exec admission; the seed's policy open fails on `gettid` | In the guest VM as root, with the self-hosted binary: `SIMPLE_PODMAN_SMOKE=1 bin/simple test test/03_system/app/container/feature/podman_shared_api_live_spec.spl`. Other inputs default, or come from `/etc/simple/podman-live-spec.env` (`SIMPLE_PODMAN_LIVE_ENV_FILE`): `SIMPLE_PODMAN_LIVE_IMAGE`, `SIMPLE_PODMAN_LIVE_TEMPLATE` (default `/etc/simple/podman-live-launch-template.sdn`), `SIMPLE_PODMAN_LIVE_WORK_ROOT` (default `/var/tmp`) |
+
+### Enrolled Linux Host guest VM (how-to, 2026-11-27)
+
+A dedicated Ubuntu 24.04 arm64 KVM guest (EDK2 pflash firmware, 8 vCPU / 8G,
+SSH `127.0.0.1:2225`, passwordless sudo inside the guest only) carries the
+OS-level fixture for the Enrolled Linux Host and Caret SSH rows. The wrapper is
+`scripts/check/check-linux-orchestrator-host-qemu.shs`. Resume, unattended,
+once a self-hosted compiler exists:
+
+```sh
+sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision && \
+  sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs <self-hosted simple>
+```
+
+- `--run-specs` provisions first when there is no saved overlay. It boots a
+  throwaway `run.qcow2` over `build/linux-orch-guest/provisioned.qcow2`, runs the
+  five specs as root and writes `build/linux-orch-guest/last-run.txt`. Then it
+  shuts the VM down. It exits 1 on a spec FAIL and 2 on a wrapper error, a
+  timeout, or a missing or inconclusive verdict. BLOCKED is reported as its
+  own status and exits 0.
+- The fifth spec is `test/03_system/app/container/feature/podman_shared_api_live_spec.spl`.
+  `--run-specs` follows its header order:
+  1. installs `test/fixtures/container/podman_live_spec.env` as
+     `/etc/simple/podman-live-spec.env`;
+  2. pulls `docker.io/library/busybox:1.36`, so the image has a registry
+     RepoDigest;
+  3. runs `podman_live_launch_template_gen.spl` with the binary, using the
+     profile's `runRoot`, and requires `TEMPLATE OK`;
+  4. runs the spec.
+
+  Its workspace and TTY cases are a filed gap and are expected to FAIL.
+- `--provision` provides the following:
+  - podman 4.9.3 with `busybox:1.36` pre-pulled.
+  - cgroup v2, and the static account `simple-host` (950:950) with subuid and
+    subgid `200000:65536`.
+  - podman, `simple-podman`, the socket units and `user@950.service`, all masked.
+  - `/etc/systemd/system/simple-orchestrator-host.service` with `Delegate=yes`.
+    It is not enabled. `ExecStart` runs `$SIMPLE_HOST_EXEC`.
+  - `/etc/simple/podman-live-spec.env`, installed from the shipped fixture.
+  - `/etc/simple/container`, `/var/lib/simple/container`, and the protected key
+    and credential stores under `/srv/simple-fixture`, with ed25519 keys
+    generated in the guest.
+  - `/etc/simple/orchestrator-host.env` with all six
+    `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*`, the four `SIMPLE_LINUX_ATTACH_V6_*`,
+    `SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT` and the five
+    `SIMPLE_CARET_SSH_ACCEPTANCE_*` variables.
+- Still not provided, because each item needs the self-hosted binary and its
+  canonical encoders:
+  - Decoder-valid profiles. The three `/etc/simple/container/*.sdn` files use
+    the decoder key sets and the real machine-id, UIDs and podman sha256. The
+    digest fields are `AUTHOR_WITH_SIMPLE`, and the kind, mode, model and
+    cgroup values are unvalidated guesses.
+  - A validated key format: the ed25519 PEM keys were not checked against
+    what `host-linux-enrollment-issue` expects.
+  - `binding.sdn` and its five pinned inputs.
+  - `authority-policy.sdn` and the dispatch root.
+  - The signed V6 attach/invoke/detach requests.
+  - The signed installer fixture parent.
+  - The Caret SSH packets.
+- `--run-specs` exports a path variable only when its fixture content exists,
+  so these specs report BLOCKED rather than FAIL.
+- The installed-Host MainPID case needs the supervised AOT route. Set
+  `SIMPLE_HOST_EXEC` to the staged spec executable in a unit drop-in.
 
 ## On the release branch
 

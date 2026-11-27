@@ -39,7 +39,12 @@ use std.nogc_sync_mut.io_runtime.{env_get_nullable}
 use std.io_runtime.{file_exists, file_read, dir_list_optional}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use compiler.driver.driver_build.hir_variant_object_key_v1.{hir_variant_object_sidecar_path_v1}
-use compiler.driver.driver_hir_recovery.{hir_shard_owner_indexed_paths_v1}
+use compiler.driver.driver_hir_recovery.{hir_shard_owner_indexed_paths_v1,
+    hir_shard_recovery_row_terminal_v1}
+use compiler.driver.driver_build.build_outcome.{
+    build_outcome_abnormal_exit_label_v1,
+    build_outcome_diagnostics_dir_v1,
+    build_outcome_write_diag_artifact_v1}
 
 pub const NATIVE_FILE_WORKERS_ENV_V1: text = "SIMPLE_FILE_WORKERS"
 # SINGLE SOURCE OF TRUTH for the per-file pipeline default. It is the value
@@ -703,6 +708,20 @@ pub fn native_file_worker_first_error_line_v1(label: text, owner: text, reason: 
         return ""
     "[{label}] first-error owner={owner} {reason}"
 
+# Active (non-terminal) ledger claims currently owned by `owner`.
+# Identifies candidate failing/in-flight modules when a shard child aborts.
+pub fn native_file_worker_in_flight_claims_v1(queue: text, owner: text) -> [text]:
+    var in_flight: [text] = []
+    if queue == "" or owner == "":
+        return in_flight
+    val claimed = hir_shard_owner_indexed_paths_v1(queue, owner)
+    if not claimed.?:
+        return in_flight
+    for path in claimed.unwrap():
+        if not hir_shard_recovery_row_terminal_v1(queue, path):
+            in_flight.push(path)
+    in_flight
+
 # Exit receipt for a ledger shard child (HIR/MIR). On Windows the async spawn
 # provider hands the child no stdio, so the child's stderr never reaches the
 # coordinator (BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010). A nonzero exit that
@@ -710,6 +729,20 @@ pub fn native_file_worker_first_error_line_v1(label: text, owner: text, reason: 
 # ledger, which the coordinator already prints as a first-error line.
 pub fn native_file_worker_exit_receipt_reason_v1(label: text, code: i64) -> text:
     "{label} child exited {code} without publishing a cause; its stderr is not transported on this host (rerun with SIMPLE_HIR_SHARDING=0 to see it)"
+
+# Richer MIR-shard exit receipt preserving the standard prefix while naming
+# decoded signal/abort classification, claimed in-flight modules, `diagnostics/`
+# artifact path, and `--threads 1` in-process parity reproduction command.
+# reason: raw process exit code characterizes MIR shard worker abort
+@allow(primitive_api)
+pub fn native_file_worker_mir_exit_reason_v1(label: text, code: i64,
+        in_flight: [text], diag_path: text) -> text:
+    val abort_label = build_outcome_abnormal_exit_label_v1(code, false)
+    val mods = if in_flight.len() == 0: "<before-first-claim>" else: in_flight.join(", ")
+    var msg = "{label} child exited {code} without publishing a cause [{abort_label}] modules=[{mods}]"
+    if diag_path != "":
+        msg = msg + " diag={diag_path}"
+    msg + " (rerun with SIMPLE_MIR_SHARDING=0 SIMPLE_NATIVE_BUILD_THREADS=1 for in-process diagnostic parity)"
 
 pub fn native_file_worker_exit_receipt_publish_v1(queue: text, owner: text, label: text, code: i64) -> bool:
     if code == 0 or queue == "" or owner == "":
@@ -728,6 +761,16 @@ fn _native_file_worker_publish_one_failure_v1(queue: text, owner: text, label: t
     var wrote = false
     if reason != "":
         wrote = native_file_worker_error_reason_publish_v1(queue, owner, reason)
+    if label == "mir-shard":
+        val in_flight = native_file_worker_in_flight_claims_v1(queue, owner)
+        val mods = if in_flight.len() == 0: "<before-first-claim>" else: in_flight.join(", ")
+        val diag_path = build_outcome_write_diag_artifact_v1(
+            build_outcome_diagnostics_dir_v1(queue), "mir-worker-abort",
+            mods, owner, code, false, "queue={queue} label={label}", reason)
+        if native_file_worker_error_reason_publish_v1(
+                queue, owner, native_file_worker_mir_exit_reason_v1(label, code, in_flight, diag_path)):
+            wrote = true
+        return wrote
     if native_file_worker_exit_receipt_publish_v1(queue, owner, label, code):
         wrote = true
     wrote

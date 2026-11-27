@@ -18,7 +18,7 @@ use std.common.encoding.utf8.{text_codepoints}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_rest_pen_origin_reset, text_rest_pen_origin_restore, text_rest_pen_origin_record, g_text_rest_pen_origin_milli, box_frac_w_set, absolute_width_frac_milli, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record, form_control_tag}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale, summary_marker_inline_milli, textarea_value_device_lines_record}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{line_h_frac_milli, inline_element_union_text_line_h, text_line_frac_record, text_line_steps_table, text_line_steps_restore}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px, GridTrackLayout, grid_track_layout}
@@ -2226,6 +2226,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 styles[label_text_i]
             )
             box_device_inline_dy_record(nodes.len() as i32, label_text_i, form_control_label_device_dy(node, st))
+            if node.tag == "textarea":
+                textarea_value_device_lines_record(nodes.len() as i32, label_text_i, styles[label_text_i])
             out_bx = label_layout.bx
             out_by = label_layout.by
             out_bw = label_layout.bw
@@ -4275,12 +4277,20 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     var leading_margin_t = 0
     var in_inline_run = false
     var inline_run_has_content = false
-    val inline_base_x = if (
-        node.is_details_summary and st.display == "list-item"
-    ):
-        summary_marker_inline_width(st.font_size)
-    else:
+    val is_summary_marker = node.is_details_summary and st.display == "list-item"
+    # At device scale k > 1 Chrome's marker advance is fractional (16 px, k=4:
+    # 12.15625): the cursor takes its floor and the first line's pen carries
+    # the rest (`summary_err`); k = 1 keeps the pinned whole-px advance.
+    val summary_k = layout_device_scale()
+    val summary_milli: i64 = if is_summary_marker and summary_k > 1: summary_marker_inline_milli(st.font_size, summary_k) else: 0
+    val inline_base_x = if not is_summary_marker:
         0
+    elif summary_k > 1:
+        (summary_milli / 1000) as i32
+    else:
+        summary_marker_inline_width(st.font_size)
+    val summary_err: i64 = if summary_milli > 0: summary_milli - (inline_base_x as i64) * 1000 else: 0
+    val summary_line0_y = y + st.border_t + st.pad_t
     var inline_start_x = inline_base_x
     var line_iw = iw
     # Height over which a line is tested against the floats.
@@ -4950,7 +4960,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # Collapsed into the space just put in the pen:
                     # the run's box still drops its lead, the pen does not move.
                     if not after_space or cst.white_space_spaces_kept:
-                        val lead_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
+                        val lead_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err))
                         val lead_space = resolved_space_advance(
                             cst, text_codepoints(nodes[c].text_trimmed)
                         )
@@ -5078,8 +5088,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # content before it: `<span>ll</span> l` puts the `l` at
                 # 12.5547, this loop at 13). Left-aligned LTR lines only: an
                 # aligned line moves by a whole-pixel free space.
-                val run_pen_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
-                g_text_first_line_err_pending = if text_first_dx > 0 and nodes[c].tag == "#text" and run_pen_err != INLINE_PEN_ERR_UNKNOWN: line_start_err - run_pen_err else: INLINE_PEN_ERR_UNKNOWN
+                val run_pen_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err))
+                g_text_first_line_err_pending = if text_first_dx > 0 and nodes[c].tag == "#text" and run_pen_err != INLINE_PEN_ERR_UNKNOWN: (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err) - run_pen_err else: INLINE_PEN_ERR_UNKNOWN
                 val run_pen_origin = if (
                     run_pen_err != INLINE_PEN_ERR_UNKNOWN and
                     text_run_aligns_line_left(st) and text_run_aligns_line_left(cst)
@@ -5293,7 +5303,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     nodes[c].tag == "#text" and nodes[c].text_trimmed == ""
                 ):
                     out_bw[c] = 0
-                val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, line_start_err)
+                val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err))
                 val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
                 if layout_device_scale() == 1 and nodes[c].tag == "button":
                     # Chrome paints an auto-width button between its two
