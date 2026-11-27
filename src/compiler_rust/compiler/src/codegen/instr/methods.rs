@@ -6,7 +6,7 @@ use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
 use super::helpers::{
-    string_cp_len_ref,
+    string_cp_len_ref, tuple_len_ref,
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
     float_to_int_saturating, get_vreg_or_default, inline_runtime_array_len_value, inline_runtime_len_value,
 };
@@ -141,7 +141,8 @@ fn call_len_method<M: Module>(
     }
     if func_name == "rt_len" {
         let cp_len = string_cp_len_ref(ctx, builder);
-        return inline_runtime_len_value(builder, receiver, ctx.baremetal, ctx.fam_arrays, cp_len);
+        let tuple_len = tuple_len_ref(ctx, builder);
+        return inline_runtime_len_value(builder, receiver, ctx.baremetal, ctx.fam_arrays, cp_len, tuple_len);
     }
     if let Some(&len_id) = ctx.runtime_funcs.get(func_name) {
         let len_ref = ctx.module.declare_func_in_func(len_id, builder.func);
