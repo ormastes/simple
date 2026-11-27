@@ -1,7 +1,7 @@
 # native-build SCV cold init crawls: coordinator module is JIT-demoted to pure interpretation (todo 478)
 
 - **Date:** 2026-11-27
-- **Status:** OPEN (root cause localized, not fixed)
+- **Status:** PARTIAL — the three source-fixable demotion causes are fixed (see "Fix log"); smoke result recorded below
 - **Host:** Windows 11, seed `C:/dev/keep/seeds/simple-local-20261127h.exe`, worktree `C:/dev/lanes/c27-race` (release/1.0.0 tip 2cc4149be75)
 - **Todo:** 478 (`dir_sync` native-link smoke)
 
@@ -42,7 +42,7 @@ Probe B and the real run log, before any inventory work:
   [in src/app/cli/native_build_main.spl]
 ```
 
-`Pointcut` is defined three times (`src/compiler/10.frontend/core/aop.spl:77` struct,
+`Pointcut` is defined four times (`pub trait Pointcut` at `src/compiler/00.common/cache_contract/aspect_plugin_model_v1.spl:10`, `src/compiler/10.frontend/core/aop.spl:77` struct,
 `src/compiler/35.semantics/aspect_seal/facet_model.spl:93` class,
 `src/lib/nogc_sync_mut/src/aop.spl:24` struct); the seed's HIR lowering resolves `self` of
 `Pointcut.matches_name` to `ANY`, the JIT compile of the entry module fails, and the seed
@@ -75,3 +75,36 @@ Repro for the measurement: call `compiler_inventory_refresh_v1(root, root + "/bu
 ## Related
 - `doc/08_tracking/bug/hir_type_inference_any_field_2026-05-02.md` (same `struct 'ANY' field` lowering failure class).
 - `doc/08_tracking/bug/browser_4k_whole_module_dejit_name_collisions_2026-10-04.md` (whole-module de-JIT caused by name collisions).
+
+## Fix log (2026-11-27, branch work/native-build-jit-clean-20261127)
+
+Fast reproducer: a script with `use app.cli.native_build_main.{main as nb_main}` plus its own `fn main()`,
+`seed run`, grep stderr for `engine-demotion` (~70 s per iteration; without its own `fn main` the
+as_str error is masked by `jit-bail:no-main-fn`). The entry-file check (item 3) only shows when
+`native_build_main.spl` is itself the entry, i.e. under a real `native-build`.
+
+| error | fix |
+|---|---|
+| `cannot infer field type while lowering Pointcut.matches_name: struct 'ANY' field 'kind'` | renamed core `Pointcut` (src/compiler/10.frontend/core/aop.spl) to `CorePointcut`; importers updated: `90.tools/aop.spl`, `90.tools/__init__.spl`, `core/__init__.spl` export, `plugins/aspects_builtin/{log,tracing}_aspect.spl`, `pipeline_integration_spec.spl` |
+| `CODEGEN-AMBIGUOUS-METHOD ... 'as_str' has 4 candidates` in `simpleos_sdk_ledger_decode_v1` | explicit receiver type: `val entry: SdnValue = files[path]` before `entry.as_str()` |
+| `module has 2 top-level statement(s) that the JIT entry path would silently skip` for `native_build_main.spl` | two bare `"""..."""` string statements above `pub fn` declarations (lines ~3460/3467) turned into `#` comments |
+
+After these, no `reason=jit-compile-error` line remains. Still printed: `reason=hybrid-interp-splice`
+for unresolved runtime externs (`rt_process_observation_v4_*`, `rt_host_*_headroom_bytes_v1`,
+`rt_shared_parse_cell_read_v1`, `rt_simple_abi_version*`, `rt_text_is_ascii`, `rt_time_monotonic_ns`, ...):
+these are per-function interpreter splices, not whole-module demotion (probe A in the table above had the same).
+Their runtime backing in the seed is a separate gap.
+
+### Smoke result after the fixes (`test/tmp_dir_sync_smoke`, `SIMPLE_SCV_INVENTORY_COLD_INIT=1 SIMPLE_BUILD_TRACE=1`)
+
+SCV admission/cold-init inventory now FINISHES: `coordinator:worker:select` at +320 s (previously never
+finished in >34 min), then `coordinator:shards parse=1 hir=3`, then `[build] phase=source_closure`
+93/93 done (111 s). After that the run went silent for >15 min with no further `[build]` line
+(killed by the operator, no exe produced, `true`/`false` output NOT reached). Next step: find what the
+post-source_closure phase (task 2 of 6) is doing; not yet investigated.
+
+## Seed defects behind the source workarounds (open, Fable review 2026-11-27)
+The three source fixes above dodge seed bugs; they are not closed by this change.
+1. Same-name type field inference: lowering `Pointcut.matches_name` inferred `self` as `ANY` while four `Pointcut` types coexisted (trait in `00.common/cache_contract/aspect_plugin_model_v1.spl:10`, class in `35.semantics/aspect_seal/facet_model.spl:93`, struct in `src/lib/nogc_sync_mut/src/aop.spl:24`, and the renamed core struct). Three remain after the rename. Same class as the OPEN `doc/08_tracking/bug/browser_4k_whole_module_dejit_name_collisions_2026-10-04.md` (rename-to-dodge); the RESOLVED `hir_type_inference_any_field_2026-05-02.md` does not cover this instance.
+2. Bare-receiver method ambiguity: `files[path].as_str()` on a `Dict<text, SdnValue>` index gave `CODEGEN-AMBIGUOUS-METHOD` (4 candidates). Covered by the OPEN `doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`; this is a new site.
+3. Docstring counted as a skipped top-level statement: `jit_skipped_top_level_statements` in `src/compiler_rust/driver/src/exec_core.rs` (the `N::Expression(_)` arm, ~line 466) counts a bare string literal above a `pub fn` as a statement the JIT would skip and demotes the whole entry module. Other entry-capable files with the pattern: `src/app/ui/chrome_showcase/main.spl`, `startup_aspect_packs.spl:91`, `smf_elf_parser.spl:240`, `smf_writer.spl:184`. Fix in the seed: ignore bare string-literal expression statements (docstrings).
