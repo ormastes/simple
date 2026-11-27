@@ -1,0 +1,98 @@
+#!/bin/sh
+# Parity: bootstrap-module-progress.py (stage2) vs bootstrap-module-progress.spl
+# (stage3+ twin) on identical rows/logs/objects. Compares exit code, sealed
+# JSON bytes, selected/.unexecuted lists and summary bytes; checks the od(1)
+# ELF check the shell uses on the Simple lane; and proves the twin's trust
+# anchor fails closed (exit 2).
+#   SIMPLE_VERIFIED_STAGE_BINARY=<stage> sh scripts/bootstrap/tests/module-progress-twin-parity-test.shs
+set -u
+repo=$(CDPATH= cd -P -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+stage=${SIMPLE_VERIFIED_STAGE_BINARY:-}
+[ -n "$stage" ] && [ -f "$stage" ] || { echo 'ERROR: set SIMPLE_VERIFIED_STAGE_BINARY' >&2; exit 2; }
+python=${PYTHON:-python3}
+command -v "$python" >/dev/null 2>&1 || python=python
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+# Native Windows Python must see the same paths the twin sees.
+tmp=$(cygpath -m "$tmp" 2>/dev/null || printf '%s' "$tmp")
+pass=0 fail=0
+ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
+bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; }
+hash() { sha256sum "$1" | awk '{print $1}'; }
+py="$repo/scripts/bootstrap/bootstrap-module-progress.py"
+spl="$repo/scripts/bootstrap/bootstrap-module-progress.spl"
+pin="$tmp/provenance.env"
+printf '%s\n' schema=simple-bootstrap-stage3-provenance-v5 status=pass \
+  artifact_kind=pure-simple-bootstrap-compiler "stage3_sha256=$(hash "$stage")" >"$pin"
+run_py() { "$python" -B "$py" "$@"; }
+run_spl() { SIMPLE_VERIFIED_STAGE_PIN=$pin "$stage" run "$spl" --stage-binary "$stage" "$@" 2>"$tmp/spl.err"; }
+same() {  # name file-a file-b
+  if cmp -s "$2" "$3"; then ok "$1"; else bad "$1: $2 vs $3 differ"; diff "$2" "$3" | head -5; fi
+}
+rc_pair() {  # name want-rc py-rc spl-rc
+  if [ "$3" = "$2" ] && [ "$4" = "$2" ]; then ok "$1 (exit $2)"; else bad "$1: py=$3 spl=$4 want=$2"; tail -2 "$tmp/spl.err"; fi
+}
+
+# Fixture: one x86_64 ET_REL object, one PASS row, one FAIL row, one pending.
+f="$tmp/fx"; mkdir -p "$f"
+printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\076\000rest' >"$f/a.o"
+printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\267\000rest' >"$f/arm.o"
+printf 'not an object at all' >"$f/plain.o"
+printf 'compiled a\n' >"$f/a.log"; printf 'error b\n' >"$f/b.log"
+printf 'entry=src/a.spl|result=PASS|status=0|artifact=%s|log=%s\n' "$f/a.o" "$f/a.log" >"$f/a.row"
+printf 'entry=src/b.spl|result=FAIL|status=1|log=%s\n' "$f/b.log" >"$f/b.row"
+printf 'entry=src/c.spl|result=RUNNING|log=%s\n' "$f/b.log" >"$f/c.row"
+printf 'src/a.spl\nsrc/b.spl\nsrc/c.spl\nsrc/d.spl\n' >"$f/full"
+ctx=$(printf 'ctx' | sha256sum | awk '{print $1}')
+target=x86_64-unknown-linux-gnu
+mkdir -p "$tmp/py" "$tmp/spl"
+
+run_py publish "$tmp/py" "$ctx" "$target" "$f/a.row" "$f/b.row" "$f/c.row" 2>/dev/null; p=$?
+run_spl publish "$tmp/spl" "$ctx" "$target" "$f/a.row" "$f/b.row" "$f/c.row"; s=$?
+rc_pair publish 0 "$p" "$s"
+for e in src/a.spl src/b.spl; do
+  name=$(printf '%s' "$e" | sha256sum | awk '{print $1}').json
+  same "seal-bytes $e" "$tmp/py/$name" "$tmp/spl/$name"
+done
+[ "$(ls "$tmp/py" | wc -l)" = "$(ls "$tmp/spl" | wc -l)" ] && ok "seal-count (RUNNING row skipped)" || bad "seal-count"
+
+for limit in 0 1; do
+  run_py select "$f/full" "$tmp/py.sel$limit" "$tmp/py" "$ctx" "$target" "$limit" "$tmp/py.sum$limit" 2>/dev/null; p=$?
+  run_spl select "$f/full" "$tmp/spl.sel$limit" "$tmp/spl" "$ctx" "$target" "$limit" "$tmp/spl.sum$limit"; s=$?
+  rc_pair "select-limit$limit" 3 "$p" "$s"
+  same "selected-limit$limit" "$tmp/py.sel$limit" "$tmp/spl.sel$limit"
+  same "unexecuted-limit$limit" "$tmp/py.sel$limit.unexecuted" "$tmp/spl.sel$limit.unexecuted"
+  same "summary-limit$limit" "$tmp/py.sum$limit" "$tmp/spl.sum$limit"
+done
+
+run_py publish "$tmp/py" "$ctx" "$target" "$f/a.row" 2>/dev/null; p=$?
+run_spl publish "$tmp/spl" "$ctx" "$target" "$f/a.row"; s=$?
+rc_pair republish-refused 2 "$p" "$s"
+run_py select "$f/full" "$tmp/x" "$tmp/py" BADCTX "$target" 0 "$tmp/x.sum" 2>/dev/null; p=$?
+run_spl select "$f/full" "$tmp/x" "$tmp/spl" BADCTX "$target" 0 "$tmp/x.sum"; s=$?
+rc_pair bad-context 2 "$p" "$s"
+printf 'tampered\n' >>"$f/b.log"
+run_py select "$f/full" "$tmp/x" "$tmp/py" "$ctx" "$target" 0 "$tmp/x.sum" 2>/dev/null; p=$?
+run_spl select "$f/full" "$tmp/x" "$tmp/spl" "$ctx" "$target" 0 "$tmp/x.sum"; s=$?
+rc_pair evidence-changed 2 "$p" "$s"
+
+# object: Python vs the od(1) check the stage3 shell lane runs.
+eval "$(sed -n '/^module_progress_object_elf()/,/^}/p' "$repo/scripts/bootstrap/bootstrap-module-collection.shs")"
+for c in "a.o:0" "arm.o:2" "plain.o:2"; do
+  o=${c%%:*} want=${c#*:}
+  run_py object "$f/$o" "$target" 2>/dev/null; p=$?
+  module_progress_object_elf "$f/$o" "$target"; s=$?
+  rc_pair "object-od $o" "$want" "$p" "$s"
+done
+run_spl object "$f/arm.o" aarch64-unknown-linux-gnu; s=$?
+[ "$s" = 0 ] && ok "object-twin aarch64" || bad "object-twin aarch64: $s"
+
+# Trust anchor.
+printf 'stage3_sha256=%064d\n' 0 >"$tmp/wrong.env"
+SIMPLE_VERIFIED_STAGE_PIN="$tmp/wrong.env" "$stage" run "$spl" --stage-binary "$stage" object "$f/a.o" "$target" 2>/dev/null; s=$?
+[ "$s" = 2 ] && ok "anchor-mismatch (exit 2)" || bad "anchor-mismatch: $s"
+env -u SIMPLE_VERIFIED_STAGE_PIN "$stage" run "$spl" --stage-binary "$stage" object "$f/a.o" "$target" 2>/dev/null; s=$?
+[ "$s" = 2 ] && ok "anchor-no-pin (exit 2)" || bad "anchor-no-pin: $s"
+
+printf 'module-progress twin parity: %s passed, %s failed\n' "$pass" "$fail"
+[ "$fail" = 0 ] && [ "$pass" -gt 0 ]

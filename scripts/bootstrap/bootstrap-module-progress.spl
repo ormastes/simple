@@ -1,0 +1,419 @@
+# Sealed diagnostic progress, not compiler or release admission authority.
+#
+# Pure-Simple twin of bootstrap-module-progress.py for phase 3 and later
+# (doc/08_tracking/todo/python_phase_census_2026-11-27.md, BOTH row).
+# bootstrap-phase-verification.shs keeps the Python owner for stage2 and runs
+# this twin for stage3 on the verified stage binary:
+#
+#   <stage> run scripts/bootstrap/bootstrap-module-progress.spl --stage-binary <stage> \
+#     select|publish|object ARGS...
+#
+# Trust anchor: the running stage binary must match the admitted provenance
+# record named by SIMPLE_VERIFIED_STAGE_PIN (lib/verified_stage_pin.spl);
+# otherwise exit 2 before any state is touched.
+#
+# Parity with the Python owner: identical seal bytes (json.dumps(sort_keys=True)
+# layout), selection files and summary lines; exit 0 / 3 (sealed failures) /
+# 2 ("module progress refused: <same message>") / 1 (missing positional
+# arguments, an uncaught IndexError in Python).
+#
+# Named gaps: `lock` is refused. The runtime has no descriptor-level flock, so
+# the Simple lane takes the FD9 writer lock with flock(1) in the shell. Fields
+# holding non-ASCII text are refused rather than \u-escaped.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_size, file_hash_sha256_or_empty, file_read_bytes_at, file_rename, file_append_text, get_args, exit, host_os, env_get, getpid}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_bytes.{file_create_excl_raw}
+use std.nogc_sync_mut.sffi.fs.{file_sync, dir_sync}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.value.{JsonValue, json_parse_value, json_value_escape_string}
+use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_check, verified_stage_pin_recheck}
+use scripts.bootstrap.lib.running_stage_image.{running_stage_image}
+
+@unsafe(reason: "no-follow regular-file predicate; evidence must not be a link", capabilities: [ffi])
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+
+val SCHEMA = "bootstrap-module-progress-v1"
+val SEAL_KEYS = ["context", "entry", "log", "log_sha256", "machine", "object", "object_sha256", "result", "row", "row_sha256", "schema"]
+
+fn refuse(message: text):
+    eprint("module progress refused: " + message)
+    exit(2)
+
+fn is_regular(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_is_regular_no_follow(path)
+
+# Path.exists() or Path.is_symlink(). Named gap: a dangling link is invisible
+# without lstat, so it reads as absent (Python would load_seal and refuse it);
+# the twin then writes the seal with O_EXCL create, which fails on the link.
+fn lexists(path: text) -> bool:
+    file_exists(path) or is_regular(path) or dir_is_real_no_follow(path)
+
+fn is_hex(value: text, width: i64) -> bool:
+    if value.len() != width:
+        return false
+    for i in 0..width:
+        val c = value.substring(i, i + 1)
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+    true
+
+fn digest(path: text) -> text:
+    if not is_regular(path):
+        refuse("missing or symlinked evidence: " + path)
+    val d = file_hash_sha256_or_empty(path)
+    if d.len() != 64:
+        refuse("missing or symlinked evidence: " + path)
+    d
+
+fn parent_of(path: text) -> text:
+    var i = path.len() - 1
+    while i >= 0:
+        if path.substring(i, i + 1) == "/":
+            return if i == 0: "/" else: path.substring(0, i)
+        i = i - 1
+    "."
+
+fn leaf_of(path: text) -> text:
+    path.substring(parent_of(path).len() + (if parent_of(path) == "/": 0 else: 1), path.len())
+
+fn atomic(path: text, value: text):
+    val dir = parent_of(path)
+    val tmp = (if dir == ".": "" elif dir == "/": "/" else: dir + "/") + leaf_of(path) + ".tmp." + "{getpid()}"
+    if not file_create_excl_raw(tmp, value):
+        refuse("[Errno 17] File exists: '" + tmp + "'")
+    if not file_sync(tmp):
+        refuse("fsync failed: " + tmp)
+    if not file_rename(tmp, path):
+        refuse("replace failed: " + path)
+    if not dir_sync(dir):
+        refuse("directory fsync failed: " + dir)
+
+fn le16(b: [u8], at: i64) -> i64:
+    b[at].to_i64() + b[at + 1].to_i64() * 256
+
+fn be16(b: [u8], at: i64) -> i64:
+    b[at].to_i64() * 256 + b[at + 1].to_i64()
+
+fn machine(path: text, target: text) -> i64:
+    val header = file_read_bytes_at(path, 0, 20) ?? []
+    if not file_exists(path):
+        refuse("[Errno 2] No such file or directory: '" + path + "'")
+    val arch = target.split("-")[0]
+    val expected = if arch == "aarch64": 183 elif arch == "riscv64" or arch == "riscv32": 243 elif arch == "x86_64": 62 elif arch == "i686": 3 else: -1
+    if expected < 0 or header.len() != 20 or header[0].to_i64() != 127 or header[1].to_i64() != 69 or header[2].to_i64() != 76 or header[3].to_i64() != 70:
+        refuse("unsupported or non-ELF diagnostic target")
+    val expected_class = if target.starts_with("riscv32-") or target.starts_with("i686-"): 1 else: 2
+    if header[4].to_i64() != expected_class or header[5].to_i64() != 1:
+        refuse("diagnostic object ELF class/endianness mismatch")
+    # EI_DATA is 1 here, so the header is little-endian.
+    if le16(header, 16) != 1 or le16(header, 18) != expected:
+        refuse("diagnostic object target/kind mismatch")
+    expected
+
+fn strip_ws(value: text) -> text:
+    var s = 0
+    var e = value.len()
+    while s < e and is_space(value.substring(s, s + 1)):
+        s = s + 1
+    while e > s and is_space(value.substring(e - 1, e)):
+        e = e - 1
+    value.substring(s, e)
+
+fn is_space(c: text) -> bool:
+    c == " " or c == "\n" or c == "\r" or c == "\t" or c == "\x0b" or c == "\x0c" or c == "\x1c" or c == "\x1d" or c == "\x1e" or c == "\x1f"
+
+struct Row:
+    keys: [text]
+    values: [text]
+
+fn row_get(row: Row, key: text) -> text?:
+    for i in 0..row.keys.len():
+        if row.keys[i] == key:
+            return Some(row.values[i])
+    None
+
+fn row_need(row: Row, key: text) -> text:
+    match row_get(row, key):
+        case Some(v): v
+        case None:
+            refuse("'" + key + "'")
+            ""
+
+fn row_fields(path: text) -> Row:
+    if not file_exists(path):
+        refuse("[Errno 2] No such file or directory: '" + path + "'")
+    val line = strip_ws(file_read(path))
+    if line.contains("\n"):
+        refuse("multiline row")
+    var keys: [text] = []
+    var values: [text] = []
+    for item in line.split("|"):
+        val eq = item.index_of("=") ?? -1
+        if eq < 0:
+            refuse("malformed or duplicate row")
+        val key = item.substring(0, eq)
+        for k in keys:
+            if k == key:
+                refuse("malformed or duplicate row")
+        keys.push(key)
+        values.push(item.substring(eq + 1, item.len()))
+    Row(keys: keys, values: values)
+
+fn strip_slash(path: text) -> text:
+    var p = path
+    while p.len() > 1 and p.ends_with("/"):
+        p = p.substring(0, p.len() - 1)
+    p
+
+fn seal_path(state: text, entry: text) -> text:
+    strip_slash(state) + "/" + sha256_text(entry) + ".json"
+
+fn jfield(keys: [text], values: [JsonValue], key: text) -> JsonValue:
+    for i in 0..keys.len():
+        if keys[i] == key:
+            return values[i]
+    JsonValue.Null
+
+fn jtext(v: JsonValue) -> text?:
+    match v:
+        case JsonValue.Str(s): Some(s)
+        case _: None
+
+fn jnull(v: JsonValue) -> bool:
+    match v:
+        case JsonValue.Null: true
+        case _: false
+
+fn jtext_eq(v: JsonValue, want: text) -> bool:
+    match v:
+        case JsonValue.Str(s): s == want
+        case _: false
+
+# Seal field holding a path to digest: Python raises TypeError on a non-string.
+fn jpath(v: JsonValue) -> text:
+    match v:
+        case JsonValue.Str(s): s
+        case _:
+            refuse("expected str, bytes or os.PathLike object")
+            ""
+
+fn load_seal(path: text, context: text, entry: text, target: text) -> text:
+    digest(path)
+    if file_size(path) > 65536:
+        refuse("oversized seal")
+    val parsed = json_parse_value(file_read(path))
+    if parsed.is_err():
+        refuse("seal is not JSON")
+    var keys: [text] = []
+    var values: [JsonValue] = []
+    match parsed.unwrap():
+        case JsonValue.Object(k, v):
+            for i in 0..k.len():
+                for seen in keys:
+                    if seen == k[i]:
+                        refuse("duplicate seal field")
+                keys.push(k[i])
+                values.push(v[i])
+        case _: refuse("seal shape mismatch")
+    if keys.len() != SEAL_KEYS.len():
+        refuse("seal shape mismatch")
+    for want in SEAL_KEYS:
+        var found = false
+        for k in keys:
+            if k == want:
+                found = true
+        if not found:
+            refuse("seal shape mismatch")
+    val f = \key: jfield(keys, values, key)
+    if not jtext_eq(f("schema"), SCHEMA) or not jtext_eq(f("context"), context) or not jtext_eq(f("entry"), entry):
+        refuse("seal binding mismatch")
+    if not jtext_eq(f("row_sha256"), digest(jpath(f("row")))) or not jtext_eq(f("log_sha256"), digest(jpath(f("log")))):
+        refuse("seal evidence changed")
+    val result = jtext(f("result")) ?? ""
+    val row = row_fields(jpath(f("row")))
+    val row_result = row_get(row, "result")
+    if (row_get(row, "entry") ?? "\0") != entry or not jtext_eq(f("result"), row_result ?? "\0") or not jtext_eq(f("log"), row_get(row, "log") ?? "\0"):
+        refuse("seal row mismatch")
+    if result == "PASS":
+        if (row_get(row, "status") ?? "") != "0" or not jtext_eq(f("object"), row_get(row, "artifact") ?? "\0"):
+            refuse("seal object mismatch")
+        val object_path = jpath(f("object"))
+        if not jtext_eq(f("object_sha256"), digest(object_path)):
+            refuse("seal object mismatch")
+        val m = machine(object_path, target)
+        match f("machine"):
+            case JsonValue.Int(n):
+                if n != m:
+                    refuse("seal object mismatch")
+            case _: refuse("seal object mismatch")
+    elif result != "FAIL" or (row_get(row, "status") ?? "") == "0" or not jnull(f("object")) or not jnull(f("object_sha256")) or not jnull(f("machine")):
+        refuse("unqualified terminal failure")
+    result
+
+fn read_lines(path: text) -> [text]:
+    # str.splitlines() over the line terminators an inventory can carry.
+    val content = file_read(path).replace("\r\n", "\n").replace("\r", "\n")
+    var lines = content.split("\n")
+    if lines.len() > 0 and lines[lines.len() - 1] == "":
+        lines = lines[0..lines.len() - 1]
+    lines
+
+fn join_lines(items: [text]) -> text:
+    var out = ""
+    for item in items:
+        out = out + item + "\n"
+    out
+
+fn select(full: text, selected: text, state: text, context: text, target: text, limit: i64, summary: text) -> bool:
+    if not is_hex(context, 64) or not dir_is_real_no_follow(state):
+        refuse("invalid progress context/state")
+    if not file_exists(full):
+        refuse("[Errno 2] No such file or directory: '" + full + "'")
+    val entries = read_lines(full)
+    if entries.len() == 0:
+        refuse("invalid inventory")
+    var sorted = entries
+    sorted.sort()
+    for i in 0..sorted.len():
+        if sorted[i] == "" or sorted[i].contains("|") or (i > 0 and sorted[i] == sorted[i - 1]):
+            refuse("invalid inventory")
+    var pending: [text] = []
+    var failures = 0
+    for entry in entries:
+        val path = seal_path(state, entry)
+        if lexists(path):
+            if load_seal(path, context, entry, target) == "FAIL":
+                failures = failures + 1
+        else:
+            pending.push(entry)
+    # pending[:limit] if limit else pending (Python slice semantics).
+    var take = pending.len()
+    if limit > 0 and limit < take:
+        take = limit
+    elif limit < 0:
+        take = if pending.len() + limit > 0: pending.len() + limit else: 0
+    val chosen = pending[0..take]
+    atomic(selected, join_lines(chosen))
+    atomic(selected + ".unexecuted", join_lines(pending[take..pending.len()]))
+    var text = "module_compile_inventory_count={entries.len()}\nmodule_compile_selected_count={chosen.len()}\nmodule_compile_sealed_count={entries.len() - pending.len()}\nmodule_compile_retained_failed_count={failures}\nmodule_compile_unexecuted_count={pending.len() - chosen.len()}\n"
+    if pending.len() > 0:
+        text = text + "task=module_compile_progress|result=INCOMPLETE|status=unfinished-inventory|count={pending.len()}|log={selected}\n"
+    if failures > 0:
+        text = text + "task=module_compile_retained_failures|result=FAIL|status=sealed-failures|count={failures}|log={state}\n"
+    if not file_append_text(summary, text):
+        refuse("cannot append summary: " + summary)
+    failures > 0
+
+fn jstr(value: text) -> text:
+    for i in 0..value.byte_len():
+        if value.byte_at(i) >= 128:
+            refuse("non-ASCII seal field is outside the Simple twin's json layout")
+    "\"" + json_value_escape_string(value) + "\""
+
+fn publish(state: text, context: text, target: text, paths: [text]):
+    for row_path in paths:
+        val row = row_fields(row_path)
+        val result = row_get(row, "result") ?? ""
+        if result != "PASS" and result != "FAIL":
+            continue
+        # The scheduler calls only after wait/reap and full authority validation.
+        val entry = row_need(row, "entry")
+        val path = seal_path(state, entry)
+        val obj = if result == "PASS": (row_get(row, "artifact") ?? "") else: ""
+        val row_real = path_absolute(row_path)
+        val row_sha = digest(row_path)
+        val log = row_need(row, "log")
+        val log_sha = digest(log)
+        val object_json = if obj != "": jstr(obj) else: "null"
+        val object_sha = if obj != "": jstr(digest(obj)) else: "null"
+        val machine_json = if obj != "": "{machine(obj, target)}" else: "null"
+        if lexists(path):
+            load_seal(path, context, entry, target)
+            refuse("refusing to overwrite sealed terminal proof")
+        # json.dumps(seal, sort_keys=True): ", " and ": " separators.
+        val seal = "\{\"context\": " + jstr(context) + ", \"entry\": " + jstr(entry) + ", \"log\": " + jstr(log) + ", \"log_sha256\": " + jstr(log_sha) + ", \"machine\": " + machine_json + ", \"object\": " + object_json + ", \"object_sha256\": " + object_sha + ", \"result\": " + jstr(result) + ", \"row\": " + jstr(row_real) + ", \"row_sha256\": " + jstr(row_sha) + ", \"schema\": " + jstr(SCHEMA) + "}\n"
+        atomic(path, seal)
+        load_seal(path, context, entry, target)
+
+fn parse_int(value: text) -> i64:
+    val s = value.trim()
+    var i = 0
+    var neg = false
+    if s.starts_with("-") or s.starts_with("+"):
+        neg = s.starts_with("-")
+        i = 1
+    if i >= s.len():
+        refuse("invalid literal for int() with base 10: '" + value + "'")
+    var n = 0
+    while i < s.len():
+        val c = s.substring(i, i + 1)
+        if c < "0" or c > "9":
+            refuse("invalid literal for int() with base 10: '" + value + "'")
+        n = n * 10 + (c.byte_at(0) - 48)
+        i = i + 1
+    if neg: -n else: n
+
+fn main():
+    val argv = get_args()
+    var start = 0
+    for k in 0..argv.len():
+        if start == 0 and argv[k].ends_with("bootstrap-module-progress.spl"):
+            start = k + 1
+    var stage_binary = env_get("SIMPLE_VERIFIED_STAGE_BINARY")
+    var stage_pin = ""
+    var args: [text] = []
+    var i = start
+    while i < argv.len():
+        if (argv[i] == "--stage-binary" or argv[i] == "--stage-pin") and i + 1 < argv.len() and args.len() == 0:
+            if argv[i] == "--stage-binary":
+                stage_binary = argv[i + 1]
+            else:
+                stage_pin = argv[i + 1]
+            i = i + 2
+        else:
+            args.push(argv[i])
+            i = i + 1
+    # Trust anchor before any state is touched.
+    val os = host_os()
+    val linux = os == "linux"
+    stage_binary = running_stage_image(stage_binary, os)
+    val pin = match verified_stage_pin_check(stage_pin, stage_binary, linux):
+        case Ok(p): p
+        case Err(e):
+            eprint("FAIL: " + e)
+            exit(2)
+            return
+    if args.len() == 0:
+        refuse("not enough values to unpack (expected at least 1, got 0)")
+    val cmd = args[0]
+    val rest = args[1..args.len()]
+    var code = 0
+    if cmd == "lock":
+        refuse("lock: the Simple runtime has no descriptor-level flock; the shell takes FD9 with flock(1)")
+    elif cmd == "select":
+        if rest.len() < 7:
+            eprint("IndexError: list index out of range")
+            exit(1)
+        val limit = parse_int(rest[5])
+        code = if select(rest[0], rest[1], rest[2], rest[3], rest[4], limit, rest[6]): 3 else: 0
+    elif cmd == "publish":
+        if rest.len() < 3:
+            refuse("publish() missing required positional arguments")
+        publish(rest[0], rest[1], rest[2], rest[3..rest.len()])
+    elif cmd == "object":
+        if rest.len() != 2:
+            refuse("machine() takes 2 positional arguments but {rest.len()} were given")
+        machine(rest[0], rest[1])
+    else:
+        refuse("unknown progress operation")
+    match verified_stage_pin_recheck(pin, stage_binary, linux):
+        case Ok(_): pass
+        case Err(e):
+            eprint("FAIL: " + e)
+            exit(2)
+    exit(code)
+
+main()

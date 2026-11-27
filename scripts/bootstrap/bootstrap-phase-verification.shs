@@ -1954,8 +1954,20 @@ run_failed_binary_module_inventory() (
     stage2:*-linux-*|stage3:*-linux-*) ;;
     *) printf 'task=module_compile_progress|result=BLOCKED|status=resumable-target-unsupported|log=-\n' >>"$summary"; return 1 ;;
   esac
-  MODULE_PROGRESS_HELPER="$source_root/scripts/bootstrap/bootstrap-module-progress.py"
-  [ -f "$MODULE_PROGRESS_HELPER" ] && command -v python3 >/dev/null 2>&1 || return 1
+  # Python owns stage2 (pre-p2); stage3 runs the pure-Simple twin on the
+  # verified stage binary + pin, with no Python fallback (python_phase_census
+  # BOTH row). The FD9 writer lock is flock(1) on the Simple lane: the runtime
+  # has no descriptor-level flock.
+  case "$phase" in
+    stage2)
+      MODULE_PROGRESS_HELPER="$source_root/scripts/bootstrap/bootstrap-module-progress.py"
+      [ -f "$MODULE_PROGRESS_HELPER" ] && command -v python3 >/dev/null 2>&1 || return 1 ;;
+    *)
+      MODULE_PROGRESS_HELPER="$source_root/scripts/bootstrap/bootstrap-module-progress.spl"
+      [ -f "$MODULE_PROGRESS_HELPER" ] && [ -x "${SIMPLE_VERIFIED_STAGE_BINARY:-}" ] &&
+        [ -n "${SIMPLE_VERIFIED_STAGE_PIN:-}" ] && command -v flock >/dev/null 2>&1 || {
+        printf 'task=module_compile_progress|result=BLOCKED|status=verified-stage-binary-required|log=-\n' >>"$summary"; return 1; } ;;
+  esac
   MODULE_COMPILE_VALIDATE_FULL=1 validate_module_compile_prerequisites || return 1
   MODULE_PROGRESS_CONTEXT=$(printf '%s\n' module-progress-v1 "$phase" \
     "$(hash_file "$module_manifest")" "$target_c_source_sha" "$snapshot_sha" \
@@ -1969,7 +1981,10 @@ run_failed_binary_module_inventory() (
   # environment, not this inherited descriptor; competing writers refuse.
   [ ! -L "$MODULE_PROGRESS_STATE/writer.lock" ] || return 1
   exec 9>"$MODULE_PROGRESS_STATE/writer.lock" || return 1
-  python3 "$MODULE_PROGRESS_HELPER" lock 9 || return 1
+  case "$MODULE_PROGRESS_HELPER" in
+    *.spl) flock -n 9 || return 1 ;;
+    *) python3 "$MODULE_PROGRESS_HELPER" lock 9 || return 1 ;;
+  esac
   export MODULE_PROGRESS_HELPER MODULE_PROGRESS_STATE MODULE_PROGRESS_CONTEXT MODULE_PROGRESS_TARGET
   module_selected="$work_root/module-compile-selected.txt"
   module_selection_status=0
@@ -2014,7 +2029,7 @@ run_failed_binary_module_inventory() (
   # Re-read every seal after the full boundary; pending scope and retained
   # failures remain nonzero even if this particular batch compiled cleanly.
   module_final_selected="$module_selected.remaining"
-  python3 "$MODULE_PROGRESS_HELPER" select "$module_manifest" "$module_final_selected" "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" 0 "$summary" || return 1
+  module_progress_call select "$module_manifest" "$module_final_selected" "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" 0 "$summary" || return 1
   [ ! -s "$module_final_selected" ] && [ "$matrix_failed" = 0 ]
 )
 

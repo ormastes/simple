@@ -15,9 +15,58 @@ bootstrap_module_documentation_only() {
   ' "$1"
 }
 
+# Module progress helper: bootstrap-module-progress.py (stage2) or its
+# pure-Simple twin bootstrap-module-progress.spl on the verified stage binary
+# (stage3+). Same CLI, same seals.
+module_progress_call() {
+  case "$MODULE_PROGRESS_HELPER" in
+    *.spl) "$SIMPLE_VERIFIED_STAGE_BINARY" run "$MODULE_PROGRESS_HELPER" \
+      --stage-binary "$SIMPLE_VERIFIED_STAGE_BINARY" "$@" ;;
+    *) python3 "$MODULE_PROGRESS_HELPER" "$@" ;;
+  esac
+}
+
+# Per-object ELF machine check of the Simple lane: the same table as
+# machine() in bootstrap-module-progress.py/.spl, read with od(1) so a
+# per-module check does not start a stage binary for every object.
+module_progress_object_elf() {
+  case "${2%%-*}" in
+    aarch64) mp_machine=183 ;; riscv64|riscv32) mp_machine=243 ;;
+    x86_64) mp_machine=62 ;; i686) mp_machine=3 ;; *) return 2 ;;
+  esac
+  case "$2" in riscv32-*|i686-*) mp_class=1 ;; *) mp_class=2 ;; esac
+  mp_bytes=$(od -An -tu1 -N20 -v -- "$1" 2>/dev/null) || return 2
+  set -- $mp_bytes
+  [ "$#" = 20 ] && [ "$1:$2:$3:$4" = 127:69:76:70 ] || return 2
+  [ "$5:$6" = "$mp_class:1" ] || return 2
+  shift 16
+  [ "$(( $1 + $2 * 256 ))" = 1 ] && [ "$(( $3 + $4 * 256 ))" = "$mp_machine" ] || return 2
+}
+
+# Seal the terminal rows of one joined batch. Python publishes row by row;
+# the Simple twin takes the whole batch in one process (rows in job order, the
+# first refusal stops), since each stage-binary start costs seconds.
+module_progress_publish_jobs() {
+  mp_attempt=$1; shift
+  mp_jobs=$*
+  case "$MODULE_PROGRESS_HELPER" in
+    *.spl)
+      set --
+      for mp_job in $mp_jobs; do set -- "$@" "$mp_attempt/${mp_job#*:}/row"; done
+      module_progress_call publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$@" ;;
+    *)
+      for mp_job in $mp_jobs; do
+        python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mp_attempt/${mp_job#*:}/row" || return 2
+      done ;;
+  esac
+}
+
 bootstrap_module_object_valid() {
   if [ -n "${MODULE_PROGRESS_TARGET:-}" ]; then
-    python3 "$MODULE_PROGRESS_HELPER" object "$1" "$MODULE_PROGRESS_TARGET"
+    case "$MODULE_PROGRESS_HELPER" in
+      *.spl) module_progress_object_elf "$1" "$MODULE_PROGRESS_TARGET" ;;
+      *) python3 "$MODULE_PROGRESS_HELPER" object "$1" "$MODULE_PROGRESS_TARGET" ;;
+    esac
     return $?
   fi
   # Check the output kind independently of the compiler's status or suffix.
@@ -139,9 +188,7 @@ run_module_compile_inventory() (
       done
       if [ -n "${MODULE_PROGRESS_STATE:-}" ]; then
         MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
-        for mc_job in $mc_jobs; do
-          python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
-        done
+        module_progress_publish_jobs "$mc_attempt" $mc_jobs || return 2
       fi
       mc_jobs= mc_batch=0
       # An owner stop raised while a batch ran must prevent its next entry.
@@ -153,9 +200,7 @@ run_module_compile_inventory() (
   done
   if [ -n "${MODULE_PROGRESS_STATE:-}" ] && [ -n "$mc_jobs" ]; then
     MODULE_COMPILE_VALIDATE_FULL=1 "$mc_validate" >"$mc_attempt/checkpoint-authority.log" 2>&1 || return 2
-    for mc_job in $mc_jobs; do
-      python3 "$MODULE_PROGRESS_HELPER" publish "$MODULE_PROGRESS_STATE" "$MODULE_PROGRESS_CONTEXT" "$MODULE_PROGRESS_TARGET" "$mc_attempt/${mc_job#*:}/row" || return 2
-    done
+    module_progress_publish_jobs "$mc_attempt" $mc_jobs || return 2
   fi
   # The last batch may be shorter than mc_workers; it has no in-loop join.
   mc_abort_requested || :
