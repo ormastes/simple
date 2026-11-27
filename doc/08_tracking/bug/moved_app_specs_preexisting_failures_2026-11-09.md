@@ -55,3 +55,13 @@ Fixed and verified in W2-3:
   - `test/01_unit/app/ui/backend_matrix_browser_spec.spl` (1/2 PASS, 1 FAIL): `keeps canonical Engine2D backend selection visible through the browser adapter` expects `cuda`/`rocm`/`opencl`/`vulkan` from `BrowserBackend.create`, but `resolve_gpu_backend` falls back to `"software"` on hosts without GPU hardware/drivers (`simd_cpu` -> `cpu_simd` passes).
   - `test/01_unit/app/tooling/test_runner_simple_spec.spl` (68/74 PASS, 6 FAIL): only `Simple Test Runner Recursion Guard` fails because it reads `src/compiler_rust/**`, excluded from this slim sparse checkout cone.
   - `test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl` (7/8 PASS, 1 FAIL): `finds at least one markdown code block in this repository` scans `./README*.md`, `doc/*.md`, and `doc/07_guide/**/*.md`, excluded from this slim sparse checkout cone.
+
+## Progress 2026-11-27 (Windows host, W6-2)
+
+- Fixed and verified PASS (`wa3_shared_bin/simple.exe test ... --mode=interpreter`, `SIMPLE_LIB=src`):
+  - `test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl` (8/8 PASS, was 7/8): `src/app/doc_coverage/analysis/sdoctest_coverage.spl` (`load_sdoctest_blocks`) used Unix `shell("find ...")`, which failed on Windows `cmd.exe` even when `README.md` and `doc/07_guide/` were present; replaced with pure-Simple `dir_list`, `dir_walk`, and `file_exists`.
+- Fixed stale spec/product mismatch in `test/01_unit/app/ui/backend_matrix_browser_spec.spl`:
+  - Example 2 (`keeps canonical Engine2D backend selection visible through the browser adapter`) now passes by asserting that `BrowserBackend.create` matches `web_render_resolved_engine2d_backend_name(64, 48, canonical)` (`cuda`/`rocm`/`opencl`/`vulkan` when hardware is available, or honest `"software"` fallback on CPU hosts per closed P1 `web_render_gpu_backend_provenance_fabricated_2026-06-17`) plus exact `"simd_cpu"` -> `"cpu_simd"`.
+- Remaining sparse-checkout-only FAILs (row stays `open`; assertions preserved intact):
+  - `test/01_unit/app/ui/backend_matrix_browser_spec.spl` (1/2 PASS in sparse cone): Example 1 passes when `examples/06_io/ui/widget_matrix.ui.sdn` is checked out (absent from this slim sparse cone, present in main repo).
+  - `test/01_unit/app/tooling/test_runner_simple_spec.spl` (68/74 PASS, 6 FAIL): `Simple Test Runner Recursion Guard` reads `src/compiler_rust/**`, excluded from this slim sparse cone (present in main repo).
