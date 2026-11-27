@@ -117,10 +117,15 @@ not spared, and the owner holds the destination by its cgroup.
 
 ### Why not the others
 
-- **Keep the start helper's group alive (option 1 below).** Works on the host, but it makes one helper
-  immortal: its broker, its delegated parent, its capacity receipt, its helper sub-charge and the
-  lifecycle's single helper slot would all stay taken while later helpers run, and `helper_retired` would
-  stop meaning what the exited-start settle relies on. Freeze-and-move leaves all of that as it is.
+- **Keep the start helper's group alive (option 1 below).** Works on the host, and it would need no new
+  kill: the broker's existing cancel retires the group. But it makes one helper immortal, and the owner is
+  built around one helper at a time. Read: the lifecycle has a single helper slot (`capture_v2` overwrites
+  `process`), and `action_begin_v2` refuses a new action while another helper cohort is live
+  (`workspace-primary-helper-cohort-active`, `machine-probe-helper-cohort-active`); `helper_retired` is
+  "that slot is empty", which the exited-start settle relies on. Read, and against this reason: the
+  delegated parent is `simple-parent-<identity>`, one per helper, so a second helper is not blocked there.
+  Not checked: whether the capacity receipt and the helper sub-charge of a broker that never finishes
+  block or miscount later helpers. Freeze-and-move leaves the helper's whole lifetime as it is.
 - **Attached start (option 3).** The helper's timeout would then kill a live workload's monitor, the
   workload's output would flow through the helper's pipes, and every later action would run beside an
   unretired helper.
@@ -160,6 +165,14 @@ comes last, so no commit can leave a group nobody kills.
 ## Open
 
 - Not implemented (above). The route still breaks every workload that outlives `start`.
+- Cost not in the measurements: the owner cannot kill a cgroup today. Containment is capture, observe and
+  close (`linux_container_containment_v1.spl`); the only kill is the broker's, for its own helper group.
+  Step 1 of the build order therefore adds an owner-side kill and remove, which the held-group option
+  would not need.
+- Environment of the measurements: every candidate ran with `PATH`, `HOME` and `XDG_RUNTIME_DIR` set. The
+  route's helpers had none of them (now `HOME` only, see the HOME record). Held start, inspect, stop and
+  rm were repeated with an empty environment and with `HOME` only and behaved the same; freeze-and-move,
+  the wrapper, attach and the forced kill were not repeated that way.
 - The engine group has no limits of its own in the measurements. Decide whether it gets a small
   `memory.max`/`pids.max` and which charge it belongs to; its use was not measured.
 - A failed Stop leaves a store that says running. Ordinary destroy then refuses (item 6) and only teardown

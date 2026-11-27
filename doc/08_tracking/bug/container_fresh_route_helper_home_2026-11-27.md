@@ -38,11 +38,22 @@ the same `lstat` on the account home, so the outcome is expected to be the `HOME
 `linux_fresh_epoch_helper_environment_v1(run_root)` returns `["HOME=" + run_root]` and the projection uses
 it. The run root exists, custody holds it, and it is already the helper's directory, `--runroot` and the
 parent of `--tmpdir`. A run root that is not one canonical absolute path is refused with
-`fresh-epoch-helper-home-unsupported`. The broker rule is unchanged. Workspace primary helpers take their
-environment from their policy and are not touched.
+`fresh-epoch-helper-home-unsupported`. The broker rule is unchanged.
+
+Every launch bound through custody takes this projection, workspace helpers included
+(`fresh_workspace_bind_v3` and the primary attach go through `bind_profiled_launch_v1`), so they get the
+same `HOME`. The stream policy's environment pin (`container_stream_policy_template_pin_v2`) compares the
+policy with the Host's own template, not with the projected launch, and is not affected.
 
 Spec: `test/01_unit/lib/container/linux_fresh_epoch_helper_environment_v1_spec.spl` (red: executed=0, the
-function did not exist; green: 3 of 3).
+function did not exist; green: 3 of 3). It tests the function and pins the projection's source line. No
+passing spec executes `linux_fresh_epoch_project_launch_v1`: the three that reach it
+(`linux_fresh_admitted_workload_v2_spec`, `linux_fresh_epoch_admission_v1_spec`,
+`machine_fresh_epoch_lifecycle_v1_spec`) fail on the base commit and fail the same cases after.
+
+Still open for the helper: it has no `XDG_RUNTIME_DIR`. Where the engine then keeps its runtime files
+(`pause.pid` among them) for an account without `/run/user/<uid>` was not measured; on this host it used
+`/run/user/1000/libpod`, outside the run root.
 
 ## Guest unit (open, owner decision)
 
@@ -57,6 +68,7 @@ Read from source; `simple-orchestrator-host.service` was not started for this.
   `fresh-epoch-inherited-broker-environment-unsupported:<key>` at the first launch.
 
 Changing the account home to `/nonexistent` would satisfy custody and, with the fix above, the helpers,
-but the same account also runs the guest's other podman lanes, which need a real home. The `SIMPLE_*`
+but the same account also runs the guest's other podman lanes. Whether those depend on the account home
+was not checked. The `SIMPLE_*`
 keys are how the acceptance spec is configured. Both are the unit owner's call: a second account for the
 fresh route, or a different way to hand the spec its configuration. Not changed here.
