@@ -10927,3 +10927,78 @@ fn erased_none_arm_stamp_survives_runtime_name_qualification() {
     jit.compile_module(&mir).expect("JIT compilation");
     assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 11_001_100);
 }
+
+/// Typed `f64?` readers over an explicit `Some(x)` (the Option enum holding the
+/// RAW IEEE bits) built as a real native archive and linked against the core-C
+/// runtime: every reader must return `x` exactly. Bit `k` of the result marks
+/// a mismatch; the denormals `4.9e-324`, `* 2.0` and `* 9.0` carry the low-3-bit
+/// patterns 0b001 (TAG_HEAP) and 0b010 (TAG_FLOAT).
+/// seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+#[cfg(target_os = "linux")]
+#[test]
+fn native_typed_f64_option_some_readers_keep_exact_bits_against_c_runtime() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("probe.spl"),
+        concat!(
+            "fn same(g: f64, w: f64) -> bool:\n    if w != w:\n        return g != g\n",
+            "    if w == 0.0:\n        return g == 0.0 and (1.0 / g) == (1.0 / w)\n    g == w\n",
+            "fn bit(ok: bool, k: i64) -> i64:\n    if ok:\n        return 0\n    k\n",
+            "fn mk(x: f64) -> f64?:\n    return Some(x)\n",
+            "fn readers(x: f64) -> i64:\n    var r = 0\n    val c: f64? = Some(x)\n",
+            "    r = r + bit(same(c ?? 9.0, x), 1)\n",
+            "    var iv = 9.0\n    if val v = c:\n        iv = v\n    r = r + bit(same(iv, x), 2)\n",
+            "    r = r + bit(same(c.unwrap(), x), 4)\n",
+            "    r = r + bit(same(mk(x) ?? 9.0, x), 8)\n",
+            "    r\n",
+            // `[f64].at` boxes the payload as a heap float: the C twin of
+            // rt_option_float_bits must read that form too.
+            "fn boxed(c: f64?, x: f64) -> i64:\n    var mv = 9.0\n    match c:\n        Some(v): mv = v\n        None: mv = 8.0\n",
+            "    bit(same(c ?? 9.0, x), 1) + bit(same(mv, x), 2) + bit(same(c.unwrap(), x), 4)\n",
+            "fn check() -> i64:\n    val ys: [f64] = [0.1, 0.2]\n",
+            "    readers(0.1) + readers(4.9e-324 * 2.0) * 16 + readers(1e-300) * 4096 + boxed(ys.at(0), 0.1) * 65536 + (readers(4.9e-324) + readers(4.9e-324 * 9.0)) * 524288\n",
+        ),
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "cranelift".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("native-project compilation");
+    assert_eq!(result.failed, 0);
+    let runtime = build_core_c_runtime_library(temp.path()).expect("real core-C runtime");
+    let runner = temp.path().join("runner.c");
+    fs::write(
+        &runner,
+        "#include <stdint.h>\n#include <stdio.h>\nextern int64_t probe__check(void);\nint main(void) {\n    int64_t r = probe__check();\n    printf(\"mismatch=%lld\\n\", (long long)r);\n    return r != 0;\n}\n",
+    )
+    .unwrap();
+    let executable = temp.path().join("probe");
+    let link = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root_for_native_project_tests().join("src/runtime"))
+        .arg(runner)
+        .arg(archive)
+        .arg(runtime)
+        .args(["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm", "-o"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+    let output = std::process::Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "typed f64? readers lost payload bits: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

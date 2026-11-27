@@ -612,6 +612,31 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// Exact IEEE-754 bits of the payload of a PRESENT typed float optional
+/// (`f64?` / `f32?` / `Option<f64>`), in one enum lookup.
+///
+/// The canonical Option enum holds either the RAW bits of the float (an
+/// explicit `Some(x)` of a typed float) or a tagged heap-boxed float (generic
+/// / untyped producers such as `[f64].at`, `fn pick<T>`); any other word is
+/// the flat tagged float form. A payload is read as a boxed float only when it
+/// is a registered `HeapFloat` (membership is checked before any dereference),
+/// so raw bits that alias a live boxed-float address are the one residual
+/// misread. Twin of `rt_option_float_bits` in src/runtime/runtime_native.c.
+/// seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+#[no_mangle]
+pub extern "C" fn rt_option_float_bits(value: RuntimeValue) -> i64 {
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        if unsafe { (*p).enum_id } == OPTION_ENUM_ID {
+            let payload = unsafe { (*p).payload };
+            if let Some(f) = payload.as_heap_float_ptr() {
+                return unsafe { (*f).value }.to_bits() as i64;
+            }
+            return payload.to_raw() as i64;
+        }
+    }
+    value.as_float().to_bits() as i64
+}
+
 /// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; abort
 /// (matching the native-lane error-raise idiom used elsewhere in this crate,
 /// e.g. `rt_slice`'s negative-step check) if the receiver is a genuine

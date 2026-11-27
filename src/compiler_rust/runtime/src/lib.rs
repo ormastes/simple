@@ -1048,6 +1048,7 @@ pub use value::{
     rt_is_none_variant,
     rt_enum_register_name,
     rt_enum_payload,
+    rt_option_float_bits,
     rt_free,
     // Memory operations (raw pointer)
     rt_memcpy,

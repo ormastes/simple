@@ -1,0 +1,159 @@
+# @tag:in-development
+# Tracks: seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+# FIXED in source 2026-11-27 (rt_option_float_bits in the Rust runtime
+# value/objects.rs and src/runtime/runtime_native.c; mir/lower/lowering_core.rs
+# read_present_float_option_payload; hir lower_coalesce float presence and the
+# typed match Some arm); stays tagged until a seed carrying it is deployed.
+#
+# An explicit `Some(x)` of a typed `f64?` / `Option<f64>` is the Option enum
+# holding the RAW IEEE bits of `x`. The JIT readers `??`, `if val`, `.unwrap()`,
+# returns, `[f64?]` elements and struct fields decoded that word as a tagged
+# float and dropped the low 3 mantissa bits (`Some(0.1)` read 0.09999999999999998).
+# The sspec runner forces the interpreter, so each case runs one
+# fixture through the compiler binary (`SIMPLE_BINARY` or `bin/simple`) in
+# strict JIT mode and in interpreter mode; both must report 0 mismatches.
+# Exactness: equal, same sign of zero, NaN stays NaN; the bits fixture compares
+# raw bit patterns (NaN payloads, heap-tag 0b001 and TAG_FLOAT 0b010 words). The
+# double whose bits equal the nil word (3) is left out: `??` cannot tell it from
+# an untyped `Some(nil)` (seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27).
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val FIXTURE = """struct Holder:
+    a: f64?
+
+fn same(g: f64, w: f64) -> bool:
+    if w != w:
+        return g != g
+    if w == 0.0:
+        return g == 0.0 and (1.0 / g) == (1.0 / w)
+    g == w
+
+fn miss(ok: bool) -> i64:
+    if ok:
+        return 0
+    1
+
+fn mk(x: f64) -> f64?:
+    return Some(x)
+
+fn mko(x: f64) -> Option<f64>:
+    return Some(x)
+
+fn pick<T>(xs: [T]) -> T?:
+    return Some(xs[0])
+
+fn boxed(c: f64?, x: f64) -> i64:
+    var r = miss(same(c ?? 9.0, x))
+    var mv = 9.0
+    match c:
+        Some(v): mv = v
+        None: mv = 8.0
+    r + miss(same(mv, x)) + miss(same(c.unwrap(), x))
+
+fn readers(x: f64) -> i64:
+    var r = 0
+    val c: f64? = Some(x)
+    r = r + miss(same(c ?? 9.0, x))
+    var iv = 9.0
+    if val v = c:
+        iv = v
+    r = r + miss(same(iv, x))
+    r = r + miss(same(c.unwrap(), x))
+    var mv = 9.0
+    match c:
+        Some(v): mv = v
+        None: mv = 8.0
+    r = r + miss(same(mv, x))
+    r = r + miss(same(mk(x) ?? 9.0, x))
+    r = r + miss(same(mk(x).unwrap(), x))
+    r = r + miss(same(mko(x) ?? 9.0, x))
+    r = r + miss(same(mko(x).unwrap(), x))
+    val xs: [f64?] = [Some(x), None]
+    r = r + miss(same(xs[0] ?? 9.0, x))
+    val h = Holder(a: Some(x))
+    r = r + miss(same(h.a ?? 9.0, x))
+    r = r + miss(same(h.a.unwrap(), x))
+    r
+
+fn main():
+    val ys: [f64] = [0.1, 0.2]
+    val boxed_total = boxed(ys.at(0), 0.1) + boxed(pick(ys), 0.1)
+    val total = boxed_total + readers(0.1) + readers(4.9e-324 * 2.0) + readers(1e-300) + readers(-0.0) + readers(1.0 / 0.0) + readers(0.0 / 0.0)
+    val n: f32? = Some(0.1)
+    val w: f32 = 0.1
+    var f = 0
+    if (n ?? 9.0) != w:
+        f = f + 1
+    if n.unwrap() != w:
+        f = f + 1
+    print("mismatch {total} f32 {f}")
+"""
+
+val BITS_FIXTURE = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+fn chk(bits: i64) -> i64:
+    val x = spl_bits_to_f64(bits)
+    val c: f64? = Some(x)
+    var r = 0
+    if spl_f64_to_bits(c ?? 9.0) != bits:
+        r = r + 1
+    if spl_f64_to_bits(c.unwrap()) != bits:
+        r = r + 1
+    if val v = c:
+        if spl_f64_to_bits(v) != bits:
+            r = r + 1
+    match c:
+        Some(v):
+            if spl_f64_to_bits(v) != bits:
+                r = r + 1
+        None: r = r + 1
+    r
+
+fn main():
+    val total = chk(9221120237041090565) + chk(-2251799813685243) + chk(1) + chk(9) + chk(2)
+    print("bits mismatch {total}")
+"""
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-f64-option-exact"
+    dir_create_all(dir)
+    dir
+
+fn run_mode(mode: text) -> (text, i64):
+    run_fixture("readers", FIXTURE, mode)
+
+fn run_fixture(name: text, source: text, mode: text) -> (text, i64):
+    val path = work_dir() + "/" + name + "_" + mode + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", mode)
+    if mode == "jit":
+        env_set("SIMPLE_JIT_STRICT", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[2])
+
+describe "typed f64? / Option<f64> Some(x) readers keep the exact payload":
+    it "reads every payload exactly on the JIT":
+        val (out, rc) = run_mode("jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "mismatch 0 f32 0")
+
+    it "reads every payload exactly in the interpreter":
+        val (out, rc) = run_mode("interpret")
+        assert_equal(rc, 0)
+        assert_equal(out, "mismatch 0 f32 0")
+
+    it "keeps NaN payload and tag-pattern bits exactly on the JIT and in the interpreter":
+        val (jit_out, jit_rc) = run_fixture("bits", BITS_FIXTURE, "jit")
+        assert_equal(jit_rc, 0)
+        assert_equal(jit_out, "bits mismatch 0")
+        val (int_out, int_rc) = run_fixture("bits", BITS_FIXTURE, "interpret")
+        assert_equal(int_rc, 0)
+        assert_equal(int_out, "bits mismatch 0")

@@ -426,6 +426,12 @@ impl<'a> MirLowerer<'a> {
             && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64)
         {
             let arg_reg = self.lower_expr(&args[0])?;
+            // A float optional may be the Option enum holding RAW IEEE bits
+            // (explicit `Some(x)`) or the flat tagged float; read either
+            // exactly. seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+            if matches!(expr_ty, TypeId::F32 | TypeId::F64) {
+                return self.read_present_float_option_payload(arg_reg, expr_ty);
+            }
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {

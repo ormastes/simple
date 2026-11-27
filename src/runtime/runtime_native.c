@@ -6836,6 +6836,27 @@ static inline int rt_is_result_enum_id(uint32_t id) { return id == 0u || id == 2
 static inline int rt_result_disc_is_ok(uint32_t d) { return d == 0u || d == RT_DISC_OK; }
 static inline int rt_result_disc_is_err(uint32_t d) { return d == 1u || d == RT_DISC_ERR; }
 
+/* Exact IEEE-754 bits of the payload of a PRESENT typed float optional, in one
+ * enum lookup. The Option enum holds the RAW float bits (explicit typed
+ * `Some(x)`) or a registered heap float (generic/untyped producers); any other
+ * word is the flat tagged float. Twin of rt_option_float_bits in the Rust
+ * runtime (value/objects.rs).
+ * seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27 */
+int64_t rt_option_float_bits(int64_t value) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    double out;
+    if (e && e->enum_id == RT_OPTION_ENUM_ID) {
+        RtCoreFloat* f = rt_core_as_heap_float(e->payload);
+        if (!f) return e->payload;
+        out = f->value;
+    } else {
+        out = rt_core_as_float(value);
+    }
+    int64_t bits;
+    memcpy(&bits, &out, sizeof(bits));
+    return bits;
+}
+
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e) return value; /* bare/flat-nullable payload convention */

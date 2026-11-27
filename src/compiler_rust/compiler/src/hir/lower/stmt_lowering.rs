@@ -2681,6 +2681,25 @@ impl Lowerer {
                                     ty: subject_ty,
                                 };
                                 self.erased_some_arm_binding(&subject, payload_expr_ty, ctx)
+                            } else if enum_variant == "Some"
+                                && payload_patterns.len() == 1
+                                && subject_is_optional
+                                && matches!(payload_expr_ty, TypeId::F32 | TypeId::F64)
+                            {
+                                // A float Option payload is raw bits OR a boxed
+                                // float (generic/untyped producers); MIR's
+                                // float `rt_unwrap_or_self` reader tells them
+                                // apart. seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_unwrap_or_self".to_string(),
+                                        args: vec![HirExpr {
+                                            kind: HirExprKind::Local(subject_idx),
+                                            ty: subject_ty,
+                                        }],
+                                    },
+                                    ty: payload_expr_ty,
+                                }
                             } else if enum_variant == "Some" && payload_patterns.len() == 1 && subject_is_optional {
                                 HirExpr {
                                     kind: HirExprKind::If {
