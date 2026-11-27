@@ -1932,19 +1932,30 @@ impl MirLowering:
         than spin. NOTE: the seed interpreter has no `step` on ranges at all
         (`method step not found on type __range__`), so there is no oracle
         for this form; the semantics above are the conventional ones."""
-        val loop_ty = MirType.i64()
+        var loop_ty = MirType.i64()
+        var loop_hir_ty = HirType(kind: HirTypeKind.Int(64, true), span: source_span)
+        var resolved_bound_hir: HirType? = self.range_bound_int_hir_type(end)
+        if resolved_bound_hir == None:
+            if val start_expr = start:
+                resolved_bound_hir = self.range_bound_int_hir_type(start_expr)
+        if val int_hir = resolved_bound_hir:
+            val int_hir_ty: HirType = int_hir
+            loop_hir_ty = int_hir_ty
+            loop_ty = self.lower_type(int_hir_ty)
         var start_local: LocalId = 0
         if val start_expr = start:
             start_local = self.lower_expr(start_expr)
         else:
             var b_zero = self.builder
-            start_local = b_zero.emit_const_int(0)
+            val zero_temp = b_zero.new_temp(loop_ty)
+            b_zero.emit_const(zero_temp, self.numeric_int_const_for(0, loop_ty), loop_ty)
+            start_local = zero_temp
             self.builder = b_zero
         val raw_end_local = self.lower_expr(end)
         val raw_step_local = self.lower_expr(step)
         start_local = self.widen_unsigned_word_operand(start_local, loop_ty)
         val end_local = self.widen_unsigned_word_operand(raw_end_local, loop_ty)
-        val step_local = self.widen_unsigned_word_operand(raw_step_local, loop_ty)
+        val step_local = self.widen_unsigned_word_operand(raw_step_local, MirType.i64())
 
         var b_init = self.builder
         val counter = b_init.new_local(None, loop_ty, LocalKind.Var)
@@ -1981,6 +1992,7 @@ impl MirLowering:
             self.builtin_extra_fail_closed("for range loop variable has no resolved symbol", Some(source_span))
         else:
             self.bind_local(var_symbol_id, counter)
+            self.remember_local_hir_type(counter.id, loop_hir_ty, 0, 0)
         # `continue` targets the increment, exactly as in lower_for_range.
         self.loop_stack = self.loop_stack.push((inc_block, exit_block))
         val pre_loop_local_limit = self.builder.next_local_id
@@ -1995,7 +2007,8 @@ impl MirLowering:
         if not b_end.current_block_has_explicit_terminator():
             b_end.terminate_goto(inc_block)
         b_end.switch_to_block(inc_block)
-        val incremented = b_end.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(step_local), loop_ty)
+        val inc_step_local = if loop_ty.kind == MirTypeKind.I64: step_local else: b_end.emit_cast(mir_operand_copy(step_local), loop_ty)
+        val incremented = b_end.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(inc_step_local), loop_ty)
         b_end.emit_copy(counter, incremented)
         b_end.terminate_goto(cond_block)
         b_end.switch_to_block(exit_block)
