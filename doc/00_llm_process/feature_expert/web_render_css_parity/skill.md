@@ -5847,3 +5847,46 @@ pins the border-box form, the default-UA gap is unfiled.
   - `summary_marker_advance_dpr4_chrome159_spec`: AC-1 checks the 4x `H` first ink at 70/83/97/60 (was 89/107/124/76). AC-2 checks 1x at 22/27/31/19.
   - `textarea_value_device_line_dpr4_chrome159_spec`: AC-1 and AC-2 cover 4x, AC-3 is the 1x guard.
   - 20 related textarea / form-control / dpr4 / summary specs give the same results as base. `details_summary_rendering_spec` is 0/2 on base and head, for a pre-existing reason.
+
+## 2026-11-27 — k>1 collapsed table rules on Chrome's fractional column edge (`work/webrender-csspaint-20261127`)
+
+- **Symptom:** on the 4x `css-paint` catalog the largest single region was the
+  table (1,539 px). Row scans at device row 490: Chrome's inner column rule is
+  1665..1668, Simple's 1664..1667. Cell text already matched (pen origin).
+- **Cause:** Chrome's auto column edge is 416.87109375 CSS px (LayoutUnits). It
+  paints the 1px collapsed rule centred on it (416.371 -> device 1665.48 ->
+  1665). Layout puts the cell on the whole-px column and keeps the remainder only
+  as the cell's line-start pen error (`box_line_start_err_at`), so the box
+  commands scaled to 4 x 416. At 1x Chrome also rounds to 416, so only k > 1
+  was wrong.
+- **Fix (paint side, `paint_layout`):** `_html_draw_ir_cell_device_edges` turns
+  the cell's recorded edge error into device px (`box_device_top_px(err x k)`)
+  for its left edge. The right edge uses `box_right_edge_err_at`, which the
+  table records from the next column's edge (`auto_column_edge_frac[next_columns]`)
+  next to the line-start error. That makes layout the single source for both
+  edges, and a short row keeps its rule on the column edge. A first version
+  re-derived the right edge from the adjacent sibling cell in paint, and a
+  2/1/2-cell table drew its rule at 1665 / 1664 / 1665 (AC-6, red on
+  `5eeffda24db`). It applies only to collapsed tables at k > 1. Only the cell's own box
+  command gets `device-x-offset` / `device-extra-width`. The text children are
+  not moved: they already carry the pen origin. The pushed x offset folds in
+  `box_device_dx_total`, because the scaler reads the first `device-x-offset`.
+- **Spec:** `table_collapsed_rule_fractional_edge_4x_chrome159_spec.spl`. It
+  covers W=810 (+1 device px), W=760 (+2), W=600 (negative: the edge rounds onto
+  the whole px), k=1 (negative), and a 3-column table whose middle cell moves
+  both edges (AC-5; red on base). The helper is called only for table-cell
+  nodes at k > 1.
+- **4x catalog:** css-paint 16,133 -> 15,173 px (0.14 -> 0.13). html stays 0.10.
+- **Not covered:**
+  - Separated-border tables (`border-collapse: separate`) at k > 1. Chrome's
+    cell box also sits on the fractional edge there; no oracle has been
+    measured yet.
+  - Mixed odd outer / even inner collapsed border widths, where the half-border
+    origin differs by 0.5 px.
+- **Next unowned on css-paint 4x:** about 14k of the remaining 15k px are
+  glyph-edge AA dots at an aligned position (the best whole-device-px shift is
+  (0,0)). Simple is missing roughly 4x more ink than it adds, e.g. 757 px on
+  each repeated `No complete rendering claim` line. That makes it a gray-glyph
+  coverage/gamma question, not a pen question. A smaller case is the table
+  `Aligned` cell (579 px): after `Al` the glyphs carry a sub-device-px drift
+  (the `l` band is best at dx = 0 / -1 mixed), while `Visible` matches.
