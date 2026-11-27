@@ -171,3 +171,32 @@ fn multi_branch_and_nested_if_empty_arrays_propagate_sibling_element_to_all_leav
         leading_mod.types.get(warning_local.ty)
     );
 }
+
+#[test]
+fn nested_tail_match_arm_keeps_payload_type_for_dict_index_receiver() {
+    // Repro for codegen_bare_method_receiver_type_blind_candidate_selection: a
+    // `match` that is the sole body of an outer match arm is a tail match
+    // STATEMENT; it used to type the arm block NIL/ANY, so `files` lost its
+    // `Dict<text, Tag>` type and `files[k].label()` reached codegen as a bare
+    // method call with 2+ candidates (CODEGEN-AMBIGUOUS-METHOD).
+    let source = concat!(
+        "class Tag:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
+        "class Other:\n    n: text\n    fn label() -> text?:\n        Some(self.n)\n",
+        "fn pick(outer: Dict<text, Tag>?, key: text) -> text:\n",
+        "    val files = match outer:\n",
+        "        case Some(a):\n",
+        "            match Some(a):\n",
+        "                case Some(entries): entries\n",
+        "                case None: return \"x\"\n",
+        "        case None: return \"y\"\n",
+        "    files[key].label() ?? \"\"\n",
+    );
+    let module = parse_and_lower(source).unwrap();
+    let function = module.functions.iter().find(|f| f.name == "pick").unwrap();
+    let files = function.locals.iter().find(|l| l.name == "files").unwrap();
+    assert!(
+        matches!(module.types.get(files.ty), Some(HirType::Dict { .. })),
+        "files must keep its Dict type, got {:?}",
+        module.types.get(files.ty)
+    );
+}

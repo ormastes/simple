@@ -2687,7 +2687,12 @@ impl Lowerer {
                 // join took `[]`'s default `[i32]`, and every element read was
                 // narrowed to i32 under the JIT (italic font face lost).
                 // doc/08_tracking/bug/jit_if_arm_tail_if_stmt_typed_nil_italic_lost_2026-11-23.md
-                simple_parser::ast::Node::If(_) if index == last_index => {
+                // A tail `match` STATEMENT is the block's value exactly like a tail
+                // `if`: a nested `match` as the only body of an outer match arm
+                // otherwise typed the whole block NIL/ANY, so `files[k].as_str()`
+                // on the bound payload reached codegen with an erased receiver
+                // (CODEGEN-AMBIGUOUS-METHOD).
+                simple_parser::ast::Node::If(_) | simple_parser::ast::Node::Match(_) if index == last_index => {
                     let lowered = self.lower_node(stmt, ctx)?;
                     if let Some(ty) = hir_tail_if_value_type(&lowered) {
                         result_ty = ty;
