@@ -54,3 +54,9 @@ See also: `strict_use_default_blocked_by_unprovided_imports_2026-11-27.md`.
    via `hal_smp_ipi_window`; new helper `hal_smp_ipi_window_mask`, new hal_smp_spec case.
    The riscv32 twin (`hal_smp32_ipi_broadcast`) has no window/base concept (32-bit mask,
    logical==physical, no DTB map), so it is not affected by this defect.
+
+## Review follow-ups (Fable, 2026-11-27)
+- rv32 FPGA lane (`src/os/kernel/arch/riscv32/fpga_boot.spl`) forwarded reset-state `a1` into `riscv_noalloc_handoff`; with the restored capability init that is now dereferenced, so a garbage `a1` on a firmware-less M-mode board would trap. Fixed: the lane passes 0, like the rv64 FPGA lanes.
+- `hal_smp_ipi_broadcast` loop bound is now `i < MAX_HARTS` (was `n < MAX_HARTS`), so `HAL_SMP_PENDING_IPI[i]` cannot be indexed at 8 when an unclamped test seam sets count > 8.
+- OPEN: self-exclusion in `hal_smp_ipi_broadcast` and `hal_smp_ipi_send` is by logical 0 only. If the DTB capability falls back (count 1) while `HAL_SMP_CPU_COUNT_STATE` > 1 and the boot hart is not physical 0, the logical==physical fallback can target the boot hart and miss hart 0. Needs the boot hart's physical id from the capability.
+- OPEN: `hal_smp_ipi_broadcast` production loop (map, send) is untested; `hal_smp_ipi_broadcast_with_mock` still models the old logical mask.
