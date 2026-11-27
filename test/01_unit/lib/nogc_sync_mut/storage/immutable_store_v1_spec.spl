@@ -1052,6 +1052,42 @@ describe "immutable_store_v1 collect staging sweep":
         expect(is_dir(root + "/staging/other-keep")).to_equal(true)
         _store_cleanup(root)
 
+describe "immutable_store_v1 keep tombs and GC":
+    it "keeps an object referenced only by a keep tomb through a non-dry-run collect":
+        val root = _store_root("tomb-gc-reach")
+        val a = immutable_store_v1_ingest(root, "tomb gc reach".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "tg", "owner-b", [a.object_key])).to_equal("")
+        val tomb = root + "/staging/pinrel-g1"
+        dir_create_all(tomb)
+        expect(rename_path(root + "/pins/tg", tomb + "/pin")).to_equal(true)
+        file_write_bytes(tomb + "/keep", "id=tg".bytes())
+        val dry = _isv1_collect_inner(root, StoreFlagV1(true), 3600)
+        expect(dry.unreachable.contains(a.object_key)).to_equal(false)
+        expect(_isv1_collect_inner(root, StoreFlagV1(false), 3600).status).to_equal("ok")
+        expect(file_exists(_isv1_object_path(root, a.object_key))).to_equal(true)
+        expect(is_dir(tomb + "/pin")).to_equal(true)
+        _store_cleanup(root)
+
+    it "sweeps an old pinless keep tomb, keeps a young one and a keep tomb holding a pin":
+        val root = _store_root("tomb-sweep-leak")
+        val a = immutable_store_v1_ingest(root, "tomb sweep leak".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_pin(root, "ts", "owner-b", [a.object_key])).to_equal("")
+        val held = root + "/staging/pinrel-h1"
+        dir_create_all(held)
+        expect(rename_path(root + "/pins/ts", held + "/pin")).to_equal(true)
+        file_write_bytes(held + "/keep", "id=ts".bytes())
+        val leaked = root + "/staging/pinrel-l1"
+        dir_create_all(leaked)
+        file_write_bytes(leaked + "/keep", "id=gone".bytes())
+        # Young (bound 3600): kept. Old (bound 0): the pinless one goes, the pin-holding one stays.
+        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(3600)).value).to_equal(0)
+        expect(is_dir(leaked)).to_equal(true)
+        expect(immutable_store_v1_sweep_staging(root, StoreCountV1(0)).value).to_equal(1)
+        expect(is_dir(leaked)).to_equal(false)
+        expect(file_exists(held + "/keep")).to_equal(true)
+        expect(file_exists(held + "/pin/owner")).to_equal(true)
+        _store_cleanup(root)
+
 describe "immutable_store_v1 object publish lost race":
     it "reuses a winner with identical bytes planted at the object path":
         val root = _store_root("lost-race-same")
