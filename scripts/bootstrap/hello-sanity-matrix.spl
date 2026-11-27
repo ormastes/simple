@@ -22,8 +22,8 @@ use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair, sdn_s, sdn_i, 
 use scripts.bootstrap.lib.hello_matrix_run.{MatrixContext, run_command, digest, join, write_sdn, set_native_windows, which_in, retained_children_count, mkdir_exclusive}
 use scripts.bootstrap.lib.hello_matrix_cases.{ReuseOptions, run_lane, run_interpreter}
 use scripts.bootstrap.lib.hello_matrix_windows.{windows_install_memory_budget}
-use scripts.bootstrap.lib.hello_buildrunner_entry.{hello_buildrunner_run_lane}
-use scripts.bootstrap.lib.verified_stage_pin.{VerifiedStagePin, verified_stage_pin_check, verified_stage_pin_recheck}
+use scripts.bootstrap.lib.hello_buildrunner_entry.{matrix_buildrunner_run_lane}
+use scripts.bootstrap.lib.verified_stage_pin.{VerifiedStagePin, verified_stage_pin_check, verified_stage_pin_recheck, verified_stage_image_path}
 
 val USAGE = "usage: hello-sanity-matrix.py [-h] [--trace-stages] --compiler COMPILER --phase {{1,2,3}} --source-root SOURCE_ROOT --runtime-path RUNTIME_PATH --output OUTPUT"
 
@@ -137,7 +137,6 @@ fn main_matrix() -> i64:
     val abi = _choice(a, "--windows-abi", "msvc", ["msvc", "gnu"])
     val jobs = _int(a, "--jobs", if os == "macos": "1" else: "0")
     if jobs != 0 and jobs != 1: usage_error("argument --jobs: invalid choice: '{jobs}' (choose from 0, 1)")
-    _choice(a, "--memory-policy", "enforce", ["enforce", "monitor"])
     if route == "positional": usage_error("positional diagnostic route is qualified only for phase 2")
     val br_raw = [arg_get(a, "--buildrunner-manager", ""), arg_get(a, "--buildrunner-manifest-writer", ""), arg_get(a, "--buildrunner-template", ""), arg_get(a, "--buildrunner-target", "")]
     val br_win = os == "windows"
@@ -258,11 +257,15 @@ fn execute(ctx: MatrixContext, a: Args, br: [text], pin: VerifiedStagePin) -> i6
     var statuses: [text] = []
     for name in a.lanes: statuses.push(run_lane(ctx, reuse, name))
     val interpreter_status = if a.skip_interpreter: "UNRUN" else: run_interpreter(ctx, reuse)
+    val memory_policy = _choice(a, "--memory-policy", "enforce", ["enforce", "monitor"])
+    val image = verified_stage_image_path(not ctx.windows and not ctx.darwin, ctx.windows)
     var br_states: [text] = []
     for name in LANES:
         var record = [sdn_s("status", "UNRUN")]
         if br[0] != "" and has_text(a.lanes, name):
-            record = hello_buildrunner_run_lane(ctx.backend, name, br[0], br[1], br[2], br[3])
+            record = match matrix_buildrunner_run_lane(ctx, if ctx.windows: "windows" else: "linux", memory_policy, image, pin.sha256, ctx.backend, name, br[0], br[1], br[2], br[3]):
+                case Ok(r): r
+                case Err(e): return _fail(ctx, e)
         write_sdn(ctx, join(ctx.out, "buildrunner-" + name + ".sdn"), record)
         for f in record:
             if f.key == "status": br_states.push(f.value)
