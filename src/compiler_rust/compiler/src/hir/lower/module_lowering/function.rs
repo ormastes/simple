@@ -254,6 +254,20 @@ impl Lowerer {
                         return true;
                     }
                 }
+                // `T?` is pointer-form while `Some(x)` of a typed array/dict is an
+                // `Option` enum with payload `T`: same optional, admit either way.
+                if let (HirType::Pointer { inner, .. }, HirType::Enum { name, .. })
+                | (HirType::Enum { name, .. }, HirType::Pointer { inner, .. }) = (expected_ty, found_ty)
+                {
+                    if name == "Option" {
+                        let option_ty = if matches!(expected_ty, HirType::Enum { .. }) { expected } else { found };
+                        if let Some(payload) = self.option_enum_payload(option_ty) {
+                            if self.type_ids_compatible(*inner, payload) {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 // An array literal `[a, b, c]` coerces to a declared
                 // 3-tuple when the elements pairwise match (the self-hosted
                 // compiler and the interpreter both accept this spelling).
