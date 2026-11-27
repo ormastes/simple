@@ -1,0 +1,33 @@
+#!/bin/sh
+# Focused check of lib/executable-batch-launch.shs: cwd, redirected logs,
+# exclusive log creation, exit status passthrough and inherited streams.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+launch=$here/../lib/executable-batch-launch.shs
+work=$(mktemp -d "${TMPDIR:-/tmp}/batch-launch-test.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+mkdir "$work/cwd"
+sh "$launch" "$work/cwd" "$work/o1" "$work/e1" sh -c 'pwd; echo to-err >&2; exit 0' ||
+    fail "launch of a successful child"
+[ "$(cat "$work/o1")" = "$(cd "$work/cwd" && pwd)" ] || fail "child did not run in the requested cwd"
+[ "$(cat "$work/e1")" = "to-err" ] || fail "stderr was not redirected to its own log"
+
+rc=0
+sh "$launch" "$work/cwd" "$work/o2" "$work/e2" sh -c 'exit 7' || rc=$?
+[ "$rc" = 7 ] || fail "child exit status not passed through (got $rc)"
+
+echo keep >"$work/o3"
+rc=0
+sh "$launch" "$work/cwd" "$work/o3" "$work/e3" sh -c 'echo overwritten' 2>/dev/null || rc=$?
+[ "$rc" != 0 ] || fail "an existing stdout log must fail the launch"
+[ "$(cat "$work/o3")" = "keep" ] || fail "an existing log was overwritten"
+
+out=$(sh "$launch" "$work/cwd" - - sh -c 'echo inherited') || fail "inherit mode launch"
+[ "$out" = "inherited" ] || fail "inherit mode must leave streams alone"
+
+rc=0
+sh "$launch" "$work/cwd" 2>/dev/null || rc=$?
+[ "$rc" = 2 ] || fail "missing arguments must exit 2"
+echo "PASS executable-batch-launch"

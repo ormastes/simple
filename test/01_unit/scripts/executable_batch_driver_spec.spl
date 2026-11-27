@@ -1,0 +1,202 @@
+# @cover scripts/bootstrap/lib/executable_batch_driver.spl 80%
+"""
+## Purpose and audience
+Purpose: pin the decision/decoding half of the pure-Simple port of
+`adaptive-executable-batch.py`: result and receipt decoding, the per-child
+settlement (the Python reap branch), final state and exit code, admission
+choice, preflight shape checks and the UTC timestamp format. Timestamp vectors
+were produced by Python `datetime.isoformat()`.
+Audience: maintainers of `scripts/bootstrap/lib/executable_batch_driver.spl`.
+Note: a literal `{` in a Simple string is written `{{`; `}` needs no escape.
+"""
+
+use std.spec.*
+use std.common.char_from_code_pure.{char_from_code}
+use std.common.json.value.{JsonValue, json_value_serialize, json_parse_value}
+use scripts.bootstrap.lib.executable_batch_policy.{EnvPair}
+use scripts.bootstrap.lib.executable_batch_driver.{parse_env_receipt, env_lookup, rss_receipt_of, observed_peak_bytes, child_result_of, has_sanity_exit, settle_child, blocks_admission, final_state, exit_code_for, first_unleased, preflight_manifest_error, options_are_reviewed, is_leaf_name, iso_utc_from_unix_micros, dir_of, strip_bom, closed_row, skipped_row, owner_request_of, preflight_request_of, policy_target_of}
+
+fn js(src: text) -> JsonValue:
+    json_parse_value(src).unwrap()
+
+fn good_env() -> [EnvPair]:
+    parse_env_receipt("quiescent=1\nobserver_errors=0\nstatus=complete\npeak_rss_kib=2048\n")
+
+val OK_RESULT = "{{\"compile_exit\":0,\"terminal_status\":\"FAILED\",\"sanity_pass\":false}"
+val OPTS = "{{\"threads\":1,\"hir_sharding\":0,\"parse_sharding\":0,\"streaming_surfaces\":1}"
+
+fn target_json(packet: text) -> JsonValue:
+    js("{{\"packet\":\"" + packet + "\",\"options\":" + OPTS + "}")
+
+describe "executable_batch_driver receipts":
+    it "splits env receipts on the first equals only":
+        val p = parse_env_receipt("a=1\r\nb=x=y\nnoequals\n")
+        expect(p.len()).to_equal(2)
+        expect(env_lookup(p, "b", "")).to_equal("x=y")
+        expect(env_lookup(p, "missing", "d")).to_equal("d")
+
+    it "reads closure fields and defaults absent ones to empty":
+        val r = rss_receipt_of(good_env())
+        expect(r.quiescent).to_equal("1")
+        expect(rss_receipt_of([]).status).to_equal("")
+
+    it "takes the largest peak in bytes and treats absent as zero":
+        val big = parse_env_receipt("peak_rss_kib=4096")
+        expect(observed_peak_bytes([good_env(), big]).unwrap()).to_equal(4096 * 1024)
+        expect(observed_peak_bytes([[]]).unwrap()).to_equal(0)
+
+    it "rejects a malformed peak instead of guessing":
+        expect(observed_peak_bytes([parse_env_receipt("peak_rss_kib=12x")]).is_err()).to_equal(true)
+        expect(observed_peak_bytes([parse_env_receipt("peak_rss_kib=-5")]).is_err()).to_equal(true)
+
+describe "executable_batch_driver result decoding":
+    it "treats null and empty object as no result like Python truthiness":
+        expect(child_result_of(JsonValue.Null).has_result).to_equal(false)
+        expect(child_result_of(js("{{}")).has_result).to_equal(false)
+
+    it "requires a non-null compile_exit":
+        expect(child_result_of(js("{{\"compile_exit\":null}")).has_compile_exit).to_equal(false)
+        expect(child_result_of(js("{{\"compile_exit\":0}")).has_compile_exit).to_equal(true)
+
+    it "only the literal true counts as sanity pass":
+        expect(child_result_of(js("{{\"compile_exit\":0,\"sanity_pass\":true}")).sanity_pass).to_equal(true)
+        expect(child_result_of(js("{{\"compile_exit\":0,\"sanity_pass\":1}")).sanity_pass).to_equal(false)
+
+    it "detects a sanity run by a non-null sanity_exit":
+        expect(has_sanity_exit(js("{{\"sanity_exit\":0}"))).to_equal(true)
+        expect(has_sanity_exit(js("{{\"sanity_exit\":null}"))).to_equal(false)
+        expect(has_sanity_exit(JsonValue.Null)).to_equal(false)
+
+describe "executable_batch_driver settlement":
+    it "continues and records the observation on a closed ordinary failure":
+        val s = settle_child(1, js(OK_RESULT), [good_env()], false).unwrap()
+        expect(s.verdict).to_equal("CONTINUE")
+        expect(s.closure).to_equal("CLOSED")
+        expect(s.observed_bytes).to_equal(2048 * 1024)
+        expect(blocks_admission(s)).to_equal(false)
+
+    it "blocks and drains when the child has no result":
+        val s = settle_child(1, JsonValue.Null, [good_env()], false).unwrap()
+        expect(s.verdict).to_equal("BLOCKED_UNVERIFIED_CHILD")
+        expect(s.closure).to_equal("UNVERIFIED")
+        expect(s.state).to_equal("BLOCKED_CHILD_CLOSURE_DRAINING")
+        expect(s.observed_bytes).to_equal(0)
+
+    it "blocks when a receipt is unquiesced, including a missing run receipt":
+        val s = settle_child(0, js(OK_RESULT), [good_env(), []], false).unwrap()
+        expect(s.state).to_equal("BLOCKED_CHILD_CLOSURE_DRAINING")
+
+    it "blocks on a contradictory success exit":
+        val r = js("{{\"compile_exit\":0,\"terminal_status\":\"LINKED_OK\",\"sanity_pass\":true}")
+        val s = settle_child(1, r, [good_env()], false).unwrap()
+        expect(s.verdict).to_equal("BLOCKED_CHILD_RESULT_MISMATCH")
+
+    it "blocks admission on a retained cache lease after a closed child":
+        val s = settle_child(0, js(OK_RESULT), [good_env()], true).unwrap()
+        expect(s.closure).to_equal("CLOSED")
+        expect(s.state).to_equal("BLOCKED_RETAINED_CACHE_LEASE")
+        expect(blocks_admission(s)).to_equal(true)
+
+    it "treats a child with no receipts as unverified whatever the lease":
+        val s = settle_child(0, js(OK_RESULT), [], true).unwrap()
+        expect(s.verdict).to_equal("BLOCKED_UNVERIFIED_CHILD")
+
+    it "surfaces a malformed peak as an error":
+        val bad = parse_env_receipt("quiescent=1\nobserver_errors=0\nstatus=complete\npeak_rss_kib=zz")
+        expect(settle_child(0, js(OK_RESULT), [bad], false).is_err()).to_equal(true)
+
+describe "executable_batch_driver run state":
+    it "maps blocked to the final state strings and exit code":
+        expect(final_state(true)).to_equal("BLOCKED_UNVERIFIED_CLOSURE")
+        expect(final_state(false)).to_equal("COMPLETE_PER_TARGET_RESULTS")
+        expect(exit_code_for(true)).to_equal(1)
+        expect(exit_code_for(false)).to_equal(0)
+
+    it "admits the first target whose cache lease is absent":
+        expect(first_unleased([true, false, false])).to_equal(1)
+        expect(first_unleased([true, true])).to_equal(-1)
+        expect(first_unleased([])).to_equal(-1)
+
+    it "serializes a closed row with the Python key order and result echo":
+        val res = js("{{\"compile_exit\":0,\"binary_linked\":true,\"binary_sha256\":\"h\",\"sanity_pass\":false}")
+        val row = closed_row("m.spl", "cranelift", "id", "P", 1, "CLOSED", res)
+        val want = "{{\"entry\":\"m.spl\",\"backend\":\"cranelift\",\"identity\":\"id\",\"packet\":\"P\",\"child_exit\":1,\"closure\":\"CLOSED\",\"result\":{{\"compile_exit\":0,\"binary_linked\":true,\"binary_sha256\":\"h\",\"sanity_pass\":false},\"binary_linked\":true,\"binary_sha256\":\"h\",\"sanity_pass\":false}"
+        expect(json_value_serialize(row)).to_equal(want)
+
+    it "omits echoed result fields when there is no result":
+        val row = closed_row("m.spl", "llvm", "id", "P", 3, "UNVERIFIED", JsonValue.Null)
+        val want = "{{\"entry\":\"m.spl\",\"backend\":\"llvm\",\"identity\":\"id\",\"packet\":\"P\",\"child_exit\":3,\"closure\":\"UNVERIFIED\",\"result\":null}"
+        expect(json_value_serialize(row)).to_equal(want)
+
+    it "serializes the skipped row":
+        val want = "{{\"entry\":\"e\",\"backend\":\"b\",\"status\":\"SKIPPED_EXACT_VERIFIED_SUCCESS\",\"identity\":\"i\"}"
+        expect(json_value_serialize(skipped_row("e", "b", "i"))).to_equal(want)
+
+describe "executable_batch_driver preflight":
+    it "rejects an empty manifest":
+        val cfg = js("{{\"aggregate_jobs\":20,\"max_executables\":4}")
+        expect(preflight_manifest_error(cfg, [])).to_equal("Empty target manifest is not executable")
+
+    it "rejects bad job and executable counts":
+        val t = [target_json("a")]
+        expect(preflight_manifest_error(js("{{\"aggregate_jobs\":19,\"max_executables\":4}"), t).len() > 0).to_equal(true)
+        expect(preflight_manifest_error(js("{{\"aggregate_jobs\":20,\"max_executables\":21}"), t).len() > 0).to_equal(true)
+        expect(preflight_manifest_error(js("{{\"aggregate_jobs\":20,\"max_executables\":0}"), t).len() > 0).to_equal(true)
+
+    it "rejects duplicate packets and wrong options":
+        val cfg = js("{{\"aggregate_jobs\":20,\"max_executables\":4}")
+        expect(preflight_manifest_error(cfg, [target_json("a"), target_json("a")]).len() > 0).to_equal(true)
+        val bad = js("{{\"packet\":\"b\",\"options\":{{\"threads\":2,\"hir_sharding\":0,\"parse_sharding\":0,\"streaming_surfaces\":1} }")
+        expect(preflight_manifest_error(cfg, [bad]).len() > 0).to_equal(true)
+
+    it "accepts a reviewed manifest":
+        val cfg = js("{{\"aggregate_jobs\":20,\"max_executables\":4}")
+        expect(preflight_manifest_error(cfg, [target_json("a"), target_json("b")])).to_equal("")
+
+    it "requires exactly the four reviewed options":
+        expect(options_are_reviewed(policy_target_of(target_json("a")).options)).to_equal(true)
+        expect(options_are_reviewed(policy_target_of(js("{{\"options\":{{\"threads\":1} }")).options)).to_equal(false)
+        val extra = js("{{\"options\":{{\"threads\":1,\"hir_sharding\":0,\"parse_sharding\":0,\"streaming_surfaces\":1,\"x\":0} }")
+        expect(options_are_reviewed(policy_target_of(extra).options)).to_equal(false)
+
+    it "accepts only bare file names as request leaves":
+        expect(is_leaf_name("config.json")).to_equal(true)
+        expect(is_leaf_name("../config.json")).to_equal(false)
+        expect(is_leaf_name("a/b")).to_equal(false)
+        expect(is_leaf_name("a\\b")).to_equal(false)
+        expect(is_leaf_name("")).to_equal(false)
+
+    it "decodes the owner request command and config hash":
+        val r = owner_request_of(js("{{\"threads\":20,\"command\":[\"x\",\"y\"],\"files\":{{\"config.json\":\"abc\"} }"))
+        expect(r.config_json_sha256).to_equal("abc")
+        expect(r.command.len()).to_equal(2)
+
+    it "decodes a preflight request with and without an override":
+        val plain = preflight_request_of(js("{{\"command\":[\"c\"],\"cwd\":\"d\"}"))
+        expect(plain.has_preflight_command).to_equal(false)
+        val over = preflight_request_of(js("{{\"command\":[\"c\"],\"preflight_command\":[\"p\"],\"cwd\":\"d\",\"environment\":{{\"K\":\"V\"} }"))
+        expect(over.has_preflight_command).to_equal(true)
+        expect(over.environment[0].value).to_equal("V")
+
+describe "executable_batch_driver timestamps":
+    it "matches Python datetime.isoformat() including the omitted zero fraction":
+        expect(iso_utc_from_unix_micros(0)).to_equal("1970-01-01T00:00:00+00:00")
+        expect(iso_utc_from_unix_micros(1)).to_equal("1970-01-01T00:00:00.000001+00:00")
+        expect(iso_utc_from_unix_micros(951782400000000)).to_equal("2000-02-29T00:00:00+00:00")
+        expect(iso_utc_from_unix_micros(1798340645123456)).to_equal("2026-12-27T03:04:05.123456+00:00")
+        expect(iso_utc_from_unix_micros(1798340645000000)).to_equal("2026-12-27T03:04:05+00:00")
+        expect(iso_utc_from_unix_micros(4102444800999999)).to_equal("2100-01-01T00:00:00.999999+00:00")
+        expect(iso_utc_from_unix_micros(1709164800000000)).to_equal("2024-02-29T00:00:00+00:00")
+        expect(iso_utc_from_unix_micros(1078012800500000)).to_equal("2004-02-29T00:00:00.500000+00:00")
+
+describe "executable_batch_driver paths":
+    it "takes the directory of a path with either separator":
+        expect(dir_of("a/b/request.json")).to_equal("a/b")
+        val bs = "\\"
+        expect(dir_of("C:" + bs + "dir" + bs + "f.json")).to_equal("C:" + bs + "dir")
+        expect(dir_of("request.json")).to_equal(".")
+        expect(dir_of("/request.json")).to_equal("/")
+
+    it "strips a leading BOM only":
+        expect(strip_bom(char_from_code(65279) + "{{}")).to_equal("{{}")
+        expect(strip_bom("{{}")).to_equal("{{}")
