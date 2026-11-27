@@ -254,6 +254,20 @@ impl Lowerer {
                         return true;
                     }
                 }
+                // `T?` is pointer-form while `Some(x)` of a typed array/dict is an
+                // `Option` enum with payload `T`: same optional, admit either way.
+                if let (HirType::Pointer { inner, .. }, HirType::Enum { name, .. })
+                | (HirType::Enum { name, .. }, HirType::Pointer { inner, .. }) = (expected_ty, found_ty)
+                {
+                    if name == "Option" {
+                        let option_ty = if matches!(expected_ty, HirType::Enum { .. }) { expected } else { found };
+                        if let Some(payload) = self.option_enum_payload(option_ty) {
+                            if self.type_ids_compatible(*inner, payload) {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 // An array literal `[a, b, c]` coerces to a declared
                 // 3-tuple when the elements pairwise match (the self-hosted
                 // compiler and the interpreter both accept this spelling).
@@ -1523,10 +1537,14 @@ impl Lowerer {
         if declared_return_type.is_some() {
             if let Err(error) = self.validate_implicit_return_type(&body, return_type) {
                 // The HIR tail carries no span: point at the function instead.
+                // Name the DEFINING module, not the entry file, when the
+                // function reached this unit through import flattening.
                 let error = match error {
-                    LowerError::Unsupported(message) => {
-                        LowerError::Unsupported(format!("{message} (function at line {})", f.span.line))
-                    }
+                    LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                        "{message} ({}, function at line {})",
+                        self.body_diagnostic_file(),
+                        f.span.line
+                    )),
                     other => other,
                 };
                 // Unconditional: the error variant carries only two TypeIds, so
@@ -1534,7 +1552,7 @@ impl Lowerer {
                 eprintln!(
                     "error: declared return type mismatch in function `{}` ({}): {error:?}",
                     func_name,
-                    self.current_file.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                    self.body_diagnostic_file()
                 );
                 return Err(error);
             }

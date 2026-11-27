@@ -867,6 +867,103 @@ fn simple_2d_draw_ir_adv_composition_plan(composition: DrawIrComposition, gpu_av
         fallback_reason: _simple_2d_draw_ir_fallback_reason(composition.backend_target, gpu_available)
     )
 
+struct DrawIrDashRun:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    color: u32
+
+struct DrawIrDashRunsResult:
+    valid: bool
+    runs: [DrawIrDashRun]
+
+fn _draw_ir_parse_dec_nonneg_i64(token: text) -> i64:
+    val n = token.byte_len()
+    if n == 0 or n > 12:
+        return -1
+    var acc: i64 = 0
+    var i = 0
+    while i < n:
+        val ch = token.substring(i, i + 1)
+        val digit: i64 = match ch:
+            case "0": 0
+            case "1": 1
+            case "2": 2
+            case "3": 3
+            case "4": 4
+            case "5": 5
+            case "6": 6
+            case "7": 7
+            case "8": 8
+            case "9": 9
+            case _: -1
+        if digit < 0:
+            return -1
+        acc = acc * 10 + digit
+        i = i + 1
+    acc
+
+fn draw_ir_parse_dash_runs(command: DrawIrCommand) -> DrawIrDashRunsResult:
+    if command.kind != DRAW_IR_COMMAND_RECT:
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    if command.computed_style.len() != 1:
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    val prop = command.computed_style[0]
+    if prop.key != "dash-runs" or prop.value == "":
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    if (command.width <= 0 or command.height <= 0 or
+        command.fractional_geometry != None or command.affine_transform != None or
+        draw_ir_command_has_unsupported_v4_state(command) or
+        command.text_value != "" or command.advance_widths.len() != 0 or
+        command.edge != None or command.image_uri != "" or
+        command.points.len() != 0 or command.glyph_run.valid or
+        command.glyph_run.glyph_ids.len() != 0 or
+        command.glyph_run.xs.len() != 0 or
+        command.glyph_run.ys.len() != 0 or
+        command.glyph_run.clusters.len() != 0 or
+        command.parent_id != "" or command.border_rect.present or
+        command.content_rect.present or command.hit_rect.present):
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    val parts = prop.value.split(",")
+    if parts.len() < 4 or (parts.len() - 1) % 3 != 0:
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    val orient = parts[0]
+    if orient != "0" and orient != "1":
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    val vertical = orient == "1"
+    val side_len: i64 = if vertical: command.height.to_i64() else: command.width.to_i64()
+    var runs: [DrawIrDashRun] = []
+    var r = 1
+    while r + 2 < parts.len():
+        val off = _draw_ir_parse_dec_nonneg_i64(parts[r])
+        val run_len = _draw_ir_parse_dec_nonneg_i64(parts[r + 1])
+        val col_i64 = _draw_ir_parse_dec_nonneg_i64(parts[r + 2])
+        if off < 0 or run_len <= 0 or off + run_len > side_len:
+            return DrawIrDashRunsResult(valid: false, runs: [])
+        if col_i64 < 0 or col_i64 > 0xFFFFFFFF:
+            return DrawIrDashRunsResult(valid: false, runs: [])
+        val run_color = col_i64 as u32
+        if ((run_color >> 24) & 0xFFu32) == 0u32:
+            return DrawIrDashRunsResult(valid: false, runs: [])
+        val rx = if vertical: command.x.to_i64() else: command.x.to_i64() + off
+        val ry = if vertical: command.y.to_i64() + off else: command.y.to_i64()
+        val rw = if vertical: command.width.to_i64() else: run_len
+        val rh = if vertical: run_len else: command.height.to_i64()
+        if rx < -2147483648 or rx > 2147483647 or ry < -2147483648 or ry > 2147483647 or rw > 2147483647 or rh > 2147483647:
+            return DrawIrDashRunsResult(valid: false, runs: [])
+        runs.push(DrawIrDashRun(
+            x: rx as i32,
+            y: ry as i32,
+            width: rw as i32,
+            height: rh as i32,
+            color: run_color
+        ))
+        r = r + 3
+    if runs.len() == 0:
+        return DrawIrDashRunsResult(valid: false, runs: [])
+    DrawIrDashRunsResult(valid: true, runs: runs)
+
 export DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_GROUP, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_PATH, DRAW_IR_COMMAND_PORT, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_EDGE_BEZIER, DRAW_IR_EDGE_ORTHOGONAL, DRAW_IR_EDGE_STRAIGHT, DRAW_IR_SCHEMA_VERSION, DRAW_IR_SOURCE_GUI_AST, DRAW_IR_SOURCE_HTML_AST, DRAW_IR_SOURCE_MANUAL, DRAW_IR_SOURCE_WM_SCENE
 
 export draw_ir_command_has_unsupported_v4_state, draw_ir_command_v4_equal, draw_ir_commands_schema, draw_ir_composition_has_v4_state
@@ -881,4 +978,4 @@ export DrawEdge, DrawIrBatch, DrawIrCommand, DrawIrComposition, draw_ir_composit
 
 # Session v3/v4 additions: v2 alias constant and the fractional/affine command
 # and v4 batch/composition constructors consumed by engine2d/web UI modules.
-export DRAW_IR_SCHEMA_VERSION_V2, draw_ir_affine2d, draw_ir_affine_rect, draw_ir_batch_with_source_v4, draw_ir_composition_v4, draw_ir_fractional_geometry
+export DRAW_IR_SCHEMA_VERSION_V2, draw_ir_affine2d, draw_ir_affine_rect, draw_ir_batch_with_source_v4, draw_ir_composition_v4, draw_ir_fractional_geometry, DrawIrDashRun, DrawIrDashRunsResult, draw_ir_parse_dash_runs

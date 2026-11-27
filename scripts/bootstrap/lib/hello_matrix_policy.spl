@@ -1,0 +1,357 @@
+# Pure decisions of the phase-3 Hello sanity matrix twin.
+#
+# Pure-Simple twin of the decision functions in hello-sanity-matrix.py. Every
+# function here is free of I/O so byte parity with the Python owner is proven
+# on fixture inputs (test/fixtures/bootstrap/hello_sanity_matrix_parity/ and
+# test/01_unit/scripts/hello_matrix_policy_spec.spl). Driver:
+# scripts/bootstrap/hello-sanity-matrix.spl. Phases 1 and 2 stay on Python.
+
+pub val LANES: [text] = ["one-source", "two-objects", "static-library", "shared-library"]
+pub val EXPECTED_STDOUT = "Hello, World!\n"
+pub val FIXTURES = "test/fixtures/bootstrap/hello_sanity_matrix"
+pub val I64_MAX_TEXT = "9223372036854775807"
+
+# One SDN value. kind: "b" bool, "i" integer, "s" text (Python dict order kept
+# by the caller's list order; never a Dict).
+pub struct SdnField:
+    key: text
+    kind: text
+    value: text
+
+pub struct EnvPair:
+    key: text
+    value: text
+
+pub fn sdn_s(key: text, value: text) -> SdnField:
+    SdnField(key: key, kind: "s", value: value)
+
+pub fn sdn_i(key: text, value: i64) -> SdnField:
+    SdnField(key: key, kind: "i", value: "{value}")
+
+pub fn sdn_b(key: text, value: bool) -> SdnField:
+    SdnField(key: key, kind: "b", value: if value: "true" else: "false")
+
+# Python dict.update(): replace in place, else append.
+pub fn sdn_set(fields: [SdnField], field: SdnField) -> [SdnField]:
+    var out: [SdnField] = []
+    var replaced = false
+    for f in fields:
+        if f.key == field.key:
+            out.push(field)
+            replaced = true
+        else:
+            out.push(f)
+    if not replaced:
+        out.push(field)
+    out
+
+pub fn sdn_get(fields: [SdnField], key: text) -> text:
+    for f in fields:
+        if f.key == key:
+            return f.value
+    ""
+
+pub fn sdn_escape(value: text) -> text:
+    value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
+
+# Python Path.write_text() newline: CRLF on native Windows, LF elsewhere.
+pub fn text_newline(windows: bool) -> text:
+    if windows: "\r\n" else: "\n"
+
+# Byte-identical to sdn() in hello-sanity-matrix.py (a text-mode write).
+pub fn sdn_render(fields: [SdnField], windows: bool) -> text:
+    val nl = text_newline(windows)
+    var out = ""
+    for f in fields:
+        if f.kind == "s":
+            out = out + f.key + ": \"" + sdn_escape(f.value) + "\"" + nl
+        else:
+            out = out + f.key + ": " + f.value + nl
+    out
+
+# Python `dict(line.split(": ", 1) ...)` over an SDN receipt; Err on a line
+# without the separator (Python raises ValueError there).
+pub fn sdn_parse_raw(content: text) -> Result<[EnvPair], text>:
+    var out: [EnvPair] = []
+    var index = 0
+    for line in split_lines(content):
+        val at = line.index_of(": ") ?? -1
+        if at < 0:
+            return Err("dictionary update sequence element #{index} has length 1; 2 is required")
+        index = index + 1
+        out = env_put(out, line.substring(0, at), line.substring(at + 2, line.len()))
+    Ok(out)
+
+# Python str.splitlines() for \n / \r\n receipts (no trailing empty element).
+pub fn split_lines(content: text) -> [text]:
+    var out: [text] = []
+    for raw in content.split("\n"):
+        out.push(if raw.ends_with("\r"): raw.substring(0, raw.len() - 1) else: raw)
+    if out.len() > 0 and out[out.len() - 1] == "":
+        out.pop()
+    out
+
+pub fn env_put(pairs: [EnvPair], key: text, value: text) -> [EnvPair]:
+    var out: [EnvPair] = []
+    var replaced = false
+    for p in pairs:
+        if p.key == key:
+            out.push(EnvPair(key: key, value: value))
+            replaced = true
+        else:
+            out.push(p)
+    if not replaced:
+        out.push(EnvPair(key: key, value: value))
+    out
+
+pub fn env_has(pairs: [EnvPair], key: text) -> bool:
+    for p in pairs:
+        if p.key == key:
+            return true
+    false
+
+pub fn env_value(pairs: [EnvPair], key: text) -> text:
+    for p in pairs:
+        if p.key == key:
+            return p.value
+    ""
+
+pub fn env_drop(pairs: [EnvPair], key: text) -> [EnvPair]:
+    var out: [EnvPair] = []
+    for p in pairs:
+        if p.key != key:
+            out.push(p)
+    out
+
+pub fn has_text(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+# ---- status algebra ----
+
+pub fn buildrunner_summary(states: [text]) -> text:
+    if has_text(states, "FAIL"):
+        return "FAIL"
+    if states.len() == 0:
+        return "PARTIAL"
+    for s in states:
+        if s != "PASS" and s != "FUNCTIONAL" and s != "UNRUN":
+            return "PARTIAL"
+    if has_text(states, "FUNCTIONAL"):
+        return "FUNCTIONAL"
+    var all_unrun = true
+    for s in states:
+        if s != "UNRUN":
+            all_unrun = false
+    if all_unrun:
+        return "UNRUN"
+    if has_text(states, "UNRUN"):
+        return "PARTIAL"
+    "PASS"
+
+pub fn apply_buildrunner_status(status: text, buildrunner_status: text) -> text:
+    if buildrunner_status == "FAIL":
+        return "FAIL"
+    if status == "PASS" and buildrunner_status != "PASS":
+        return "PARTIAL"
+    status
+
+pub fn matrix_exit_code(status: text) -> i64:
+    if status == "PASS": 0 else: 1
+
+# (interpreter required, BuildRunner required) by compiler generation.
+pub fn phase_interpreter_required(phase: i64) -> bool:
+    phase == 1 or phase == 3
+
+pub fn phase_buildrunner_required(phase: i64) -> bool:
+    phase == 2 or phase == 3
+
+pub fn matrix_status(phase: i64, native_status: text, interpreter_status: text) -> text:
+    if native_status == "FAIL":
+        return "FAIL"
+    if interpreter_status != "PASS" and not (phase == 2 and interpreter_status == "SKIPPED"):
+        return "FAIL"
+    native_status
+
+# str(Path) of a repo-relative path: native separators.
+pub fn native_rel(path: text, windows: bool) -> text:
+    if windows: path.replace("/", "\\") else: path
+
+pub fn interpreter_argv(phase: i64, compiler: text, windows: bool) -> [text]:
+    val fixture = native_rel(FIXTURES + "/single.spl", windows)
+    if phase == 1:
+        return [compiler, "run", fixture]
+    [compiler, "run", fixture, "--interpret"]
+
+pub fn interpreter_env(phase: i64) -> [EnvPair]:
+    if phase == 1:
+        return [EnvPair(key: "SIMPLE_EXECUTION_MODE", value: "interpret"), EnvPair(key: "SIMPLE_NO_BOOTSTRAP_DELEGATE", value: "1")]
+    [EnvPair(key: "SIMPLE_NO_BOOTSTRAP_DELEGATE", value: "1")]
+
+# ---- inherited settings ----
+
+pub fn is_ascii_digits(value: text) -> bool:
+    if value.len() == 0:
+        return false
+    for i in 0..value.len():
+        val c = value.substring(i, i + 1)
+        if c < "0" or c > "9":
+            return false
+    true
+
+# Canonical positive i64 decimal: digits, no leading zero, <= 2**63-1.
+pub fn canonical_positive_i64(value: text) -> bool:
+    if not is_ascii_digits(value) or value.substring(0, 1) == "0" or value.len() > 19:
+        return false
+    value.len() < 19 or value <= I64_MAX_TEXT
+
+# inherited_build_settings(): settings kept across SIMPLE_* sanitization.
+pub fn inherited_build_settings(environ: [EnvPair], windows: bool) -> Result<[EnvPair], text>:
+    var kept: [EnvPair] = []
+    val key = "SIMPLE_BUILD_MEMORY_RESERVE_BYTES"
+    if env_has(environ, key):
+        val value = env_value(environ, key)
+        if not canonical_positive_i64(value):
+            return Err(key + " must be a canonical positive i64 decimal")
+        kept.push(EnvPair(key: key, value: value))
+    val sid = "SIMPLE_BOOTSTRAP_SESSION_ID"
+    val exe = "SIMPLE_BOOTSTRAP_SESSION_EXEC"
+    if not windows and (env_has(environ, sid) or env_has(environ, exe)):
+        val sid_value = env_value(environ, sid)
+        val exe_value = env_value(environ, exe)
+        if not canonical_positive_i64(sid_value) or not exe_value.starts_with("/"):
+            return Err("inherited watchdog session contract is incomplete or malformed")
+        kept.push(EnvPair(key: sid, value: sid_value))
+        kept.push(EnvPair(key: exe, value: exe_value))
+    Ok(kept)
+
+pub fn nested_session(env: [EnvPair], windows: bool) -> bool:
+    not windows and env_value(env, "SIMPLE_BOOTSTRAP_SESSION_ID") != "" and env_value(env, "SIMPLE_BOOTSTRAP_SESSION_EXEC") != ""
+
+# ---- natural linker metadata ----
+
+pub fn is_space(c: text) -> bool:
+    c == " " or c == "\t" or c == "\n" or c == "\r" or c == "\x0b" or c == "\x0c"
+
+pub fn strip_ws(value: text) -> text:
+    var start = 0
+    var end = value.len()
+    while start < end and is_space(value.substring(start, start + 1)):
+        start = start + 1
+    while end > start and is_space(value.substring(end - 1, end)):
+        end = end - 1
+    value.substring(start, end)
+
+pub fn first_command_executable(content: text) -> Result<text, text>:
+    val line = strip_ws(content)
+    if line == "" or line.contains("\n") or line.contains("\r"):
+        return Err("multiline/empty natural linker metadata")
+    var value = ""
+    if line.starts_with("\""):
+        val rest = line.substring(1, line.len())
+        val rel = rest.index_of("\"") ?? -1
+        if rel < 0:
+            return Err("ambiguous quoted natural linker executable")
+        val end = rel + 1
+        if line.len() > end + 1 and not is_space(line.substring(end + 1, end + 2)):
+            return Err("ambiguous quoted natural linker executable")
+        value = line.substring(1, end)
+    else:
+        var i = 0
+        while i < line.len() and not is_space(line.substring(i, i + 1)):
+            i = i + 1
+        value = line.substring(0, i)
+    if value == "" or value.contains("\""):
+        return Err("invalid natural linker executable")
+    Ok(value)
+
+# ---- reproduction receipt ----
+
+pub fn verify_capture_receipt_text(content: text, archive_sha: text, output_sha: text, linker_sha: text) -> Result<bool, text>:
+    val lines = split_lines(content)
+    if lines.len() == 0 or lines[0] != "simple-native-link-reproduce-v1":
+        return Err("invalid native link reproduction receipt")
+    var fields: [EnvPair] = []
+    for i in 1..lines.len():
+        val at = lines[i].index_of("=") ?? -1
+        if at < 0:
+            return Err("not enough values to unpack (expected 2, got 1)")
+        val key = lines[i].substring(0, at)
+        if env_has(fields, key):
+            return Err("duplicate reproduction receipt key")
+        fields.push(EnvPair(key: key, value: lines[i].substring(at + 1, lines[i].len())))
+    if fields.len() != 3 or env_value(fields, "archive_sha256") != archive_sha or not env_has(fields, "archive_sha256") or env_value(fields, "output_sha256") != output_sha or not env_has(fields, "output_sha256") or env_value(fields, "linker_sha256") != linker_sha or not env_has(fields, "linker_sha256"):
+        return Err("native reproduction archive/output/linker identity mismatch")
+    Ok(true)
+
+# ---- runtime identity ----
+
+pub fn runtime_identity_member(name: text) -> bool:
+    if name == "hosted-runtime.env":
+        return true
+    for suffix in [".a", ".lib", ".o", ".obj", ".dll", ".so", ".dylib"]:
+        if name.ends_with(suffix) and name.len() > suffix.len():
+            return true
+    false
+
+# ---- link replay input substitution ----
+
+pub fn _path_parts(path: text) -> [text]:
+    var out: [text] = []
+    for part in path.split("/"):
+        if part == "" or part == ".":
+            continue
+        if part == "..":
+            if out.len() > 0:
+                out.pop()
+            continue
+        out.push(part)
+    out
+
+# Python posixpath.relpath(path, start) for absolute arguments.
+pub fn posix_relpath(path: text, start: text) -> text:
+    val p = _path_parts(path)
+    val s = _path_parts(start)
+    var common = 0
+    while common < p.len() and common < s.len() and p[common] == s[common]:
+        common = common + 1
+    var parts: [text] = []
+    for _ in common..s.len():
+        parts.push("..")
+    for i in common..p.len():
+        parts.push(p[i])
+    if parts.len() == 0:
+        return "."
+    parts.join("/")
+
+pub fn tokens_chroot(tokens: [text]) -> bool:
+    has_text(tokens, "--chroot") or has_text(tokens, "--chroot=.")
+
+# replace_inputs(): token_shas[i] is the sha256 of root/tokens[i] when that is
+# a regular file and the token is not an option, else "".
+pub fn replace_inputs(tokens: [text], token_shas: [text], root: text, main: text, main_sha: text, provider: text, provider_sha: text) -> Result<[text], text>:
+    if main_sha == provider_sha:
+        return Err("main/provider identity collision")
+    var found_main = false
+    var found_provider = false
+    var result: [text] = []
+    val chroot = tokens_chroot(tokens)
+    for i in 0..tokens.len():
+        val sha = token_shas[i]
+        if sha != "" and (sha == main_sha or sha == provider_sha):
+            val is_main = sha == main_sha
+            if (is_main and found_main) or (not is_main and found_provider):
+                return Err("ambiguous duplicate captured main/provider input")
+            val chosen = if is_main: main else: provider
+            result.push(if chroot: posix_relpath(chosen, root) else: chosen)
+            if is_main:
+                found_main = true
+            else:
+                found_provider = true
+            continue
+        result.push(tokens[i])
+    if not found_main or not found_provider:
+        return Err("captured link did not consume exact emitted main and provider bytes")
+    Ok(result)

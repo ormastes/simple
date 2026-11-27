@@ -1,0 +1,132 @@
+# @cover src/compiler/10.frontend/core/parser_stmts.spl
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl
+# @cover src/compiler/10.frontend/core/lexer.spl
+"""
+# `unit` as an identifier at the start of an expression statement
+
+**Category:** Language / Parser
+**Status:** Regression guard
+
+## Purpose and Audience
+
+Bug: doc/08_tracking/bug/db/unit_identifier_expression_statement_parse_error_2026-11-26.sdn
+`fn f(unit: text) -> bool:` with body `unit == "px"` failed on the Rust seed
+parser: statement dispatch in src/compiler_rust/parser/src/parser_impl/core.rs
+routed any statement starting with `unit` that was not followed by an
+assignment op, `.` or `[` into the unit-declaration parser, which died with
+`expected identifier, found Eq`.
+
+The pure-Simple frontend (src/compiler/10.frontend) treats `unit` as a
+contextual soft keyword: it is not a lexer token, and the module-level
+declaration routers gate on `current_ident_is_unit_decl()` (identifier-start
+char after `unit`). Inside a function body, `parse_statement` has no `unit`
+arm at all, so `unit == "px"` is an ordinary expression statement. This spec
+pins that behavior by driving the pure-Simple parser directly on the seed
+interpreter, and proves the statement is lowered as a comparison expression,
+not misrouted into a unit declaration.
+
+The audience is anyone touching keyword tables, statement dispatch, or the
+unit-declaration router in either frontend.
+
+## Scope and Preconditions
+
+Pure-Simple frontend parse of the doc's exact shape (`unit == "px"` body),
+the fix-strategy shapes (`unit + 1`, `unit(...)` statements), and a guard
+that a genuine `unit Name: T as suffix` declaration still parses and
+registers. Runs on the Rust seed interpreter via `compiler.core.parser`.
+
+## Primary Workflow
+
+Feed each source shape through `parser_init_with_path` + `parse_module_body`,
+assert zero parser errors, then inspect the AST arena and the unit_decl pool.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.core.ast.{
+    ast_reset,
+    EXPR_BINARY, EXPR_CALL, EXPR_IDENT,
+    STMT_EXPR, stmt_get_expr, stmt_get_tag,
+    decl_get_body, decl_get_param_names, module_get_decls,
+    expr_get_args, expr_get_left, expr_get_str, expr_get_tag
+}
+use compiler.core.types.{reset_all_pools, unit_decl_count, unit_decl_name_at}
+use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+
+fn parse_fresh(source: text, path: text):
+    reset_all_pools()
+    ast_reset()
+    parser_init_with_path(source, path)
+    parse_module_body()
+
+describe "unit identifier at expression-statement start (pure-Simple frontend)":
+    it "parses the doc shape fn f(unit: text) with unit == \"px\" body as a comparison statement":
+        parse_fresh("fn f(unit: text) -> bool:\n    unit == \"px\"\n", "unit_ident_shape.spl")
+        expect(parser_has_errors()).to_equal(false)
+        if parser_has_errors():
+            pass_dn parser_get_errors().join(" | ")
+
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        expect(decl_get_param_names(decls[0])).to_equal(["unit"])
+
+        val body = decl_get_body(decls[0])
+        expect(body.len()).to_equal(1)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_EXPR)
+        val cmp_expr = stmt_get_expr(body[0])
+        expect(expr_get_tag(cmp_expr)).to_equal(EXPR_BINARY)
+        expect(expr_get_tag(expr_get_left(cmp_expr))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(expr_get_left(cmp_expr))).to_equal("unit")
+
+        # Must NOT be misrouted into a unit declaration.
+        expect(unit_decl_count()).to_equal(0)
+        ast_reset()
+
+    it "parses unit + 1 and unit(...) statements as expression statements":
+        parse_fresh("fn g(unit: i64) -> i64:\n    unit + 1\n    unit(2)\n    return unit\n", "unit_ident_ops.spl")
+        expect(parser_has_errors()).to_equal(false)
+        if parser_has_errors():
+            pass_dn parser_get_errors().join(" | ")
+
+        val body = decl_get_body(module_get_decls()[0])
+        expect(body.len()).to_equal(3)
+        expect(stmt_get_tag(body[0])).to_equal(STMT_EXPR)
+        val add_expr = stmt_get_expr(body[0])
+        expect(expr_get_tag(add_expr)).to_equal(EXPR_BINARY)
+        expect(expr_get_tag(expr_get_left(add_expr))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(expr_get_left(add_expr))).to_equal("unit")
+
+        expect(stmt_get_tag(body[1])).to_equal(STMT_EXPR)
+        val call_expr = stmt_get_expr(body[1])
+        expect(expr_get_tag(call_expr)).to_equal(EXPR_CALL)
+        expect(expr_get_tag(expr_get_left(call_expr))).to_equal(EXPR_IDENT)
+        expect(expr_get_str(expr_get_left(call_expr))).to_equal("unit")
+        expect(expr_get_args(call_expr).len()).to_equal(1)
+        expect(unit_decl_count()).to_equal(0)
+        ast_reset()
+
+    it "still parses a genuine unit declaration and registers it":
+        parse_fresh("unit Meters: i64 as m\n", "unit_ident_genuine_decl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        if parser_has_errors():
+            pass_dn parser_get_errors().join(" | ")
+
+        expect(unit_decl_count()).to_equal(1)
+        expect(unit_decl_name_at(0)).to_equal("Meters")
+        ast_reset()
+
+    it "lowers the doc shape through the pure-Simple HIR pipeline":
+        val parsed = parse_full_frontend(
+            "fn f(unit: text) -> bool:\n    unit == \"px\"\n",
+            "unit_ident_hir.spl", "unit_ident_hir", Logger(level: 0))
+        var lowering = HirLowering.with_filename("unit_ident_hir.spl")
+        val hir = lowering.lower_module(parsed)
+        var found_f = false
+        for fn in hir.functions.values():
+            if fn.name == "f" or fn.name.ends_with(".f"):
+                found_f = true
+        expect(found_f).to_equal(true)
+        ast_reset()

@@ -2554,6 +2554,21 @@ impl<'a> MirLowerer<'a> {
             );
         }
 
+        // Typed `f64?` locals become an inline (tag, bits) pair; see
+        // `mir::float_option_inline`. Same choke point, same reason.
+        if let Some(registry) = self.type_registry {
+            let inline_stats =
+                crate::mir::float_option_inline::apply_float_option_inline_to_module(&mut module.functions, registry);
+            if inline_stats.locals_inlined > 0 {
+                tracing::debug!(
+                    "f64? inline layout: {} local(s), {} boxed read(s), {} producer(s) removed",
+                    inline_stats.locals_inlined,
+                    inline_stats.reads_boxed,
+                    inline_stats.producers_removed,
+                );
+            }
+        }
+
         // Stamp lambda signatures onto otherwise-untyped indirect calls
         // (see `mir::closure_call_types` for why this cannot be done at the
         // call site alone).

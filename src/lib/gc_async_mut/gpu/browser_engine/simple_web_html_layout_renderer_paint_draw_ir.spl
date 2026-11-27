@@ -13,7 +13,7 @@ use std.common.encoding.sfnt_kern.{sfnt_line_metric_units_ascent_descent_px}
 use std.common.encoding.utf8.{text_codepoint_len, text_codepoints}
 use common.string_builder.{StringBuilder}
 use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_rect_bounds, draw_ir_rect_clipped, draw_ir_style_prop, draw_ir_text_styled_clipped}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, text_line_frac_dy, text_device_content_area}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_at, layout_device_scale, inline_sole_text_run, inline_content_area_height, centred_line_device_dy, input_value_line_device_dy, box_device_extra_h_at, text_line_frac_dy, text_device_content_area}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{ChromeSpans, chrome_checkable_spans, chrome_select_arrow_spans, chrome_resizer_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.media_control_chrome.{chrome_audio_control_spans, chrome_video_control_spans}
@@ -939,6 +939,12 @@ fn _html_draw_ir_command(
             )
         elif wrap_active:
             visual_text_rtl.substring(wrap_line_starts[0], wrap_line_ends[0])
+        elif wrap_line_starts.len() > 0 and wrap_line_starts[0] > 0:
+            # A nowrap run whose lead space collapsed into the pen's space:
+            # its single line starts past the space (boxes.wrap_starts), so
+            # the drawn text drops it, as the raster loop's per-line slice
+            # already does.
+            visual_text_rtl.substring(wrap_line_starts[0], wrap_line_ends[0])
         else:
             visual_text_rtl
         if wrap_active:
@@ -1734,7 +1740,10 @@ fn _html_draw_ir_input_value_command(
     val size_milli = font_milli_of(st.font_size, st.font_size_milli)
     if st.font_size_milli > 0 and size_milli % 1000 != 0:
         resolved.computed_style.push(draw_ir_style_prop("font-size-milli", "{size_milli}"))
-    resolved
+    # Device scale k > 1: the line is centred in the DEVICE content box and
+    # hangs from the device strut baseline (`input_value_line_device_dy`).
+    # A fallback-font value already carries its own offset; the two add.
+    _html_draw_ir_add_device_dy(resolved, input_value_line_device_dy(st, content_h, box_device_extra_h_at(i)))
 
 fn _html_draw_ir_overlay_rect(
     component_id: text, rect: ClipRect, color: u32, clip: ClipRect

@@ -288,3 +288,132 @@ fn weak_empty_rule_ignores_ill_kinded_and_explicit_repeat_siblings() {
         assert_eq!(element, TypeId::I64, "{body}");
     }
 }
+
+fn local_type<'a>(module: &'a crate::hir::HirModule, name: &str) -> &'a HirType {
+    let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+    let local = function.locals.iter().find(|l| l.name == name).unwrap();
+    module.types.get(local.ty).unwrap()
+}
+
+fn option_payload<'a>(module: &'a crate::hir::HirModule, ty: &'a HirType) -> &'a HirType {
+    let HirType::Enum { name, variants, .. } = ty else { panic!("expected Option enum, got {ty:?}") };
+    assert_eq!(name, "Option");
+    let (_, Some(payload)) = variants.iter().find(|(v, _)| v == "Some").unwrap() else { panic!("Some has no payload") };
+    module.types.get(payload[0]).unwrap()
+}
+
+#[test]
+fn option_wrapped_empty_array_defers_to_concrete_sibling_in_if_and_match() {
+    let if_forms = ["if c: Some([]) else: Some(xs)", "if c: Some(xs) else: Some([])"];
+    let match_forms = [
+        "match k:\n        case 0: Some([])\n        case _: Some(xs)",
+        "match k:\n        case 0: Some(xs)\n        case _: Some([])",
+    ];
+    for expression in if_forms.iter().chain(match_forms.iter()) {
+        let source = format!(
+            "fn probe(xs: [f64], c: bool, k: i64) -> f64:\n    val r = {expression}\n    match r:\n        case Some(v): v[0]\n        case None: 0.0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let r_ty = local_type(&module, "r");
+        let HirType::Array { element, .. } = option_payload(&module, r_ty) else { panic!("{expression}: payload is not an array") };
+        assert_eq!(*element, TypeId::F64, "{expression}: join must keep the concrete sibling's element type");
+        let HirType::Array { element, .. } = local_type(&module, "v") else { panic!("{expression}: v is not an array") };
+        assert_eq!(*element, TypeId::F64, "{expression}");
+    }
+}
+
+#[test]
+fn option_wrapped_arrays_do_not_defer_when_not_weak_or_not_collections() {
+    // `Some([x; 0])` is an explicit repeat (never weak); `Some([])` vs `Some([])` and
+    // `Some([])` vs `Some(5)` keep the first arm's own type.
+    for expression in ["if c: Some([\"t\"; 0]) else: Some(xs)", "if c: Some([]) else: Some(5)"] {
+        let source = format!(
+            "fn probe(xs: [f64], c: bool) -> i64:\n    val r = {expression}\n    0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let r_ty = local_type(&module, "r");
+        if matches!(r_ty, HirType::Any) {
+            continue; // untyped Some(..) stays erased: nothing adopted from the sibling
+        }
+        let HirType::Array { element, .. } = option_payload(&module, r_ty) else { panic!("{expression}: payload is not an array") };
+        assert_ne!(*element, TypeId::F64, "{expression}: must not adopt the sibling element type");
+    }
+}
+
+fn assert_not_i32_array_option(module: &crate::hir::HirModule, ty: &HirType, what: &str) {
+    if let HirType::Enum { name, .. } = ty {
+        if name == "Option" {
+            let HirType::Array { element, .. } = option_payload(module, ty) else { return };
+            assert_ne!(*element, TypeId::I32, "{what}: bare `Some([])` must not become authoritative Option<[i32]>");
+        }
+    }
+    if let HirType::Array { element, .. } = ty {
+        assert_ne!(*element, TypeId::I32, "{what}: payload must not be the i32 default");
+    }
+}
+
+#[test]
+fn some_empty_array_stays_weak_when_later_replaced_or_filled() {
+    // a02: `var o = Some([]); o = Some([1.5, 2.5])`, a18: fill through the bound payload,
+    // c04: `if c: Some([]) else: None` then push.
+    for (source, local) in [
+        ("fn probe() -> f64:\n    var o = Some([])\n    o = Some([1.5, 2.5])\n    match o:\n        case Some(v): v[0] + 0.25\n        case None: 0.0\n", "o"),
+        ("fn probe() -> f64:\n    var o = Some([])\n    match o:\n        case Some(v):\n            var w = v\n            w.push(2.5)\n            w[0]\n        case None: 0.0\n", "o"),
+        ("fn probe() -> f64:\n    var o = Some([])\n    match o:\n        case Some(v):\n            var w = v\n            w.push(2.5)\n            w[0]\n        case None: 0.0\n", "v"),
+        ("fn probe(c: bool) -> f64:\n    val r = if c: Some([]) else: None\n    match r:\n        case Some(v):\n            var w = v\n            w.push(1.5)\n            w[0]\n        case None: 0.0\n", "r"),
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let ty = local_type(&module, local);
+        assert_not_i32_array_option(&module, ty, local);
+    }
+}
+
+#[test]
+fn option_wrapped_empty_dict_defers_and_option_never_adopts_result() {
+    let source = "fn probe(c: bool, base: Dict<text, f64>) -> f64:\n    val r = if c: Some({}) else: Some(base)\n    match r:\n        case Some(v): v[\"k\"]\n        case None: 0.0\n";
+    let module = parse_and_lower(source).unwrap();
+    let ty = local_type(&module, "r");
+    let payload = option_payload(&module, ty);
+    assert!(matches!(payload, HirType::Dict { .. }), "dict join must follow the concrete sibling: {payload:?}");
+
+    let source = "fn probe(c: bool, xs: [f64]) -> i64:\n    val r = if c: Some([]) else: Ok(xs)\n    0\n";
+    let module = parse_and_lower(source).unwrap();
+    let ty = local_type(&module, "r");
+    assert!(!matches!(ty, HirType::Enum { name, .. } if name == "Result"), "Some([]) must not adopt a Result type: {ty:?}");
+}
+
+#[test]
+fn some_array_literal_payload_stays_erased_so_reassignment_and_mixed_pushes_stay_correct() {
+    // b03: `Some([0])` later reassigned `Some([1.5, 2.5])`; b05: heterogeneous `Some([..])` pushes.
+    for source in [
+        "fn probe() -> f64:\n    var c2 = Some([0])\n    c2 = Some([1.5, 2.5])\n    0.0\n",
+        "fn probe() -> f64:\n    val a = Some([1.5, 2.5])\n    0.0\n",
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let function = module.functions.iter().find(|f| f.name == "probe").unwrap();
+        for local in function.locals.iter().filter(|l| l.name == "c2" || l.name == "a") {
+            assert!(!matches!(module.types.get(local.ty), Some(HirType::Enum { .. })), "literal payload must not become authoritative Option<T>");
+        }
+    }
+}
+
+#[test]
+fn option_wrapped_empty_literal_never_adopts_sibling_of_other_collection_kind() {
+    // d10 k1/k2: an erased `Some([])` vs `Some(<dict>)` (and `Some({})` vs `Some(<array>)`)
+    // must keep the first arm's type instead of adopting the other kind's Option.
+    for (empty, base, bad_dict) in [("[]", "base", true), ("{}", "xs", false)] {
+        let source = format!(
+            "fn probe(c: bool, xs: [f64], base: Dict<text, f64>) -> i64:\n    val r = if c: Some({empty}) else: Some({base})\n    0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let ty = local_type(&module, "r");
+        if let HirType::Enum { name, .. } = ty {
+            if name == "Option" {
+                let payload = option_payload(&module, ty);
+                let is_dict = matches!(payload, HirType::Dict { .. });
+                let is_array = matches!(payload, HirType::Array { .. });
+                assert!(!(bad_dict && is_dict) && !(!bad_dict && is_array), "{empty} vs {base}: adopted the other kind: {payload:?}");
+            }
+        }
+    }
+}

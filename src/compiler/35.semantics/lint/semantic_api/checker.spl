@@ -12,14 +12,15 @@
 #
 # Emitted codes:
 #   MC-API-001  fn/me signature (param or return) reaches a primitive leaf
-#   MC-API-002  struct/class field reaches a primitive leaf (public AND
-#               private fields both emit this code; the severity distinction
-#               is strictness-profile configuration applied later)
+#   MC-API-002  struct/class field or enum variant payload reaches a
+#               primitive leaf (public AND private fields/payloads both emit
+#               this code; the severity distinction is strictness-profile
+#               configuration applied later)
 #   MC-API-003  extern fn signature reaches a primitive leaf (informational —
 #               FFI boundaries often legitimately speak raw machine types)
 #
 # Input model: the flat typed-Node AST of compiler.frontend.ast
-# ({Node, FunctionDef, StructDef, ClassDef} — the richer of the two
+# ({Node, FunctionDef, StructDef, ClassDef, EnumDef} — the richer of the two
 # primitive_api input models: it carries full type TEXT, whereas the arena
 # tag model of primitive_api_arena.spl is lossy — the parser erases
 # Option<i32>'s element to bare TYPE_OPTION, making the recursive walk
@@ -32,21 +33,23 @@
 # coverage); pub-only filtering happens at integration time where
 # decl_get_visibility_text() is available (arena layer).
 #
-# Enum payloads: NOT WIRED IN (capture itself is no longer the blocker).
-# Lanes EPC1 (single-payload) and EPA1 (full arity, 2026-07-29) landed real
-# capture: the parser records every variant's payload field types
-# (enum_module_body.spl / parser_decls_types.spl), decl_enum_def() carries
-# them via decl_field_types (flat, in-order across all variants) +
+# Enum payloads: WIRED IN. Lanes EPC1 (single-payload) and EPA1 (full arity,
+# 2026-07-29) landed real capture: the parser records every variant's payload
+# field types (enum_module_body.spl / parser_decls_types.spl), decl_enum_def()
+# carries them via decl_field_types (flat, in-order across all variants) +
 # decl_field_bits (reused as a per-variant field-count array), and the
 # production bridge (_FlatAstBridge/module_assembly.spl) builds real
 # `VariantKind.Tuple([...])` nodes with every field's type, not `Tuple([])`.
 # See decl_enum_def's docstring in _Ast/decl_nodes.spl for the encoding.
-# What remains out of scope for THIS module: HIR still only carries what
-# declaration_lowering.spl's lower_variant threads through, and this checker
-# has no integration step wired to walk enum payload types at all yet —
-# that routing (each payload type through check_type_text with MC-API-002
-# semantics, mirroring struct/class fields) is still a later serialized
-# step, same as the rest of this file's "standalone library" note below.
+# The flat typed-Node AST this checker consumes (compiler.frontend.ast.EnumDef)
+# now carries the same data as flat lists: variant_payload_counts (parallel to
+# `variants`), variant_payload_kinds (0=unit/1=tuple/2=struct), and the FLAT,
+# element-for-element parallel variant_payload_type_names /
+# variant_payload_field_names lists ("" field name = positional slot).
+# check_enum_payload_texts routes every captured payload type through
+# check_type_text with MC-API-002 semantics, mirroring struct/class fields
+# (doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md
+# — the routing step called out there).
 #
 # Standalone library — NOT wired into the live lint pipeline (integration is
 # a later serialized step).
@@ -145,6 +148,41 @@ fn check_field_texts(owner_name: text, field_texts: [text]) -> [ApiViolation]:
             out.push(v)
     out
 
+fn check_enum_payload_texts(owner_name: text, variants: [text], payload_counts: [i64], payload_type_names: [text], payload_field_names: [text]) -> [ApiViolation]:
+    """Check enum variant payload types — MC-API-002, mirroring struct/class
+    fields (public AND private payloads both emit; severity split is profile
+    config applied at a later stage).
+
+    Payload types arrive FLAT across variants in source order
+    (compiler.frontend.ast.EnumDef.variant_payload_type_names, element-for-
+    element parallel to variant_payload_field_names; "" field name =
+    positional slot). payload_counts is parallel to `variants` and maps each
+    flat entry back to its variant; a count of 0 = unit variant (nothing to
+    check). Entries beyond the recorded type names are skipped, so an
+    EnumDef built without payload lists (older producers) stays silent."""
+    var out: [ApiViolation] = []
+    var flat = 0
+    var vi = 0
+    while vi < variants.len() and vi < payload_counts.len():
+        val vname = variants[vi]
+        var slot = 0
+        while slot < payload_counts[vi]:
+            if flat < payload_type_names.len():
+                val pty = payload_type_names[flat].trim()
+                if pty != "":
+                    var member = "variant '{vname}' payload"
+                    if flat < payload_field_names.len():
+                        val fname = payload_field_names[flat]
+                        if fname != "":
+                            member = "variant '{vname}' payload field '{fname}'"
+                    val vs = check_type_text(code: "MC-API-002", item_name: owner_name, member: member, type_text: pty)
+                    for v in vs:
+                        out.push(v)
+            flat = flat + 1
+            slot = slot + 1
+        vi = vi + 1
+    out
+
 fn check_extern_signature_text(sig0: text) -> [ApiViolation]:
     """Parse an 'extern fn name(params) -> ret' text line and check it
     under MC-API-003. Non-extern text yields []."""
@@ -201,8 +239,8 @@ fn check_module_items(items: [Node]) -> [ApiViolation]:
     items (compiler.frontend.ast Node list).
 
     Functions -> MC-API-001, struct/class fields -> MC-API-002,
-    'extern fn ...' Other lines -> MC-API-003. Enums: nothing emitted —
-    payload types are discarded by the parser (see header; lane A4)."""
+    enum variant payload types -> MC-API-002, 'extern fn ...' Other
+    lines -> MC-API-003."""
     var out: [ApiViolation] = []
     for item in items:
         match item:
@@ -226,11 +264,14 @@ fn check_module_items(items: [Node]) -> [ApiViolation]:
                 val cvs = check_field_texts(class_def.name, class_def.fields)
                 for v in cvs:
                     out.push(v)
-            case Enum(_):
-                # Payload types structurally unavailable — see header comment
-                # and doc/08_tracking/bug/enum_variant_payload_types_discarded_at_parse_2026-07-29.md
-                # (lane A4E, 2026-07-29: confirmed blocker, not a lossy-tag gap).
-                pass
+            case Enum(enum_def):
+                val evs = check_enum_payload_texts(
+                    enum_def.name, enum_def.variants,
+                    enum_def.variant_payload_counts,
+                    enum_def.variant_payload_type_names,
+                    enum_def.variant_payload_field_names)
+                for v in evs:
+                    out.push(v)
             case Other(line):
                 val evs = check_extern_signature_text(line)
                 for v in evs:
@@ -241,4 +282,5 @@ fn check_module_items(items: [Node]) -> [ApiViolation]:
 
 export ApiViolation
 export check_type_text, check_fn_signature, check_field_texts
+export check_enum_payload_texts
 export check_extern_signature_text, check_module_items

@@ -47,12 +47,23 @@ val add: fn(i64, i64) -> i64 = \x, y: x + y   # Parameters inferred from type
 
 | Context | Annotations |
 |---------|-------------|
-| Public function signatures | Required |
-| Struct/class fields | Required |
+| Public / exported / cross-module function signatures | Required |
+| Struct/class fields, `extern fn` | Required |
 | Generic constraints | Required |
+| Private function, same-module call sites agree | Optional: inferred, one monomorphic copy |
+| Private function, call sites disagree | Optional: implicit generic, instances capped and deduplicated |
+| Private function over the instance cap, polymorphic recursion, higher-rank | Required (compile error says "annotate") |
 | Local variables (library code) | Recommended |
 | Local variables (application code) | Optional |
 | Lambda parameters | Contextual |
+
+The private-function rows and the "required" row for public functions are the
+owner decision of 2026-11-27 and are **staged: warning first, then error**.
+An unannotated parameter is a type variable, not `any`; a type the compiler
+cannot determine is a compile error. Inference never crosses a module
+boundary, which is why public signatures are annotated. Full rules, error
+messages and what is implemented so far:
+[no_any_inference_generics.md](../../05_design/language/type_system/no_any_inference_generics.md).
 
 ```simple
 # Explicit when needed for a specific type
@@ -75,7 +86,7 @@ simple check --show-types src/lib.spl # Show inferred types
 simple check --verbose src/*.spl      # Verbose with suggestions
 ```
 
-Type checking is optional -- it only runs when you use `simple check` or `--type-check` flags.
+The standalone type checker is optional -- it only runs when you use `simple check` or `--type-check` flags. The rules under "Current Type Rules" below are separate from that checker and belong to compilation itself; each bullet says whether it is enforced today or staged.
 
 ### Forward References
 
@@ -126,8 +137,30 @@ and an ERROR after phase 3 (staged). See
 ## Current Type Rules
 
 - `nil` only inside `unsafe:`; use `Option<T>` / `None` (match arm `None:`).
-- `Any` / erased access outside `unsafe:` is a compile error.
-- Generics are erased; there is no monomorphization pass.
+- `any` / `Any` (including `[any]`) and erased access are allowed only inside
+  `unsafe` (any `unsafe:` block or `@unsafe` function; no separate capability)
+  and in script mode. Script mode is set by file kind and config, not by the
+  execution engine: `.shs` / `.sscript` are script by default, `.spl` is
+  compiled; a header attribute, CLI flag or `simple.sdn` row overrides, most
+  local wins; the interpreter also runs compiled-mode source (as the test
+  runner does) under the compiled rules.
+  Safe compiled code never uses or produces `any`: where a type cannot be
+  determined the result is a compile error, not a fallback. Owner decision
+  2026-11-27, staged warning then error. **Not yet enforced in default
+  builds:** the self-hosted ban applies only at Robust/Critical strictness and
+  the seed has no such diagnostic.
+- `if`/`match` arms used as a value must have one type; different types are a
+  compile error naming both arms. Int and float arms widen to float. **Not yet
+  enforced on the release line:** it lands with stage S1 of the no-`any` plan;
+  until then the first arm silently decides the type.
+- For mixed data use an `enum` (closed set) instead of `any`. Trait objects
+  (`dyn Trait`) are intended for open sets, but the self-hosted compiler
+  cannot yet dispatch a trait call with several implementors; do not migrate
+  onto `dyn Trait` yet.
+- Generics are erased today; there is no monomorphization pass yet. **Decided
+  2026-11-27: generics will be fully monomorphized** (one copy per distinct
+  type-argument vector), reversing the 2026-10-31 erased-body decision. Until
+  that lands, a generic `T` is still a tagged word at run time (design doc §6).
 - Non-exhaustive value match: WARNING now, ERROR after phase 3 (staged).
 
 ## Union Types

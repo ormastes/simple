@@ -12,8 +12,9 @@ contracts are pinned to a named engine versus the driving interpreter.
 The language-level scenarios run under the engine the test driver selects;
 the final group pins the same contracts to a NAMED engine out of process and
 is the only group that can fail independently of the driver's lane. The
-engine-canary scenario intentionally asserts a still-open JIT divergence and
-stays red until that gap closes.
+engine-canary scenario pinned a JIT divergence (F64 dict-miss decode) that
+was still open when the probe was written; it closed by 2026-11-27 (verified
+with SIMPLE_JIT_STRICT=1) and the canary now asserts both engines correct.
 ## Verification guidance and troubleshooting
 A failure in the first groups means a language construct drifted under the
 driver's engine; a failure in the out-of-process group means the named
@@ -416,15 +417,15 @@ describe "cranelift backend holds under the jit lane (out of process)":
         # prove the "jit" arm reached the JIT: one unsupported operation
         # silently demotes a whole program back to the interpreter, and an
         # unrecognised SIMPLE_EXECUTION_MODE value silently selects the JIT.
-        # The probe therefore also reports a live, still-OPEN divergence --
-        # `Dict<text, f64>.get()` on a miss, which the F64 decode arm
-        # deliberately does not guard (expr_dispatch.spl:991).
-        #
-        # Measured 2026-08-09, same probe, same binary, both engines:
+        # The divergence this canary pinned is CLOSED. Measured 2026-08-09:
         #   interpret -> PROBE ENGINE CANARY: true    (correct)
         #   jit       -> PROBE ENGINE CANARY: false   (the open gap)
+        # Re-measured 2026-11-27 on the fresh seed, with
+        # SIMPLE_JIT_STRICT=1 (interpreter fallback disabled, so the jit arm
+        # cannot silently demote):
+        #   jit       -> PROBE ENGINE CANARY: true    (gap closed)
         expect(engine_stdout(_CODEGEN_PROBE, "interpret")).to_contain("PROBE ENGINE CANARY: true")
-        expect(engine_stdout(_CODEGEN_PROBE, "jit")).to_contain("PROBE ENGINE CANARY: false")
+        expect(engine_stdout(_CODEGEN_PROBE, "jit")).to_contain("PROBE ENGINE CANARY: true")
 
     it "rejects an unrecognised engine name instead of silently using the jit":
         # @req REQ-CODEGEN-JIT-PROBE-004

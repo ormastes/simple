@@ -1349,6 +1349,25 @@ impl Lowerer {
             .map(str::to_string)
     }
 
+    /// File a body-lowering diagnostic should name. Import flattening splices
+    /// an imported module's items into the entry unit while `current_file`
+    /// stays the ENTRY path, so a verdict raised while an imported function
+    /// lowers would name the wrong file; the flattener's owner attribute
+    /// (`flatten_owner_of`) still identifies the DEFINING module. Entry-module
+    /// functions and non-flattened units carry no attribute and keep
+    /// `current_file`. Same attribution policy as `record_private_ref`.
+    /// seed_lowering_error_names_entry_file_not_defining_module_2026-11-26
+    pub(super) fn body_diagnostic_file(&self) -> String {
+        match &self.current_function_owner {
+            Some(owner) => owner.clone(),
+            None => self
+                .current_file
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+        }
+    }
+
     /// Return type of a call to extern `name` as declared by the CALLING
     /// module, when co-compiled modules declare `name` with different return
     /// types. `None` (keep the bare-name type) when every declaration agrees or

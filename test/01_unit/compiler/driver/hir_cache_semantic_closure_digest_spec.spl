@@ -101,3 +101,31 @@ describe "HIR closure dependency identity":
             ri = ri + 1
         expect(hir_cache_closure_digest(left) ==
                hir_cache_closure_digest(right)).to_equal(false)
+
+    it "ignores worker-local surface spellings while folding the registry mapping":
+        step("Per-surface name fields are worker-local; the ordered registry mapping is the alias identity term")
+        val base = hir_cache_closure_digest(importer_closure("pub fn answer() -> i64:\n    1\n"))
+        var renamed = importer_closure("pub fn answer() -> i64:\n    1\n")
+        var surface = renamed.surfaces[0]
+        surface.module_name = "worker.local.alias.provider"
+        surface.logical_name = "worker.local.alias.provider"
+        renamed.surfaces[0] = surface
+        expect(hir_cache_closure_digest(renamed)).to_equal(base)
+
+    it "digests an older-generation surface but rejects a newer-generation one":
+        step("A surface built before the registry generation bump still keys; a surface newer than its registry is a stale registry view and must fail closed")
+        var aged_closure = importer_closure("pub fn answer() -> i64:\n    1\n")
+        var aged = aged_closure.surfaces[0]
+        aged.generation = aged_closure.generation - 1
+        aged_closure.surfaces[0] = aged
+        expect(hir_cache_closure_digest(aged_closure).len()).to_equal(64)
+        var bumped_closure = importer_closure("pub fn answer() -> i64:\n    1\n")
+        var bumped = bumped_closure.surfaces[0]
+        bumped.generation = bumped_closure.generation + 1
+        bumped_closure.surfaces[0] = bumped
+        expect(hir_cache_closure_digest(bumped_closure)).to_equal("")
+
+    it "rejects a registry whose ordered mapping points outside the surface array":
+        var torn = importer_closure("pub fn answer() -> i64:\n    1\n")
+        torn.ordered_indices[0] = 99
+        expect(hir_cache_closure_digest(torn)).to_equal("")
