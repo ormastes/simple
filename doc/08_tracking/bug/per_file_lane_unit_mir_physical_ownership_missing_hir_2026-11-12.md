@@ -1,6 +1,6 @@
 # Per-file lane (default Stage 3 route) fails before any real HIR: unit child's MIR gate wants HIR for the whole inventory
 
-- Status: fixed (2026-11-22; per-file `stage3_file_workers: 1` restored as bootstrap default)
+- Status: fix-implemented-verification-pending (2026-11-27; waiting-for: native Stage 3 per-file lane build verification; 2026-11-22 default `stage3_file_workers: 1` cutover landed)
 - Severity: P1 (blocks the DEFAULT Stage 3 route; workaround exists)
 - Found: 2026-11-12 (early Phase 3 census lane)
 - Component: compiler driver, per-file unit pipeline
@@ -202,3 +202,14 @@ Closed the remaining per-file unit and coordinator gaps and enabled `stage3_file
    - Admitted `--no-borrow-check` and `--emit-*` switches in `worker_hir_argument_error_v1`, and skipped duplicate parse/HIR/MIR shard pools in `run_native_build_worker_inner` when `SIMPLE_MIR_SHARD_LINK` is already sealed by the per-file worker pool.
 5. **Bootstrap default cutover (`config/bootstrap.sdn`, `scripts/bootstrap/**`):**
    - Switched `stage3_file_workers` to `1` and updated `phase-c-backend-commands.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs` (`${P3G_FILE_WORKERS:-${SIMPLE_FILE_WORKERS:-1}}`), and `produce-bootstrap-planner-admission-v2.shs` (with targeted retry/recovery on prebuilt Stage 2 `llc-no-object` spawn no-ops) to default `SIMPLE_FILE_WORKERS` to `1` while honoring explicit `SIMPLE_FILE_WORKERS=0` opt-out.
+
+## 2026-11-27 P1-1 Host Spec Audit & Regression Parity
+
+- Audited `src/compiler/80.driver/driver_pipeline_lowering.spl`, `src/compiler/80.driver/driver_unit_tldr_imports_v1.spl`, `src/compiler/20.hir/hir_lowering/module_surface_source_identity.spl`, `src/compiler/20.hir/hir_lowering/module_surface_types.spl`, and `src/app/cli/worker_hir_profile_v1.spl` against `origin/release/1.0.0` (`b6d78c690b2`): Layer 1 (physical-ownership gate), Layer 2 (canonical logical source identity across checkout / SCV snapshot / `--source <pkg>` roots), Layer 3 (owner-verified terminal receipt), and `worker_hir_profile_v1` `--mode` / `SIMPLE_FILE_WORKERS` / `RUST_LOG` admission are all present in tree.
+- Added focused Layer 2 surface parity spec `test/01_unit/compiler/driver/per_file_lane_layer2_surface_parity_spec.spl` and ran host interpreter specs sequentially:
+  - `test/01_unit/compiler/driver/per_file_lane_layer2_surface_parity_spec.spl`: `6/6` passed (`0` failed)
+  - `test/01_unit/compiler/driver/mir_physical_owners_spec.spl`: `31/31` passed (`0` failed)
+  - `test/01_unit/compiler/80.driver/per_file_logical_identity_terminal_spec.spl`: `9/9` passed (`0` failed)
+  - `test/01_unit/app/cli/worker_hir_profile_v1_spec.spl`: `46/46` passed (`0` failed)
+  - `test/01_unit/compiler/driver/per_file_bootstrap_default_spec.spl`: `5/6` passed (`1` pre-existing failure on `builds 1:1 summary surfaces for a 4-file closure with cross-file use and facade re-export` due to `.hirkey` `LeafZeroTag` fallback)
+- Status recorded as `fix-implemented-verification-pending` (`waiting-for: native Stage 3 per-file lane build verification`, since native bootstrap/Stage-3 builds do not run in this host interpreter lane).

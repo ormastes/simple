@@ -1,0 +1,212 @@
+# Signed fixture producers for the Enrolled Linux Host specs. Every byte comes from the canonical encoders
+# and signer in src/: the OpenSSH Ed25519 private-file encoder (host_identity_key_v1), the canonical
+# local authority policy, the controller dispatch config and its installer, the enrollment binding codec,
+# the controller enrollment issuer and the controller gateway request codec. Key seeds come from the OS
+# entropy owner at run time; nothing here is a real secret and nothing is written outside the caller's paths.
+# Consumers: enrolled_host_signed_fixture_gen.spl (guest wrapper) and
+# test/03_system/app/orchestrator/feature/enrolled_host_signed_fixture_spec.spl.
+use std.common.crypto.ed25519.ed25519_pubkey
+use std.common.crypto.sha256.sha256_text
+use std.common.binary_inspect.bytes_to_hex_canonical
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.nogc_sync_mut.sosix.entropy.sosix_random_bytes
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded, file_fsync, directory_fsync}
+use std.nogc_sync_mut.io_runtime.file_write_bytes
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_key_v2
+use std.nogc_sync_mut.io.local_authority_policy_v1.{LocalAuthorityPolicyV1, local_authority_policy_decode_v1}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchConfigV1, ControllerDispatchContextV1,
+    controller_dispatch_config_encode_v1, controller_dispatch_config_install_v1}
+use std.nogc_sync_mut.io.host_enrollment_v1.HostEnrollmentCredentialV1
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLinuxServiceEnrollmentBindingV3,
+    host_linux_service_enrollment_encode_v3}
+use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
+use app.orchestrator.controller_authority_issue_v1.{controller_authority_key_leaf_v1, controller_linux_enrollment_issue_v3}
+use app.orchestrator.controller_gateway_v1.{ControllerGatewayRequestV1, controller_gateway_request_encode_v1}
+
+# The five inputs the enrollment binding pins, in host_linux_provision_startup_v3_spec order.
+pub val ENROLLED_FIXTURE_PINNED_INPUTS_V1: [text] = ["host-config.sdn", "engine-policy.sdn", "broker-policy.sdn",
+    "agent-helper-template.sdn", "remote-build-helper-template.sdn"]
+pub val ENROLLED_FIXTURE_KEY_TTL_MS_V1: i64 = 2592000000
+
+pub struct EnrolledFixtureInputsV1:
+    controller_id: text
+    approver_id: text
+    principal: text
+    project: text
+    physical_host_id: text
+    service_scope_id: text
+    native_machine_id: text
+    provider_identity_digest: text
+    machine_parent: text
+    host_root: text
+    physical_cpu_millis: i64
+    physical_memory_bytes: i64
+    reserved_cpu_millis: i64
+    reserved_memory_bytes: i64
+    now_ms: i64
+
+pub struct EnrolledFixtureKeyV1:
+    seed: [u8]
+    public_key: [u8]
+    file: [u8]
+
+pub struct EnrolledFixtureAuthorityV1:
+    issuer: EnrolledFixtureKeyV1
+    approver: EnrolledFixtureKeyV1
+    policy_bytes: text
+    policy: LocalAuthorityPolicyV1
+    issuer_key: DistributedAuthorityKeyV2
+    approver_key: DistributedAuthorityKeyV2
+
+fn enrolled_fixture_copy_v1(bytes: [u8]) -> [u8]:
+    var out: [u8] = []
+    for byte in bytes: out.push(byte)
+    out
+
+# One OpenSSH Ed25519 private file from a fresh 32-byte entropy seed (canonical encoder, random check words).
+pub fn enrolled_fixture_key_v1(label: text) -> Result<EnrolledFixtureKeyV1, text>:
+    val seed = sosix_random_bytes(32)?
+    enrolled_fixture_key_from_seed_v1(seed, label)
+
+pub fn enrolled_fixture_key_from_seed_v1(seed: [u8], label: text) -> Result<EnrolledFixtureKeyV1, text>:
+    val check = sosix_random_bytes(4)?
+    val public_key = ed25519_pubkey(seed)
+    val file = host_identity_private_encode_v1(seed, public_key, check, label)?
+    Ok(EnrolledFixtureKeyV1(seed: seed, public_key: public_key, file: file))
+
+fn enrolled_fixture_hex_v1(bytes: [u8]) -> text:
+    var wide: [i64] = []
+    for byte in bytes: wide.push(byte as i64)
+    bytes_to_hex_canonical(wide)
+
+fn enrolled_fixture_policy_key_v1(identity: text, role: text, public_key: [u8],
+        inputs: EnrolledFixtureInputsV1) -> SdnValue:
+    val fields: Dict<text, SdnValue> = {"identity": SdnValue.String(identity), "role": SdnValue.String(role),
+        "revision": SdnValue.Int(1), "publicKeyHex": SdnValue.String(enrolled_fixture_hex_v1(public_key)),
+        "principal": SdnValue.String(inputs.principal), "project": SdnValue.String(inputs.project),
+        "hostId": SdnValue.String(inputs.physical_host_id),
+        "operations": SdnValue.Array([SdnValue.String("host_enroll_v1")]),
+        "maximumMemoryBytes": SdnValue.Int(inputs.physical_memory_bytes), "maximumDurationMs": SdnValue.Int(1000),
+        "policyRevision": SdnValue.Int(1), "revocationEpoch": SdnValue.Int(0),
+        "expiresAt": SdnValue.Int(inputs.now_ms + ENROLLED_FIXTURE_KEY_TTL_MS_V1), "revoked": SdnValue.Bool(false)}
+    SdnValue.Dict(fields)
+
+# Canonical PUBLIC authority policy: the controller is the grant issuer, the approver a human approver.
+pub fn enrolled_fixture_policy_encode_v1(inputs: EnrolledFixtureInputsV1, issuer_public: [u8],
+        approver_public: [u8]) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "generation": SdnValue.Int(1),
+        "policyRevision": SdnValue.Int(1), "revocationEpoch": SdnValue.Int(0), "sessionGeneration": SdnValue.Int(1),
+        "keys": SdnValue.Array([enrolled_fixture_policy_key_v1(inputs.controller_id, "grant-issuer", issuer_public, inputs),
+            enrolled_fixture_policy_key_v1(inputs.approver_id, "human-approver", approver_public, inputs)])}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn enrolled_fixture_authority_from_keys_v1(inputs: EnrolledFixtureInputsV1, issuer: EnrolledFixtureKeyV1,
+        approver: EnrolledFixtureKeyV1) -> Result<EnrolledFixtureAuthorityV1, text>:
+    val bytes = enrolled_fixture_policy_encode_v1(inputs, issuer.public_key, approver.public_key)
+    val policy = local_authority_policy_decode_v1(bytes)?
+    val issuer_key = distributed_authority_snapshot_key_v2(policy.snapshot, "grant-issuer", inputs.controller_id)?
+    val approver_key = distributed_authority_snapshot_key_v2(policy.snapshot, "human-approver", inputs.approver_id)?
+    Ok(EnrolledFixtureAuthorityV1(issuer: issuer, approver: approver, policy_bytes: bytes, policy: policy,
+        issuer_key: issuer_key, approver_key: approver_key))
+
+pub fn enrolled_fixture_authority_v1(inputs: EnrolledFixtureInputsV1) -> Result<EnrolledFixtureAuthorityV1, text>:
+    val issuer = enrolled_fixture_key_v1("simple-fixture-issuer")?
+    val approver = enrolled_fixture_key_v1("simple-fixture-approver")?
+    enrolled_fixture_authority_from_keys_v1(inputs, issuer, approver)
+
+# The protected key-store leaf name controller_authority_store_read_v1 opens for this key.
+pub fn enrolled_fixture_key_leaf_v1(key: DistributedAuthorityKeyV2) -> text:
+    controller_authority_key_leaf_v1(key)
+
+# In-memory key reader with the production reader's contract: one fresh copy per read (the signer wipes it),
+# selected by the same leaf name the protected store uses.
+pub fn enrolled_fixture_reader_v1(authority: EnrolledFixtureAuthorityV1) -> fn(DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    val issuer_leaf = controller_authority_key_leaf_v1(authority.issuer_key)
+    val approver_leaf = controller_authority_key_leaf_v1(authority.approver_key)
+    val issuer_file = authority.issuer.file
+    val approver_file = authority.approver.file
+    \key: enrolled_fixture_reader_pick_v1(controller_authority_key_leaf_v1(key), issuer_leaf, issuer_file,
+        approver_leaf, approver_file)
+
+fn enrolled_fixture_reader_pick_v1(leaf: text, issuer_leaf: text, issuer_file: [u8], approver_leaf: text,
+        approver_file: [u8]) -> Result<[u8], text>:
+    if leaf == issuer_leaf: return Ok(enrolled_fixture_copy_v1(issuer_file))
+    if leaf == approver_leaf: return Ok(enrolled_fixture_copy_v1(approver_file))
+    Err("controller-key-unavailable")
+
+pub fn enrolled_fixture_dispatch_config_v1(inputs: EnrolledFixtureInputsV1, policy_bytes: text) -> Result<text, text>:
+    controller_dispatch_config_encode_v1(ControllerDispatchConfigV1(controller_id: inputs.controller_id,
+        controller_epoch: 1, target: "local-inprocess", host_root: inputs.host_root,
+        host_authority_id: inputs.physical_host_id, provider_identity_digest: inputs.provider_identity_digest,
+        authority_policy_digest: sha256_text(policy_bytes)))
+
+# Installs the dispatch root through the real administrator installer: the root is made 0700 and carries the
+# exact controller marker; authority-policy.sdn and dispatch-config.sdn are exclusive, never replaced.
+pub fn enrolled_fixture_dispatch_install_v1(root: text, inputs: EnrolledFixtureInputsV1,
+        policy_bytes: text) -> Result<ControllerDispatchContextV1, text>:
+    if not file_set_mode(root, 0o700): return Err("fixture-dispatch-root-mode")
+    val marker = "version: 1\nkind: orchestrator-local-state\ncontrollerId: \"{inputs.controller_id}\"\n"
+    val existing = file_read_regular_no_follow_bounded(root + "/controller.sdn", 1024)
+    if existing.is_err():
+        if not file_create_exclusive(root + "/controller.sdn", marker): return Err("fixture-dispatch-marker-write")
+        if not file_fsync(root + "/controller.sdn") or not directory_fsync(root): return Err("fixture-dispatch-marker-sync")
+    elif existing.unwrap() != marker:
+        return Err("fixture-dispatch-marker-mismatch")
+    val config = enrolled_fixture_dispatch_config_v1(inputs, policy_bytes)?
+    # Workaround (todo 483): the installer creates its files with rt_file_create_excl, which opens them 0644 on
+    # both the seed and the C runtime, then refuses them as dispatch-file-not-private unless umask is 077. Writing
+    # the same bytes 0600 first makes the install take its identical-retry path; different bytes still refuse.
+    for leaf in [("authority-policy.sdn", policy_bytes), ("dispatch-config.sdn", config)]:
+        val path = root + "/" + leaf.0
+        if file_read_regular_no_follow_bounded(path, 1048576).is_err():
+            if not file_atomic_write_mode(path, leaf.1, 0o600): return Err("fixture-dispatch-file-write")
+    controller_dispatch_config_install_v1(root, inputs.controller_id, config, policy_bytes)
+
+# sha256 pins of the five binding inputs read from `input_dir`; Err names the first missing input.
+pub fn enrolled_fixture_pins_v1(input_dir: text) -> Result<[text], text>:
+    var pins: [text] = []
+    for name in ENROLLED_FIXTURE_PINNED_INPUTS_V1:
+        val source = file_read_regular_no_follow_bounded(input_dir + "/" + name, 1048576)
+        if source.is_err(): return Err("missing pinned input " + input_dir + "/" + name)
+        pins.push(sha256_text(source.unwrap()))
+    Ok(pins)
+
+pub fn enrolled_fixture_binding_v1(inputs: EnrolledFixtureInputsV1, policy_bytes: text,
+        pins: [text]) -> Result<HostLinuxServiceEnrollmentBindingV3, text>:
+    if pins.len() != 5: return Err("fixture-binding-pin-count")
+    val binding = HostLinuxServiceEnrollmentBindingV3(physical_host_id: inputs.physical_host_id,
+        service_scope_id: inputs.service_scope_id, config_digest: pins[0], policy_digest: sha256_text(policy_bytes),
+        policy_revision: 1, native_machine_id: inputs.native_machine_id,
+        provider_identity_digest: inputs.provider_identity_digest, engine_policy_digest: pins[1],
+        machine_parent: inputs.machine_parent, broker_policy_digest: pins[2],
+        physical_cpu_millis: inputs.physical_cpu_millis, physical_memory_bytes: inputs.physical_memory_bytes,
+        reserved_cpu_millis: inputs.reserved_cpu_millis, reserved_memory_bytes: inputs.reserved_memory_bytes,
+        agent_helper_template_digest: pins[3], remote_build_template_digest: pins[4])
+    # Validate through the canonical encoder before handing it out.
+    val _encoded = host_linux_service_enrollment_encode_v3(binding)?
+    Ok(binding)
+
+# The controller's own enrollment issuer (the `host-linux-enrollment-issue` core) over the fixture authority.
+pub fn enrolled_fixture_issue_v1(context: ControllerDispatchContextV1, reader: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>,
+        inputs: EnrolledFixtureInputsV1, binding: HostLinuxServiceEnrollmentBindingV3) -> Result<HostEnrollmentCredentialV1, text>:
+    controller_linux_enrollment_issue_v3(context, reader, inputs.approver_id, binding,
+        "provision_acceptance_operation", "provision_acceptance_grant", 600000, inputs.now_ms)
+
+# The read-only Caret SSH inspection request, through the gateway codec.
+pub fn enrolled_fixture_gateway_inspect_v1(controller_id: text, request_uid: text) -> Result<text, text>:
+    controller_gateway_request_encode_v1(ControllerGatewayRequestV1(action: "inspect", controller_id: controller_id,
+        request_uid: request_uid, source: "", ns: "", name: "", source_digest: ""))
+
+# Writes one protected key leaf (0600) into an existing key-store directory (made 0700); refuses an existing leaf.
+pub fn enrolled_fixture_write_key_v1(store: text, key: DistributedAuthorityKeyV2, file: [u8]) -> Result<text, text>:
+    if not file_set_mode(store, 0o700): return Err("fixture-key-store-mode")
+    val path = store + "/" + controller_authority_key_leaf_v1(key)
+    # Never replace a key: the leaf name does not depend on the key bytes.
+    if file_read_regular_no_follow_bounded(path, 4096).is_ok(): return Err("fixture-key-exists:" + path)
+    if not file_write_bytes(path, file): return Err("fixture-key-write")
+    if not file_set_mode(path, 0o600): return Err("fixture-key-mode")
+    Ok(path)
