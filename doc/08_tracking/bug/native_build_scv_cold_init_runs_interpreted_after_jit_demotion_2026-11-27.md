@@ -308,3 +308,63 @@ hir_module_surface_index, mir_lowering_stmts, mir_instruction_support, feature_c
 (jit6.log): `SIMPLE_EXECUTION_MODE=jit run native_build_worker.spl --help` -> rc=1, last line
 `error: native_build_worker.spl is an internal entrypoint`, 0 "is not visible", 0 jit-compile-error /
 JIT compilation failed / CODEGEN-AMBIGUOUS; only `hybrid-interp-splice` (rt_* externs) remains.
+## llvm_lib import fix (3ae9ee35013) does not un-demote the final worker (2026-11-27, seed r)
+
+Rerun with the `std.nogc_sync_mut.sffi.llvm.*` import fix cherry-picked: the worker is still interpreter-speed. stage_parse per file,
+before -> after: smoke.spl (134 chars) 0.9 -> 1.5 s, fs_v1.spl (2354) 2.8 -> 5.1 s, dir_ops.spl (5029) 9.5 -> 15.1 s (box was
+loaded, so slower, not faster); load_sources bulk closure 233 s -> 181 s of worker time but the worker start rose to 334 s. Stopped
+at the third file. Per the coordinator, a further demotion (`CudaTypeMapper.map_tuple` CODEGEN-AMBIGUOUS-METHOD) still drops the whole
+worker closure to the interpreter; that fix is pending in lane d29-f. The worker's `[engine-demotion]` lines are invisible on
+Windows (stdout returned at exit only); consider teeing `[engine-demotion]` to the trace file too. No exe; todo 478 stays open.
+
+## Run with d29-f fixes (140bcf8350a) fails at the semantic check (2026-11-27, seed r)
+
+Cherry-picked the d29-f src fixes (llvm pin, CudaTypeMapper.map_tuple, dangling export) on this worktree's base (b46b620940e,
+39 commits behind origin) and reran the smoke. Cold init 1368 s, then `coordinator:shards parse=0 hir=1 mir_parallel=0` (the shards
+no longer run: the worker was handed everything) and the final worker returned rc=1 after 171 s:
+`error: semantic: private fn create_alias_guard_block of module ...\mir_opt\auto_vectorize_codegen.spl ... mark it pub or export it`,
+imported by `src/compiler/60.mir_opt/mir_opt/_AutoVectorize/rewrite.spl:50`. Every fn in `auto_vectorize_codegen.spl` is non-pub and
+origin/release/1.0.0 is identical there, so this is a tree defect that the now-compiling worker surfaces (previously the demoted
+interpreter did not enforce it). stage_parse was therefore NOT reached and no per-file parse timing was measured. Next: make the
+imported fns of auto_vectorize_codegen.spl `pub` (or fix the import), then rerun; expect ~25 min per attempt (cold init).
+
+## Run with d29-f 0e506dcf40e: worker is JIT, frontend+HIR+MIR in 79 s; new blocker at backend session open (2026-11-27, seed r)
+
+Base cc85cd23dda + d29-f commits (llvm pin, map_tuple, pub visibility). Final worker timeline (ms from worker start):
+
+| phase | before (interpreted) | now (JIT) |
+|---|---|---|
+| worker start -> compile:start | 161-334 s | 22.9 s |
+| load_sources bulk closure (192 sources) | 181-233 s | 1.9 s |
+| stage_parse (93 modules) | est. ~1 h (io_runtime.spl 101.8 s) | 25.5 s (io_runtime.spl 0.47 s, process_ops.spl 195 KB 2.1 s) |
+| HIR (phase3) | never reached | 51.4 -> 70.4 s (19 s) |
+| MIR + mir_verify (8 modules, 227 fns) | never reached | to 78.6 s |
+| aot:native_session_open | - | rc=70 `Runtime error: unresolved symbol -- ... code-generation dispatch gap`, at 78.9 s |
+
+So the stage_parse blocker is fixed (interpreter demotion was the cause; ~200x faster). The worker now dies in
+`BackendSessionOwnedLeaseV2.open(request)` (`driver_aot_native_output.spl:2498`) with an unresolved symbol (name not printed by the
+seed's `error_handling.rs` message; the worker's own stderr tail ends right after `mir_verify` idx=8). No exe; todo 478 and the plan
+STILL OWED stay open. Next: find the unresolved callee in the backend-session open path (run the worker under SIMPLE_EXECUTION_MODE=jit
+with a seed that names the symbol, or bisect `BackendSessionOwnedLeaseV2.open`), then rerun; coordinator part (cold init) took 1435 s.
+
+## RESOLVED: backend session open dispatch gap, exe produced (2026-11-28, seed r, lane c27-variant)
+
+The unresolved symbol was `CraneliftCodegenState.supports_target` (the seed prints it on the line BEFORE the generic
+"unresolved symbol" text: `Runtime error: Function '<name>' not found`; the earlier tail missed it). Cause: `src/compiler/70.backend/codegen.spl`
+declared `type Codegen = CraneliftCodegenState`, re-exported from `src/compiler/70.backend/__init__.spl`, which collides by simple name
+with the `Codegen` trait in `codegen_types.spl`. Under JIT, trait-object calls such as `codegen.supports_target(target)` in
+`builtin_adapter.spl:204` (receiver from `CodegenFactory.create`) resolved to the alias's struct, which has no such method. Fix: delete the
+unused alias and its re-export (no importer of `Codegen` from `compiler.backend` / `compiler.backend.codegen` exists).
+
+Fast harness (about 1 min, no cold init): a .spl that installs the K1 backend table (as `native_build_worker.spl` does) and calls
+`BackendSessionOwnedLeaseV2.open(driver_aot_backend_plugin_request_v1("llvm", ...))`, run with `SIMPLE_EXECUTION_MODE=jit SIMPLE_MIR_SHARDING=0`.
+Before: `Function 'CraneliftCodegenState.supports_target' not found`, rc 70. After: `open ok`.
+
+Full smoke (with the d29-f commits applied; seed r; `SIMPLE_MIR_SHARDING=0`): `native-build smoke.spl -o smoke.exe` rc=0, 209920-byte exe, running it
+prints `true` then `false`. Timeline: shards done at 659 s, worker returned at 892 s (cold init included). Entry was a 3-line print stand-in, not
+`dir_sync` itself (superseded below). Todo 478 closed.
+
+Real `dir_sync` smoke on the rebased tree (2026-11-28, seed r, same env): entry `test/tmp_dir_sync_smoke/smoke.spl` =
+`print dir_sync(".")` then `print dir_sync("build/definitely-missing-dir-xyz")`. rc=0, 226816-byte exe, running it prints `true` then
+`false`. Worker returned at 939 s. Todo 478 acceptance met; closure stands. Seed bug recorded in
+`seed_jit_type_alias_captures_same_named_trait_dispatch_2026-11-28.md`.
