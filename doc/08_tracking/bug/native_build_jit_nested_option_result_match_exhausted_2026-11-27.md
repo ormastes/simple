@@ -13,10 +13,10 @@ match f(...):
 ```
 aborted with `invalid pattern: match statement exhausted without matching any pattern (no arm matched)`.
 
-Minimal repro (not yet run; unverified on the l seed):
+Candidate minimal repro — does NOT reproduce (run 2026-11-27 on seed simple-local-20261127l, `skip` renamed to `empty` since `skip` is a keyword): prints `none` under both `SIMPLE_EXECUTION_MODE=jit` and `interpret`. The observed failure needs the real shape (struct payload `CompilerInventoryEventV1?` inside `Result`, inside the inventory scan loop); a reproducing minimal case is still owed.
 ```
-fn f(skip: bool) -> Result<i64?, text>:
-    if skip: return Ok(None)
+fn f(empty: bool) -> Result<i64?, text>:
+    if empty: return Ok(None)
     Ok(Some(1))
 fn main():
     match f(true):
