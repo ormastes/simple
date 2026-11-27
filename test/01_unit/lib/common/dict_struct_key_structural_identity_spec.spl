@@ -1,0 +1,114 @@
+# Purpose and audience: executable specification evidence for the owning
+# engineering team.
+# @req REQ-SSPEC-LIB
+#
+# Regression pin for doc/08_tracking/bug/
+# dict_struct_key_identity_keyed_copied_key_misses_2026-09-13.md: a Dict keyed
+# by a struct must key by STRUCTURAL value, not by object identity. Inserting
+# `d[a] = v` and then looking up with an equal-but-separately-constructed copy
+# `b` (or a rebound binding of `a`) must hit, and inserting both twins must
+# land in ONE bucket. The interpreter lane routes struct keys through the
+# canonical sorted-field key form shared with `==`
+# (src/compiler_rust/compiler/src/value_impl.rs `Value::Object` arm of
+# `to_key_string`), so every row below is GREEN there.
+#
+# Lane note (same convention as dict_native_shape_differential_spec.spl):
+# the native/JIT lane is DEFERRED. Native struct keys are raw rt_struct_alloc
+# blocks with no registered layout, so both runtimes fall back to pointer
+# hash + identity equality (C: src/runtime/runtime_native.c rt_core_dict_hash
+# pointer fall-through / rt_native_eq object arm; Rust twin:
+# src/compiler_rust/runtime/src/value/sffi/equality.rs `value_hash_inner`
+# `_` arm / `heap_value_eq` `_` arm). Those rows read RED natively until the
+# runtime/seed decision in the bug doc lands; do not "fix" the spec when they
+# do -- fix the runtime.
+#
+# Class-key rows are likewise DEFERRED: `Value::ClassInstance` has no
+# `to_key_string` arm and falls into the derived-Debug catch-all, whose
+# HashMap field order is randomized per instance, so equal class keys miss on
+# the interpreter lane today (prepared fix: same canonical arm as
+# `Value::Object`).
+
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+
+struct Point:
+    x: i64
+    y: i64
+
+class PointMemo:
+    seen: {Point: bool}
+
+    me mark(k: Point) -> bool:
+        if self.seen.contains_key(k):
+            return false
+        self.seen[k] = true
+        return true
+
+describe "struct-keyed Dict keys by value, not identity":
+    # @manual scenario evidence
+    it "hits a lookup with a structurally equal copy":
+        step("hits a lookup with a structurally equal copy")
+        var d: {Point: i64} = {}
+        val a = Point(x: 1, y: 2)
+        d[a] = 10
+        val b = Point(x: 1, y: 2)
+        expect(a == b).to_equal(true)
+        expect(d.contains_key(b)).to_equal(true)
+        expect(d.get(b).?).to_equal(true)
+        expect(d.get(b).unwrap()).to_equal(10)
+        expect(d[b]).to_equal(10)
+
+    it "hits a lookup through a rebound binding of the inserted key":
+        step("hits a lookup through a rebound binding of the inserted key")
+        var d: {Point: i64} = {}
+        val a = Point(x: 3, y: 4)
+        d[a] = 30
+        val rebound = a
+        expect(d.contains_key(rebound)).to_equal(true)
+        expect(d.get(rebound).unwrap()).to_equal(30)
+
+    it "collapses structurally equal twins into one bucket":
+        step("collapses structurally equal twins into one bucket")
+        var d: {Point: i64} = {}
+        val a = Point(x: 5, y: 6)
+        val b = Point(x: 5, y: 6)
+        d[a] = 1
+        d[b] = 2
+        expect(a == b).to_equal(true)
+        expect(d.len()).to_equal(1)
+        expect(d.get(a).unwrap()).to_equal(2)
+        expect(d.get(b).unwrap()).to_equal(2)
+
+    it "round-trips a lookup through keys()":
+        step("round-trips a lookup through keys()")
+        var d: {Point: i64} = {}
+        val a = Point(x: 7, y: 8)
+        d[a] = 70
+        val ks = d.keys()
+        expect(ks.len()).to_equal(1)
+        expect(d.contains_key(ks[0])).to_equal(true)
+        expect(d.get(ks[0]).unwrap()).to_equal(70)
+        expect(d[ks[0]]).to_equal(70)
+
+    it "memoization reports the hit for an equal copy, not a fresh entry":
+        step("memoization reports the hit for an equal copy, not a fresh entry")
+        val memo = PointMemo(seen: {})
+        val first = Point(x: 9, y: 10)
+        val twin = Point(x: 9, y: 10)
+        expect(memo.mark(first)).to_equal(true)
+        expect(memo.mark(twin)).to_equal(false)
+        expect(memo.seen.len()).to_equal(1)
+        expect(memo.seen.contains_key(Point(x: 9, y: 10))).to_equal(true)
+
+    it "still distinguishes structurally different keys":
+        step("still distinguishes structurally different keys")
+        var d: {Point: i64} = {}
+        val a = Point(x: 1, y: 2)
+        val other = Point(x: 2, y: 1)
+        d[a] = 10
+        d[other] = 20
+        expect(d.len()).to_equal(2)
+        expect(d.get(a).unwrap()).to_equal(10)
+        expect(d.get(other).unwrap()).to_equal(20)
+        expect(d.contains_key(Point(x: 1, y: 3))).to_equal(false)

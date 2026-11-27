@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Purpose: Pin the line box of a block whose ONLY inline content is a
+`<sub>`/`<sup>` (or a mix of the two) -- a line with no baseline-aligned
+participant at all. Chrome grows such a line by the shifted box's CONTENT
+reach past the strut (shift + content descent beyond the strut's content
+descent), not by the whole half-leading box. Before this pin the engine
+applied the full half-leading box extents, overshooting an absolute
+line-height (30 vs 27) and undershooting the sup side of a normal
+line-height (18 vs 22).
+Audience: browser-engine layout maintainers.
+
+Model (Chrome, bug doc sub_sup_line_box_strut_contradiction_2026-09-14,
+harvested off Chrome 152 whole-px getBoundingClientRect): line = strut +
+max(0, shift +/- (content ascent/descent of the shifted box - content
+ascent/descent of the strut)). 16px: normal strut 18, sub div 21 (+3),
+sup div 22 (+4); line-height:24px strut 24, sub div 27 (+3); 32px normal
+strut 37, sub div 43 (+6). The `<small>` control keeps the plain strut
+(18). The engine lays out in whole px, so each Chrome value is asserted
+within 1 px (the sibling spec's tolerance).
+
+Residual, recorded not fixed: the doc's number line-height harvest
+(`font:16px/1.5`, sub-only div) says 20, which no strut rule reproduces
+(the doc itself marks the row a compensating-error state, and its own
+mechanism section keeps the `<small>` control on the strut path, i.e.
+24). This spec pins the number line-height at the strut model value 27,
+matching the measured Chrome 159 with-text value 27.17 from the sibling
+spec.
+
+| markup                                             | Chrome 152 | asserted    |
+|----------------------------------------------------|------------|-------------|
+| 16px serif, `<div><sub>x</sub></div>`              | 21         | within 1 px |
+| 16px serif, `<div><sup>x</sup></div>`              | 22         | within 1 px |
+| 16px serif, `<div><small>x</small></div>` (control)| 18         | exactly     |
+| 16px serif, `line-height:24px`, `<div><sub>x</sub>`| 27         | within 1 px |
+| 16px serif, `line-height:24px`, `<div><sup>x</sup>`| (unmeas.)  | within 1 px |
+| 16px serif, `line-height:24px`, `<div><small>x`    | (unmeas.)  | exactly 26  |
+| 32px serif, `<div><sub>x</sub></div>`              | 43         | within 1 px |
+| 16px/1.5 serif, `<div><sub>x</sub></div>`          | 20*        | exactly 27  |
+| 16px/1.5 serif, `<div><small>x</small></div>`      | (strut 24) | exactly     |
+
+*residual, see above; 27 = strut 24 + extension 3.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-SUB-SUP-ONLY-LINE-STRUT-001 — a block whose only inline content is a sub/super-shifted element gets the strut grown by the shifted box's content-level reach, like Chrome.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+
+fn field(html: text, id: text, name: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, VW, VH, id, name).to_int()
+
+# Distance from the expected value, in whole pixels.
+fn off(actual: i32, expected: i32) -> i32:
+    if actual > expected: actual - expected else: expected - actual
+
+fn page(body_style: text, inner: text) -> text:
+    "<html><head><style>body{margin:0;font:" + body_style + " serif}</style></head><body>" + inner + "</body></html>"
+
+describe "sub/sup-only line boxes grow the strut by content reach":
+    it "AC-1: a lone <sub> on a normal line-height block grows the strut below (Chrome: 21)":
+        step("Chrome 152: block 21 -- asserted within 1 px")
+        val p = page("16px", "<div id=\"p\"><sub id=\"c\">x</sub></div>")
+        expect(off(field(p, "p", "h"), 21)).to_be_less_than(2)
+
+    it "AC-2: a lone <sup> grows the strut above (Chrome: 22)":
+        step("Chrome 152: block 22 -- asserted within 1 px")
+        val p = page("16px", "<div id=\"p\"><sup id=\"c\">x</sup></div>")
+        expect(off(field(p, "p", "h"), 22)).to_be_less_than(2)
+
+    it "AC-3: <small> control keeps the plain strut (Chrome: 18)":
+        step("Chrome 152: block 18 -- asserted exactly")
+        val p = page("16px", "<div id=\"p\"><small id=\"c\">x</small></div>")
+        expect(field(p, "p", "h")).to_equal(18)
+
+    it "AC-4: a lone <sub> on a 24px line-height block grows the strut (Chrome: 27)":
+        step("Chrome 152: block 27 -- asserted within 1 px")
+        val p = page("16px", "<div id=\"p\" style=\"line-height:24px\"><sub id=\"c\">x</sub></div>")
+        expect(off(field(p, "p", "h"), 27)).to_be_less_than(2)
+
+    it "AC-5: a lone <sup> on a 24px line-height block grows the strut above":
+        step("Chrome unmeasured; model value 27 (= 24 + 4 above) -- asserted within 1 px")
+        val p = page("16px", "<div id=\"p\" style=\"line-height:24px\"><sup id=\"c\">x</sup></div>")
+        expect(off(field(p, "p", "h"), 27)).to_be_less_than(2)
+
+    it "AC-6: <small> on a 24px line-height block does not take the sub/super extension path":
+        step("Baseline-aligned small keeps the baseline-path extent 26 (strut 24 + its own 24px-inherited line-height box); the 2 px over the strut is the pre-existing baseline-path approximation, out of scope here")
+        val p = page("16px", "<div id=\"p\" style=\"line-height:24px\"><small id=\"c\">x</small></div>")
+        expect(field(p, "p", "h")).to_equal(26)
+
+    it "AC-7: the extension scales with the font size (Chrome: 43 at 32px)":
+        step("Chrome 152: block 43 (strut 37 + 6) -- asserted within 1 px")
+        val p = page("32px", "<div id=\"p\"><sub id=\"c\">x</sub></div>")
+        expect(off(field(p, "p", "h"), 43)).to_be_less_than(2)
+
+    it "AC-8: a number line-height keeps the strut model (residual: Chrome 152 harvest says 20)":
+        step("Doc records the 20 harvest as an unstatable compensating error; pinned at 27 = strut 24 + 3, the Chrome 159 with-text value 27.17")
+        val p = page("16px/1.5", "<div id=\"p\"><sub id=\"c\">x</sub></div>")
+        expect(field(p, "p", "h")).to_equal(27)
+        val small = page("16px/1.5", "<div id=\"p\"><small id=\"c\">x</small></div>")
+        expect(field(small, "p", "h")).to_equal(24)
+
+    it "AC-9: with a baseline sibling the full half-leading model still applies (Chrome 159: 29.19)":
+        step("Chrome 159, line-height:24px: block 29.19 -- asserted within 1 px")
+        val p = page("16px", "<div id=\"p\" style=\"line-height:24px\">ab <sub id=\"c\">x</sub> ef</div>")
+        expect(off(field(p, "p", "h"), 29)).to_be_less_than(2)

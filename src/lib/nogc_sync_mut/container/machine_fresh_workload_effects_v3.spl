@@ -18,6 +18,7 @@ use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_exited_settlement_v3.machine_fresh_workload_exited_cohort_command_v3
+use std.nogc_sync_mut.io.linux_fresh_engine_group_v3.LinuxFreshEngineGroupStateV3
 use std.nogc_sync_mut.container.machine_fresh_workload_exit_edges_v3.{MachineFreshWorkloadCohortRetryV3,
     machine_fresh_workload_exited_cohort_retry_v3, machine_fresh_workload_association_exit_v3}
 use std.common.contracts.container.linux_fresh_workload_v2.*
@@ -170,12 +171,35 @@ pub(package) fn machine_fresh_workload_complete_v3(storage: MachineStorageOwnerV
             val retained = state.unknown_v2(payload.unwrap_err())?
             return Err(payload.unwrap_err())
     val retired = state.retire_helper_v2()?
+    if name == "start": workload_engine_group_observe_v3(custody, state)?
     val prior = state.action_state_v2(name)?
     val completed = distributed_operation_transition_v2(prior, "completed", sha256_text(str(result.exit_code) + "\n" + result.output))?
     val at = time_sample_unix_micros_or_failure() / 1000
     val published = workload_publish_v3(storage, state, machine_fresh_record_action_entries_v3(record, completed, native_id, result.output, at)?)?
     val tracked = state.complete_v2(completed, native_id)?
     Ok(result)
+
+# After the start helper retired: record which directory each of this owner's engine groups is. Read-only.
+# An absent group is a start that left nothing behind, and is still probed by name at retirement.
+fn workload_engine_group_observe_v3(custody: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    for name in state.engine_group_names_v3()?:
+        match custody.observe_engine_group_v3(name)?:
+            case LinuxFreshEngineGroupStateV3.Present(object): state.engine_group_observed_v3(name, object)?
+            case _: ()
+    Ok(())
+
+# Retirement of this owner's engine groups: the route's only owner-side kill. The lifecycle decides the
+# order from its own retained operations and refuses by name (store-live, helper-active); custody kills the
+# named group under its own delegated descriptor, observes it empty and removes it. A group that is absent
+# (a crash before the move, a start that left nothing) is retired by that observation. Every refusal leaves
+# the group recorded, so the charge stays and the caller may retry.
+pub(package) fn machine_fresh_workload_engine_group_retire_v3(custody: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    for name in state.engine_group_decision_v3()?:
+        val retired = custody.retire_engine_group_v3(name, state.engine_group_expected_v3(name)?)?
+        state.engine_group_retired_v3(name)?
+    Ok(())
 
 pub(package) fn machine_fresh_workload_run_v3(storage: MachineStorageOwnerV1,
         custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
@@ -275,6 +299,8 @@ pub(package) fn machine_fresh_workload_settle_exited_start_v3(storage: MachineSt
     if not state.exited_start_v3()?: return Err("machine-fresh-workload-exited-start-unproven")
     val absence = state.action_state_v2("absence")?
     if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
+    # A fast exit leaves the engine's rootless helper in the engine group; it is killed before the census.
+    machine_fresh_workload_engine_group_retire_v3(custody, state)?
     val closure = custody.observe_probe_absence_v3(machine_fresh_workload_exited_cohort_command_v3(record, state.native_id_v2()?)?)?
     val rows = state.prepare_exited_settlement_v3(absence, closure, time_sample_unix_micros_or_failure() / 1000)?
     val committed = workload_publish_v3(storage, state, rows)?

@@ -5,16 +5,25 @@
 # (`cannot resolve /nonexistent`). So a helper names its home itself: the run root, which custody already
 # holds and the engine already writes to. Measured: the engine writes nothing under HOME for
 # load/create/start/inspect/stop/rm, so the run root gains no entry.
+#
+# Two more assignments, both measured on the same host (2026-11-27, engine-group work):
+#   XDG_RUNTIME_DIR=<run root>: the rootless engine keeps libpod/tmp/pause.pid under it. Without it the file
+#     was /run/user/<uid>/libpod/tmp/pause.pid, outside custody and shared by every store of the uid. With it
+#     the run root gains `containers`, `libpod` and `runc`.
+#   PATH=/usr/bin:/bin: with no pause process to join, the engine looks newuidmap up through PATH; without a
+#     PATH every command exits 125 (`"newuidmap": executable file not found in $PATH`). The earlier HOME-only
+#     measurement passed because the host already had a pause process to join.
 # Record: doc/08_tracking/bug/container_fresh_route_helper_home_2026-11-27.md
 use std.spec.{describe, it, expect, step}
 use std.io.file_read_text
 use std.nogc_sync_mut.io.linux_fresh_epoch_launch_v1.linux_fresh_epoch_helper_environment_v1
 
 describe "Linux fresh epoch helper environment V1":
-    it "gives every engine helper the run root as its home and nothing else":
+    it "gives every engine helper the run root as its home and runtime directory, the broker's PATH and nothing else":
         val environment = linux_fresh_epoch_helper_environment_v1("/run/simple-host/podman")
         expect(environment.is_ok()).to_equal(true)
-        expect(environment.unwrap()).to_equal(["HOME=/run/simple-host/podman"])
+        expect(environment.unwrap()).to_equal(["HOME=/run/simple-host/podman", "XDG_RUNTIME_DIR=/run/simple-host/podman",
+            "PATH=/usr/bin:/bin"])
 
     it "refuses a run root that is not one canonical absolute path":
         for bad in ["", "run", "/", "/run/simple-host/", "/run//podman", "/run/../podman", "/run/simple host"]:
@@ -28,3 +37,5 @@ describe "Linux fresh epoch helper environment V1":
         expect(launch.contains("environment: [], directory: run,")).to_equal(false)
         step("The broker's own inherited environment is a separate rule and is unchanged")
         expect(launch.contains("elif key == \"HOME\": allowed = value == \"/nonexistent\"")).to_equal(true)
+        step("The helper's PATH is the one the broker rule already requires of the broker")
+        expect(launch.contains("if key == \"PATH\": allowed = value == \"/usr/bin:/bin\"")).to_equal(true)

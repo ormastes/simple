@@ -1,0 +1,37 @@
+# The phase-3 Hello matrix twin's BuildRunner entry reaches the real lane twin
+# (hello_sanity_buildrunner_lane.spl), not a stub: the lane creates its own
+# directory and returns its own record and rejection reason.
+use std.spec
+use std.nogc_sync_mut.io_runtime.{is_dir, dir_remove_all, mkdir_p, getpid}
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair}
+use scripts.bootstrap.lib.hello_matrix_run.{MatrixContext}
+use scripts.bootstrap.lib.hello_buildrunner_entry.{matrix_buildrunner_run_lane, matrix_fields}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{sdn_str, sdn_int, sdn_bool}
+
+fn field(fields: [SdnField], key: text) -> text:
+    var found = ""
+    for f in fields:
+        if f.key == key: found = f.kind + ":" + f.value
+    found
+
+fn spec_matrix_ctx(out: text) -> MatrixContext:
+    MatrixContext(root: ".", out: out, script: "", stage_binary: "", compiler: "compiler", sha: "c0ffee", runtime: "runtime", runtime_hashes: [EnvPair(key: "a.o", value: "00")], linker: "ld.lld", linker_sha: "", windows: false, darwin: false, driver: "", driver_sha: "", sdk: "", base: [], phase: 3, backend: "cranelift", compile_route: "coordinator", timeout_seconds: 60, max_rss_kib: 1024, min_free_disk_bytes: 0, max_log_bytes: 1024, windows_abi: "gnu", trace_stages: false, target: "", jobs: 1)
+
+describe "hello matrix BuildRunner entry":
+    it "maps lane receipt kinds onto the matrix SDN writer":
+        val mapped = matrix_fields([sdn_str("status", "PASS"), sdn_int("phase", 3), sdn_bool("admitted", false)])
+        expect(field(mapped, "status")).to_equal("s:PASS")
+        expect(field(mapped, "phase")).to_equal("i:3")
+        expect(field(mapped, "admitted")).to_equal("b:false")
+
+    it "dispatches into the BuildRunner lane twin":
+        val out = "build/hello-matrix-entry-spec-{getpid()}"
+        mkdir_p(out)
+        match matrix_buildrunner_run_lane(spec_matrix_ctx(out), "linux", "enforce", "", "", "cranelift", "one-source", "m", "w", "t", "not-a-host-target"):
+            case Ok(record):
+                expect(field(record, "status")).to_equal("s:FAIL")
+                expect(field(record, "lane")).to_equal("s:one-source")
+                expect(field(record, "reason")).to_equal("s:BuildRunner target differs from native linkage host")
+            case Err(e): expect(e).to_equal("")
+        expect(is_dir(out + "/buildrunner-cranelift-one-source")).to_equal(true)
+        dir_remove_all(out)

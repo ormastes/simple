@@ -7,10 +7,24 @@ use std.nogc_sync_mut.js.engine.js_error.{js_nan}
 
 pub val RETURN_SIGNAL = "__return__"
 
+# Per-script execution-step budget. Lives here (not in interpreter.spl) because
+# js/engine/runtime.spl imports interpreter.spl back: class/fn imports tolerate
+# that cycle, a val import from a still-loading module does not.
+pub val MAX_SCRIPT_EXECUTION_STEPS: i64 = 100000
+
+# Host-DOM mutation retention ceilings, enforced where scripted DOM mutations
+# are staged into the host document. Same cycle-breaking move as above:
+# interpreter_eval_member.spl imports interpreter.spl back (impl JsInterpreter).
+pub val JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS: i64 = 32768
+pub val JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES: i64 = 64 * 1024 * 1024
+
 class Environment:
     bindings: Dict<text, JsValue>
     is_strict: bool
     parent: i64
+
+    fn clone() -> Environment:
+        Environment(bindings: self.bindings, is_strict: self.is_strict, parent: self.parent)
 
 fn env_new() -> Environment:
     Environment(bindings: {}, is_strict: false, parent: -1)
@@ -24,6 +38,14 @@ fn env_stack_new() -> EnvironmentStack:
 impl EnvironmentStack:
     static fn new() -> EnvironmentStack:
         env_stack_new()
+
+    fn clone() -> EnvironmentStack:
+        var cloned_frames: [Environment] = []
+        var i = 0
+        while i < self.frames.len():
+            cloned_frames.push(self.frames[i].clone())
+            i = i + 1
+        EnvironmentStack(frames: cloned_frames)
 
     me create_env(parent: i64) -> i64:
         var frame = env_new()
@@ -92,6 +114,16 @@ class CallFrame:
     this_value: JsValue
     return_value: JsValue
     has_return: bool
+
+    fn clone() -> CallFrame:
+        CallFrame(
+            function_name: self.function_name,
+            env_id: self.env_id,
+            line: self.line,
+            this_value: self.this_value,
+            return_value: self.return_value,
+            has_return: self.has_return
+        )
 
 fn call_frame_new(name: text) -> CallFrame:
     CallFrame(function_name: name, env_id: -1, line: 0, this_value: JsValue.Undefined, return_value: JsValue.Undefined, has_return: false)
@@ -252,6 +284,9 @@ fn _digit_val(ch: i64) -> i64:
     -1
 
 export RETURN_SIGNAL
+export MAX_SCRIPT_EXECUTION_STEPS
+export JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS
+export JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
 export Environment, EnvironmentStack, CallFrame, JsFunction
 export env_new, env_stack_new, call_frame_new
 export to_number, js_to_string, to_boolean, is_truthy, typeof_value

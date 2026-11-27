@@ -1,0 +1,348 @@
+# Bounded command owner of the phase-3 Hello matrix twin (Matrix.run()).
+#
+# POSIX: every command runs under scripts/resource/process-tree-rss-watchdog.pl
+# with the identical argv the Python owner uses, launched through
+# lib/hello-matrix-launch.shs (exact env, cwd, exclusive logs, new session or
+# own group when nested). Windows: every command is one owned child of the
+# Simple Win32 Job owner (lib/hello_matrix_windows.spl). Polling, disk/log
+# limits, the retained-watchdog cleanup window and every receipt follow
+# hello-sanity-matrix.py. This module is also the callback surface the
+# BuildRunner twin uses (lib/hello_buildrunner_lane.spl).
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_write, file_write_bytes, file_read_bytes, file_rename, file_size, file_hash_sha256_or_empty, dir_create_all, is_dir, is_file, time_now_monotonic_ms, process_spawn_async, process_kill, thread_sleep}
+use std.nogc_sync_mut.io.process_ops.{process_wait}
+use std.nogc_sync_mut.io.windows_process_owner_abi.{rt_host_disk_headroom_bytes_v1}
+# No public std signal API exists (sffi/process.spl keeps these private).
+extern fn rt_signal_install(signal_num: i64) -> i64
+extern fn rt_signal_check(signal_num: i64) -> i64
+
+pub fn signal_install(signal_num: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_signal_install(signal_num)
+
+pub fn signal_check(signal_num: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_signal_check(signal_num)
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair, sdn_s, sdn_i, sdn_b, sdn_render, env_put, env_value, has_text, nested_session, text_newline, split_lines}
+use scripts.bootstrap.lib.hello_matrix_quote.{shlex_join}
+use scripts.bootstrap.lib.hello_matrix_windows.{WindowsCommandOutcome, windows_start_command, windows_poll_command, windows_cancel_command, windows_collect_command, windows_outcome_env}
+
+pub val SIGINT: i64 = 2
+pub val SIGTERM: i64 = 15
+
+# Everything the Python Matrix object carried that commands and lanes read.
+pub struct MatrixContext:
+    root: text
+    out: text
+    script: text
+    stage_binary: text
+    compiler: text
+    sha: text
+    runtime: text
+    runtime_hashes: [EnvPair]
+    linker: text
+    linker_sha: text
+    windows: bool
+    darwin: bool
+    driver: text
+    driver_sha: text
+    sdk: text
+    base: [EnvPair]
+    phase: i64
+    backend: text
+    compile_route: text
+    timeout_seconds: i64
+    max_rss_kib: i64
+    min_free_disk_bytes: i64
+    max_log_bytes: i64
+    windows_abi: text
+    trace_stages: bool
+    target: text
+    jobs: i64
+
+# Outcome of run(): Python returned (stdout, stderr) or raised ValueError /
+# CleanupPending (pending=true).
+pub struct RunResult:
+    ok: bool
+    pending: bool
+    error: text
+    stdout: text
+    stderr: text
+
+pub fn run_err(message: text) -> RunResult:
+    RunResult(ok: false, pending: false, error: message, stdout: "", stderr: "")
+
+# Live watchdog pids whose finite cleanup is still pending (Python children).
+var _retained_children: [i64] = []
+
+pub fn retained_children_count() -> i64:
+    _retained_children.len()
+
+pub fn stop_requested() -> bool:
+    signal_check(SIGINT) > 0 or signal_check(SIGTERM) > 0
+
+pub fn digest(path: text) -> text:
+    file_hash_sha256_or_empty(path)
+
+# Native separator: str(Path) on Windows uses backslashes in every receipt.
+var _sep = "/"
+
+pub fn set_native_windows(windows: bool):
+    _sep = if windows: "\\" else: "/"
+
+pub fn join(a: text, b: text) -> text:
+    val tail = b.replace("/", _sep)
+    if a.ends_with("/") or a.ends_with("\\"): a + tail else: a + _sep + tail
+
+# Python Path.write_text: text mode (CRLF on native Windows).
+pub fn write_text(ctx: MatrixContext, path: text, content: text) -> bool:
+    file_write(path, if ctx.windows: content.replace("\n", "\r\n") else: content)
+
+# sdn(): atomic replace through <path>.tmp.
+pub fn write_sdn(ctx: MatrixContext, path: text, fields: [SdnField]) -> bool:
+    val tmp = path + ".tmp"
+    file_write(tmp, sdn_render(fields, ctx.windows)) and file_rename(tmp, path)
+
+pub fn exists_error(path: text) -> text:
+    "[Errno 17] File exists: '" + path + "'"
+
+pub fn mkdir_exclusive(path: text) -> Result<bool, text>:
+    if file_exists(path) or is_dir(path):
+        return Err(exists_error(path))
+    if not dir_create_all(path):
+        return Err("cannot create directory: " + path)
+    Ok(true)
+
+pub fn disk_free(ctx: MatrixContext) -> i64:
+    rt_host_disk_headroom_bytes_v1(ctx.out)
+
+pub fn validate_identity(ctx: MatrixContext) -> Result<bool, text>:
+    if digest(ctx.compiler) != ctx.sha:
+        return Err("phase compiler bytes changed")
+    if ctx.darwin and digest(ctx.driver) != ctx.driver_sha:
+        return Err("Darwin compiler driver bytes changed")
+    if digest(ctx.linker) != ctx.linker_sha:
+        return Err("linker bytes changed")
+    Ok(true)
+
+pub fn trace_stage(ctx: MatrixContext, lane: text, stage: text, event: text, exit_code: i64, has_exit: bool):
+    if not ctx.trace_stages:
+        return
+    var values = [sdn_s("format", "build-stage-v1"), sdn_s("owner", "hello-matrix"), sdn_s("stage", stage), sdn_s("event", event), sdn_i("phase", ctx.phase), sdn_s("backend", ctx.backend), sdn_s("compile_route", ctx.compile_route), sdn_s("compiler_sha256", ctx.sha)]
+    if has_exit:
+        values.push(sdn_i("exit_code", exit_code))
+    write_sdn(ctx, join(lane, stage + ".trace-" + event + ".sdn"), values)
+
+pub fn compiler_trace_environment(ctx: MatrixContext) -> [EnvPair]:
+    if not ctx.trace_stages:
+        return []
+    [EnvPair(key: "SIMPLE_BOOTSTRAP_DIAG", value: "1"), EnvPair(key: "SIMPLE_COMPILER_PHASE_PROFILE", value: "1"), EnvPair(key: "SIMPLE_COMPILER_TRACE", value: "1"), EnvPair(key: "SIMPLE_KEEP_LLVM_IR", value: "0"), EnvPair(key: "SIMPLE_MEM_SNAPSHOT", value: "0")]
+
+pub fn command_environment(ctx: MatrixContext, lane: text, extra: [EnvPair]) -> Result<[EnvPair], text>:
+    for p in extra:
+        if p.key == "HOME" or p.key == "home" or p.key == "CODEX_HOME":
+            return Err("reserved user environment cannot be repurposed")
+    var env = ctx.base
+    env = env_put(env, "TMPDIR", join(lane, "tmp"))
+    env = env_put(env, "SIMPLE_USER_STORAGE_ROOT", join(lane, "storage"))
+    env = env_put(env, "SIMPLE_NATIVE_BUILD_CACHE_DIR", join(lane, "native-state"))
+    env = env_put(env, "SIMPLE_CACHE", join(lane, "cache/user"))
+    env = env_put(env, "SIMPLE_CACHE_PROJECT", join(lane, "cache/project"))
+    env = env_put(env, "XDG_CACHE_HOME", join(lane, "cache/xdg"))
+    for p in extra:
+        env = env_put(env, p.key, p.value)
+    Ok(env)
+
+pub fn env_lines(env: [EnvPair]) -> [text]:
+    var out: [text] = []
+    for p in env:
+        out.push(p.key + "=" + p.value)
+    out
+
+# shutil.which(name, path=PATH) for a bare tool name; absolute paths pass.
+pub fn which_in(name: text, path_value: text, windows: bool) -> text:
+    if name.contains("/") or (windows and name.contains("\\")):
+        return if is_file(name): name else: ""
+    val sep = if windows: ";" else: ":"
+    for dir in path_value.split(sep):
+        if dir == "":
+            continue
+        val candidate = join(dir, name)
+        if is_file(candidate):
+            return candidate
+        if windows and is_file(candidate + ".exe"):
+            return candidate + ".exe"
+    ""
+
+pub fn rss_receipt_ok(path: text) -> bool:
+    if not file_exists(path):
+        return false
+    var quiescent = ""
+    var observer = ""
+    for line in split_lines(file_read(path)):
+        val at = line.index_of("=") ?? -1
+        if at < 0:
+            continue
+        val key = line.substring(0, at)
+        val value = line.substring(at + 1, line.len())
+        if key == "quiescent": quiescent = value
+        if key == "observer_errors": observer = value
+    quiescent == "1" and observer == "0"
+
+pub fn elapsed_text(ms: i64) -> text:
+    val whole = ms / 1000
+    var frac = "{ms % 1000}"
+    while frac.len() < 3:
+        frac = "0" + frac
+    while frac.len() > 1 and frac.ends_with("0"):
+        frac = frac.substring(0, frac.len() - 1)
+    "{whole}.{frac}"
+
+pub fn stream_bytes(stdout: text, stderr: text) -> i64:
+    var total = 0
+    if file_exists(stdout): total = total + file_size(stdout)
+    if file_exists(stderr): total = total + file_size(stderr)
+    total
+
+# Matrix.run(lane, name, argv, extra, cwd, seconds).
+pub fn run_command(ctx: MatrixContext, lane: text, name: text, argv: [text], extra: [EnvPair], cwd: text, seconds: i64) -> RunResult:
+    if stop_requested():
+        return run_err("interrupted before command launch")
+    match validate_identity(ctx):
+        case Err(e): return run_err(e)
+        case Ok(_): ()
+    if disk_free(ctx) < ctx.min_free_disk_bytes:
+        return run_err("disk reserve reached before command launch")
+    val env = match command_environment(ctx, lane, extra):
+        case Ok(v): v
+        case Err(e): return run_err(e)
+    val nested = nested_session(env, ctx.windows)
+    for child in ["tmp", "storage", "native-state", "cache/user", "cache/project", "cache/xdg"]:
+        dir_create_all(join(lane, child))
+    val timeout = if seconds > 0: seconds else: ctx.timeout_seconds
+    val log = join(lane, name + ".log")
+    val stdout = join(lane, name + ".stdout")
+    val stderr = join(lane, name + ".stderr")
+    val work_dir = if cwd != "": cwd else: ctx.root
+    var command: [text] = []
+    if ctx.windows:
+        command = argv
+    else:
+        val watchdog = join(ctx.root, "scripts/resource/process-tree-rss-watchdog.pl")
+        command = ["perl", watchdog, "--max-rss-kib={ctx.max_rss_kib}", "--interval-ms=100", "--timeout-seconds={timeout}", "--session-mode=" + (if nested: "inherit" else: "new"), "--budget-scope=compiler", "--compiler-jobs=1", "--receipt=" + join(lane, name + ".rss.env"), "--"]
+        for a in argv:
+            command.push(a)
+    write_text(ctx, join(lane, name + ".argv.txt"), shlex_join(command) + "\n")
+    trace_stage(ctx, lane, name, "begin", 0, false)
+    if file_exists(stdout):
+        return run_err(exists_error(stdout))
+    if file_exists(stderr):
+        return run_err(exists_error(stderr))
+    val begin = time_now_monotonic_ms()
+    var reason = "child-exit"
+    var code = 0
+    if ctx.windows:
+        val program = which_in(command[0], env_value(env, "PATH"), true)
+        if program == "":
+            return run_err("[WinError 2] The system cannot find the file specified")
+        var args: [text] = []
+        for i in 1..command.len():
+            args.push(command[i])
+        val lease = match windows_start_command(program, args, env_lines(env), work_dir, stdout, stderr, (timeout + 15) * 1000):
+            case Ok(l): l
+            case Err(e): return run_err(e)
+        print("LAUNCHED " + _leaf(lane) + "/" + name + " pid=windows-job")
+        while true:
+            val poll = match windows_poll_command(lease):
+                case Ok(p): p
+                case Err(e): return run_err(e)
+            if poll.terminal:
+                break
+            if stop_requested():
+                reason = "interrupted"
+            elif time_now_monotonic_ms() - begin > (timeout + 15) * 1000:
+                reason = "supervisor-timeout"
+            elif disk_free(ctx) < ctx.min_free_disk_bytes:
+                reason = "disk-reserve"
+            elif stream_bytes(stdout, stderr) > ctx.max_log_bytes:
+                reason = "log-limit"
+            else:
+                _sleep_ms(100)
+                continue
+            windows_cancel_command(lease)
+            break
+        val outcome = match windows_collect_command(lease, reason):
+            case Ok(o): o
+            case Err(e): return run_err(e)
+        if outcome.timed_out and reason == "child-exit":
+            reason = "supervisor-timeout"
+        write_text(ctx, join(lane, name + ".owner.env"), windows_outcome_env(outcome))
+        if not outcome.tree_empty or not outcome.leader_reaped:
+            return run_err(name + ": Windows Job tree lacks collection proof")
+        code = outcome.exit_code
+    else:
+        val session = if nested: "group" else: "new"
+        var launch: [text] = [join(ctx.root, "scripts/bootstrap/lib/hello-matrix-launch.shs"), work_dir, stdout, stderr, session, "--"]
+        for line in env_lines(env):
+            launch.push(line)
+        launch.push("--")
+        for a in command:
+            launch.push(a)
+        val pid = process_spawn_async("/bin/sh", launch)
+        if pid <= 0:
+            return run_err(name + ": process launch failed")
+        _retained_children.push(pid)
+        print("LAUNCHED " + _leaf(lane) + "/" + name + " pid={pid}")
+        var status = process_wait(pid, 100)
+        while status == -2:
+            if stop_requested():
+                reason = "interrupted"
+            elif time_now_monotonic_ms() - begin > (timeout + 15) * 1000:
+                reason = "supervisor-timeout"
+            elif disk_free(ctx) < ctx.min_free_disk_bytes:
+                reason = "disk-reserve"
+            elif stream_bytes(stdout, stderr) > ctx.max_log_bytes:
+                reason = "log-limit"
+            else:
+                status = process_wait(pid, 100)
+                continue
+            process_kill(pid)
+            status = process_wait(pid, 45000)
+            if status == -2:
+                # Retain the watchdog until its finite owned-child cleanup
+                # completes; killing it first can orphan a compiler tree.
+                status = process_wait(pid, (timeout + 60) * 1000)
+                if status == -2:
+                    write_sdn(ctx, join(lane, name + ".cleanup.sdn"), [sdn_s("status", "RUNNING_FINALIZATION"), sdn_i("watchdog_pid", pid), sdn_i("watchdog_timeout_seconds", timeout), sdn_b("admitted", false)])
+                    return RunResult(ok: false, pending: true, error: "retained watchdog cleanup is still active", stdout: "", stderr: "")
+            break
+        _retained_children = _without(_retained_children, pid)
+        code = status
+    val out_text = if file_exists(stdout): file_read(stdout) else: ""
+    val err_text = if file_exists(stderr): file_read(stderr) else: ""
+    file_write_bytes(log, file_read_bytes(stdout) + file_read_bytes(stderr))
+    write_sdn(ctx, join(lane, name + ".sdn"), [sdn_i("exit_code", code), sdn_s("reason", reason), sdn_s("compiler_sha256", ctx.sha), SdnField(key: "elapsed_seconds", kind: "i", value: elapsed_text(time_now_monotonic_ms() - begin)), sdn_s("stdout_sha256", digest(stdout)), sdn_s("stderr_sha256", digest(stderr))])
+    trace_stage(ctx, lane, name, "end", code, true)
+    match validate_identity(ctx):
+        case Err(e): return run_err(e)
+        case Ok(_): ()
+    if not ctx.windows and not rss_receipt_ok(join(lane, name + ".rss.env")):
+        return run_err(name + ": process tree lacks quiescent ownership receipt")
+    if code != 0 or reason != "child-exit":
+        return run_err(name + ": exit={code} reason=" + reason + "; see " + log)
+    RunResult(ok: true, pending: false, error: "", stdout: out_text, stderr: err_text)
+
+pub fn _without(items: [i64], value: i64) -> [i64]:
+    var out: [i64] = []
+    for item in items:
+        if item != value:
+            out.push(item)
+    out
+
+pub fn _leaf(path: text) -> text:
+    var at = path.len()
+    while at > 0 and path.substring(at - 1, at) != "/" and path.substring(at - 1, at) != "\\":
+        at = at - 1
+    path.substring(at, path.len())
+
+pub fn _sleep_ms(ms: i64):
+    thread_sleep(ms)

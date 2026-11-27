@@ -645,6 +645,7 @@ impl Lowerer {
                             Self::extract_pattern_name(&let_stmt.pattern).unwrap_or_default()
                         );
                         self.reject_callable_for_enum_slot(ty, v, &slot)?;
+                        self.reject_float_join_for_int_slot(ty, v, &slot)?;
                     }
                 }
 
@@ -820,6 +821,9 @@ impl Lowerer {
                 };
                 ctx.bind_local_unit_facts(&name, unit_kind, type_name, lambda_sig);
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let_stmt.ty.is_none() && pattern_type.is_none() {
+                    self.bind_uninferred_local(local_index, value.as_ref(), ctx);
+                }
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
                     let fn_ty = self.module.types.register(HirType::Function {
@@ -834,6 +838,31 @@ impl Lowerer {
                 }
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);
+                }
+
+                // An explicitly annotated numeric binding whose initializer
+                // lowers to a DIFFERENT numeric type used to reach the backend
+                // as a bare store of the initializer's value: the JIT slot then
+                // read back 0 (`val m: i64 = 7.9` printed 0, and the
+                // renderer's `var ix0: i64 = min_x` rasterized with a zeroed
+                // origin), while the interpreter coerced at the binding. Reuse
+                // the explicit `as` cast so both engines honour the annotation
+                // identically: truncate toward zero and narrow to the declared
+                // width, exactly like `x as T` in both engines.
+                // Bug: engine_specs_spec_runner_interpreter_divergence_2026-09-16 (shape 4).
+                if has_explicit_type
+                    && value
+                        .as_ref()
+                        .is_some_and(|v| v.ty != ty && Self::is_numeric_type_id(v.ty) && Self::is_numeric_type_id(ty))
+                {
+                    let init = value.take().expect("checked above");
+                    value = Some(HirExpr {
+                        kind: HirExprKind::Cast {
+                            expr: Box::new(init),
+                            target: ty,
+                        },
+                        ty,
+                    });
                 }
 
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
@@ -955,6 +984,7 @@ impl Lowerer {
 
                 let target = self.lower_expr(assign_target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
+                self.reject_float_join_for_int_slot(target.ty, &value, "the assignment target")?;
 
                 // E1052: Check for self mutation in immutable fn method
                 self.check_self_mutation_in_fn_method(&target, ctx)?;
@@ -1093,13 +1123,18 @@ impl Lowerer {
                     let expr = self.lower_bool_return_expr(v, ctx);
                     self.expected_target_type = prev_expected;
                     let expr = expr?;
-                    // The verdict names the function but not where it is:
-                    // imported modules lower under the entry file's path.
+                    // The verdict names the function; name the DEFINING module
+                    // too (`body_diagnostic_file`): imported modules lower
+                    // under the entry file's path, so a bare line number
+                    // pointed at the wrong file.
+                    // seed_lowering_error_names_entry_file_not_defining_module_2026-11-26
                     self.validate_declared_return_type(ctx.return_type, expr.ty)
                         .map_err(|error| match error {
-                            LowerError::Unsupported(message) => {
-                                LowerError::Unsupported(format!("{message} (return at line {})", ret.span.line))
-                            }
+                            LowerError::Unsupported(message) => LowerError::Unsupported(format!(
+                                "{message} ({}, return at line {})",
+                                self.body_diagnostic_file(),
+                                ret.span.line
+                            )),
                             other => other,
                         })?;
 
@@ -2074,6 +2109,7 @@ impl Lowerer {
     ) -> LowerResult<Vec<HirStmt>> {
         // Lower the subject expression once
         let subject_hir = self.lower_subject_for_patterns(&match_stmt.subject, match_stmt.arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value

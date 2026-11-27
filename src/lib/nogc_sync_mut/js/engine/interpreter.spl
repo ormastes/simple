@@ -15,7 +15,7 @@ use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_parse}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
-use std.js.engine.interpreter_types.{env_stack_new, Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
+use std.js.engine.interpreter_types.{env_stack_new, Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, MAX_SCRIPT_EXECUTION_STEPS, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 
 # ── Object store (imported from vm.spl — single canonical definition) ────
 use std.js.engine.vm_object_store.{ObjectStore}
@@ -373,10 +373,6 @@ fn js_timer_task_precedes(
 
 # ── Interpreter ──────────────────────────────────────────────────────────
 
-pub val MAX_SCRIPT_EXECUTION_STEPS: i64 = 100000
-pub val JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS: i64 = 32768
-pub val JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES: i64 = 64 * 1024 * 1024
-
 pub struct JsHostDomElementPlan:
     is_body: bool
     tag_name: text
@@ -483,6 +479,7 @@ class JsInterpreter:
     host_body_mutation_hook: fn(text, text) -> JsHostBodyMutationPlan
     host_dom_bridge_generation: i64
     host_dom_mutation_generation: i64
+    host_dom_mutation_dirty: bool
     host_dom_element_list_id: i64
     host_dom_element_ids: [i64]
     host_dom_style_ids: [i64]
@@ -615,6 +612,7 @@ class JsInterpreter:
             host_body_mutation_hook: js_host_body_mutation_disabled,
             host_dom_bridge_generation: 0,
             host_dom_mutation_generation: 0,
+            host_dom_mutation_dirty: false,
             host_dom_element_list_id: -1,
             host_dom_element_ids: [],
             host_dom_style_ids: [],
@@ -703,6 +701,110 @@ class JsInterpreter:
             self.pending_timer_tasks[index] = self.pending_timer_tasks[last]
         val _ = self.pending_timer_tasks.pop()
         self._timer_heap_repair(index)
+
+    fn clone() -> JsInterpreter:
+        var cloned_calls: [CallFrame] = []
+        var ci = 0
+        while ci < self.call_stack.len():
+            cloned_calls.push(self.call_stack[ci].clone())
+            ci = ci + 1
+        JsInterpreter(
+            env_stack: self.env_stack.clone(),
+            global_env: self.global_env,
+            object_store: self.object_store.clone(),
+            call_stack: cloned_calls,
+            functions: self.functions,
+            logger: self.logger,
+            return_value: self.return_value,
+            control_return: self.control_return,
+            control_break: self.control_break,
+            control_continue: self.control_continue,
+            thrown_value: self.thrown_value,
+            control_thrown: self.control_thrown,
+            native_id_map: self.native_id_map,
+            bound_function_ids: self.bound_function_ids,
+            bound_function_target_ids: self.bound_function_target_ids,
+            bound_function_this_values: self.bound_function_this_values,
+            bound_function_arg_array_ids: self.bound_function_arg_array_ids,
+            wasm_export_fn_ids: self.wasm_export_fn_ids,
+            wasm_export_bound_imports: self.wasm_export_bound_imports,
+            wasm_export_const_fn_ids: self.wasm_export_const_fn_ids,
+            wasm_export_const_values: self.wasm_export_const_values,
+            wasm_export_body_fn_ids: self.wasm_export_body_fn_ids,
+            wasm_export_body_module_ids: self.wasm_export_body_module_ids,
+            wasm_export_body_indices: self.wasm_export_body_indices,
+            node_require_cache_names: self.node_require_cache_names,
+            node_require_cache_values: self.node_require_cache_values,
+            node_require_last_cache_key: self.node_require_last_cache_key,
+            node_require_last_cache_value: self.node_require_last_cache_value,
+            node_credential_grant_names: self.node_credential_grant_names,
+            node_credential_grant_values: self.node_credential_grant_values,
+            class_proto_fns: self.class_proto_fns,
+            class_proto_ids: self.class_proto_ids,
+            promise_ctor_id: self.promise_ctor_id,
+            promise_proto_id: self.promise_proto_id,
+            response_proto_id: self.response_proto_id,
+            array_buffer_proto_id: self.array_buffer_proto_id,
+            uint8_array_proto_id: self.uint8_array_proto_id,
+            data_view_proto_id: self.data_view_proto_id,
+            next_async_request_seq: self.next_async_request_seq,
+            pending_async_requests: self.pending_async_requests,
+            pending_async_request_registry: self.pending_async_request_registry,
+            last_taken_async_cookie_writes: self.last_taken_async_cookie_writes,
+            pending_promise_tasks: self.pending_promise_tasks,
+            pending_promise_task_head: self.pending_promise_task_head,
+            promise_handlers: self.promise_handlers,
+            promise_handler_registrations: self.promise_handler_registrations,
+            next_promise_handler_id: self.next_promise_handler_id,
+            next_timer_id: self.next_timer_id,
+            pending_timer_tasks: self.pending_timer_tasks,
+            timer_handle_ids: self.timer_handle_ids,
+            timer_handle_object_ids: self.timer_handle_object_ids,
+            timer_current_time_ms: self.timer_current_time_ms,
+            timer_time_origin_ms: self.timer_time_origin_ms,
+            global_var_names: self.global_var_names,
+            global_var_values: self.global_var_values,
+            host_window_id: self.host_window_id,
+            host_document_id: self.host_document_id,
+            host_body_id: self.host_body_id,
+            host_location_id: self.host_location_id,
+            host_navigator_id: self.host_navigator_id,
+            host_chrome_id: self.host_chrome_id,
+            host_session_storage_id: self.host_session_storage_id,
+            host_local_storage_id: self.host_local_storage_id,
+            host_promise_id: self.host_promise_id,
+            host_document_title_value: self.host_document_title_value,
+            host_document_cookie_value: self.host_document_cookie_value,
+            pending_host_document_cookie_writes: self.pending_host_document_cookie_writes,
+            host_document_cookie_write_overflow: self.host_document_cookie_write_overflow,
+            host_body_inner_html_value: self.host_body_inner_html_value,
+            host_body_text_content_value: self.host_body_text_content_value,
+            host_body_inner_html_dirty: self.host_body_inner_html_dirty,
+            host_body_text_content_dirty: self.host_body_text_content_dirty,
+            host_body_mutation_hook: self.host_body_mutation_hook,
+            host_dom_bridge_generation: self.host_dom_bridge_generation,
+            host_dom_mutation_generation: self.host_dom_mutation_generation,
+            host_dom_mutation_dirty: self.host_dom_mutation_dirty,
+            host_dom_element_list_id: self.host_dom_element_list_id,
+            host_dom_element_ids: self.host_dom_element_ids,
+            host_dom_style_ids: self.host_dom_style_ids,
+            host_dom_id_snapshots: self.host_dom_id_snapshots,
+            host_dom_class_snapshots: self.host_dom_class_snapshots,
+            host_dom_value_snapshots: self.host_dom_value_snapshots,
+            host_dom_style_snapshots: self.host_dom_style_snapshots,
+            host_dom_mutation_retained_objects: self.host_dom_mutation_retained_objects,
+            host_dom_mutation_retained_bytes: self.host_dom_mutation_retained_bytes,
+            pending_host_event_ops: self.pending_host_event_ops,
+            pending_host_event_target_ids: self.pending_host_event_target_ids,
+            pending_host_event_types: self.pending_host_event_types,
+            pending_host_event_callbacks: self.pending_host_event_callbacks,
+            pending_host_event_captures: self.pending_host_event_captures,
+            pending_host_event_once_flags: self.pending_host_event_once_flags,
+            host_event_sync_dispatch_blocked: self.host_event_sync_dispatch_blocked,
+            node_compat_enabled: self.node_compat_enabled,
+            execution_steps_remaining: self.execution_steps_remaining,
+            execution_limit_hit: self.execution_limit_hit
+        )
 
 # ── impl extensions (split files) ────────────────────────────────────────
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}

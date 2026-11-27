@@ -276,12 +276,34 @@ Traps hit while doing it:
   `<cgroup-parent>/conmon` (`open /sys/fs/cgroup/cgroup.subtree_control:
   permission denied`, logged at info level only). A workload still running when
   its start helper is reaped then breaks every later engine command with
-  `invalid internal status, try resetting the pause process`. Decided, **not
-  built**: at the Start leader's reap, freeze the helper group and move its
-  members into an owner-held `<delegatedCgroup>/simple-engine-<identity>`; kill
-  that group only after the owner's Stop, Remove and Absence, at all three
-  settle sites. Measurements, the rejected options and the build order:
+  `invalid internal status, try resetting the pause process`. **Built in source
+  2026-11-27, not run in the guest**: at the Start leader's reap (exit 0 only)
+  the group runtime freezes the helper group and moves its members into
+  `<delegatedCgroup>/simple-engine-<launch identity>` (`rt_lg_move_residue_v3`,
+  asked for by the thirteenth profile word, `leader_residue_mode`, on the two
+  Start projections only: plain `linux_fresh_workload_project_launch_v2` and
+  workspace `linux_fresh_workspace_project_launch_v3`; both clear it for every
+  other action). The owner kills that group only after its own Stop, Remove
+  and Absence, at five sites (destroy, exited-start settle, probe settle,
+  transfer close, workspace settle `machine_workspace_settle_v3` before both of
+  its branches; on the probe lane the completed `probe-wait` stands in for
+  Stop);
+  earlier it refuses `machine-fresh-workload-engine-group-store-live`, and while
+  a group is recorded no settle or close passes
+  (`machine-fresh-workload-engine-group-retained`). Record:
   `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
+- Engine-group traps: the installed broker must be rebuilt (an older one refuses
+  the sixteen-field profile, `trailing wire fields`); the group has no limits of
+  its own (conmon's `container cleanup` peaked at 12 MB and 18 pids, and a low
+  limit would kill the monitor); the owner holds a name and a device/inode, not
+  a descriptor; a latched owner keeps its group, like its workload. A new launch
+  projection must set or clear the mode itself: the workspace one passed the
+  base profile through until 2026-11-27, so workspace containers lost conmon.
+  Primary attach, `wait`/`logs` and the socket exec leave nothing behind and
+  never ask; epoch startup V1 admits a `start` operand and has no engine-group
+  owner (open, see the record's path table). Runtime proof:
+  `sh scripts/check/check-linux-group-residue-move.shs` (real cgroups, needs a
+  delegated user scope, exits 77 without one).
 - Measured there (podman 4.9.3): `--cgroups=split` is refused with a cgroup
   parent; `no-conmon` and the systemd manager leave conmon in the helper group;
   conmon and the pause process keep `/dev/null` on fd 1 and 2, so a surviving
@@ -289,8 +311,12 @@ Traps hit while doing it:
   `running` poisons the store for every later command, `rm -f` and `create`
   included. A pause process made by the start helper stays with conmon and never
   leaves by itself.
-- Engine helpers get `HOME=<run root>`
-  (`linux_fresh_epoch_helper_environment_v1`), not an empty environment. With no
+- Engine helpers get `HOME=<run root>`, `XDG_RUNTIME_DIR=<run root>` and
+  `PATH=/usr/bin:/bin` (`linux_fresh_epoch_helper_environment_v1`). Without
+  `PATH` a helper that has no pause process to join exits 125 (`"newuidmap":
+  executable file not found in $PATH`); a HOME-only measurement passes only when
+  the uid already has a pause process. Without `XDG_RUNTIME_DIR`, `pause.pid` is
+  under `/run/user/<uid>`, outside custody. With no
   `HOME` podman lstats the account home, and custody requires that to be the
   absent `/nonexistent`. `HOME=/nonexistent` is the broker's inherited-environment
   rule, a different thing. The guest unit's account home and `SIMPLE_*`

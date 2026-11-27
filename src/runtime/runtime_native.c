@@ -6857,6 +6857,45 @@ int64_t rt_option_float_bits(int64_t value) {
     return bits;
 }
 
+int8_t rt_is_none(int64_t value);
+int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
+
+/* Tag of the inline (tag, bits) layout of a typed `f64?` for the one-word form
+ * `value`: 0 nil, 4 the Option::None enum, 1 Some holding the raw IEEE bits,
+ * 3 Some holding a boxed float, 2 any other word (the flat tagged float).
+ * Presence is (tag & 3) != 0. Never allocates. Twin of rt_option_float_tag in
+ * the Rust runtime (value/objects.rs).
+ * seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27 */
+int64_t rt_option_float_tag(int64_t value) {
+    if (value == rt_core_nil()) return 0;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (e && e->enum_id == RT_OPTION_ENUM_ID) {
+        if (rt_is_none(value)) return 4;
+        return rt_core_as_heap_float(e->payload) ? 3 : 1;
+    }
+    return 2;
+}
+
+/* One-word form of an inline typed `f64?`: the box built where the pair
+ * escapes to a consumer that only knows the one-word form. Twin of
+ * rt_option_float_pack in the Rust runtime (value/objects.rs). */
+int64_t rt_option_float_pack(int64_t cached, int64_t tag, double value) {
+    /* The word already built for this value (0 = none): box once per
+     * assignment, not once per escaping read. */
+    if (cached != 0) return cached;
+    /* tag | 8: the erased payload form an `any` consumer decodes. */
+    if (tag & 8) return (tag & 3) ? rt_value_float(value) : rt_core_nil();
+    int64_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    switch (tag) {
+        case 1: return rt_enum_new((int32_t)RT_OPTION_ENUM_ID, 0, bits);
+        case 2: return rt_value_float(value);
+        case 3: return rt_enum_new((int32_t)RT_OPTION_ENUM_ID, 0, rt_value_float(value));
+        case 4: return rt_enum_new((int32_t)RT_OPTION_ENUM_ID, 1, rt_core_nil());
+        default: return rt_core_nil();
+    }
+}
+
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e) return value; /* bare/flat-nullable payload convention */

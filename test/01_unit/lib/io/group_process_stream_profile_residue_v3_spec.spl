@@ -1,0 +1,166 @@
+# The leader-residue policy of the V3 stream profile: one optional wire field and one optional runtime
+# word. Pure canonical policy tests; no native cgroup move is claimed here (that is
+# src/runtime/test/runtime_linux_group_residue_move_selfcheck.c).
+# Record: doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3,
+    GroupProcessStreamProfileV3, group_process_stream_profile_validate_v3, group_process_stream_profile_encode_v3,
+    group_process_stream_profile_decode_v3, group_process_stream_profile_residue_words_v3,
+    group_process_stream_resource_receipt_v3, GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2,
+    group_process_child_argv_digest_v2, group_process_stream_identity_profiled_v3,
+    group_process_stream_launch_encode_profiled_v3, group_process_stream_launch_decode_profiled_v3,
+    group_process_stream_template_encode_v3, group_process_stream_template_decode_v3}
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_epoch_v1.LinuxFreshEpochProfileV1
+use std.common.sdn.value.SdnValue
+use std.nogc_sync_mut.io.linux_fresh_workload_launch_v2.linux_fresh_workload_project_launch_v2
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+
+fn residue_profile_v3(mode: text) -> GroupProcessStreamProfileV3:
+    GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(25, 2500, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/service/broker", 11, 22, 3,
+            "c".repeat(64), 250000, 1000000, 250, 67108864, 134217728),
+        child_image_mode: "trusted-local-admin-image-fd-v1", leader_residue_mode: mode)
+
+fn residue_launch_v3(mode: text) -> GroupProcessStreamLaunchV2:
+    val program = "/opt/helper"
+    val args = ["start", "--", "a".repeat(64)]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: [], directory: "/work", inputs: [], timeout_ms: 5000,
+        broker_program: "/opt/broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args), launch_deadline_unix_ms: 1900000000000)
+    GroupProcessStreamLaunchV2(root: "/work/owner", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64), memory_limit_bytes: 1048576,
+        request: request, delegated_cgroup_path: "/sys/fs/cgroup/service", transport_generation: 34,
+        profile_v3: Some(residue_profile_v3(mode)))
+
+# DATA-only command and profile for the pure projector; never an installed owner.
+fn residue_command_v3(action: LinuxFreshWorkloadActionV2, native_id: text) -> LinuxFreshWorkloadCommandV2:
+    val native = LinuxOciRequestV1(pod_uid: "job_1", attempt: 1, operation_id: "operation_1",
+        image: "registry.example/image@sha256:" + "2".repeat(64), bundle_path: "", command: ["/bin/sleep"],
+        args: ["300"], timeout_ms: 30000, cpu_limit_millis: 1000, memory_limit_bytes: 67108864,
+        pid_limit: 64, network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+    val scope = ContainerHostScopeV2(physical_host_id: "host_1", service_scope_id: "epoch-" + "a".repeat(64),
+        boot_id: "boot_1", provider_generation: 7, native_machine_id: "linux-machine-id-v1:1234",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot_1")
+    val plan = ContainerExecutionPlanV2(backend: "linux-podman", workload_uid: native.pod_uid,
+        attempt: native.attempt, operation_id: native.operation_id, request_digest: linux_oci_request_digest_v1(native).unwrap(),
+        physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id)
+    LinuxFreshWorkloadCommandV2(request: ContainerExecutionRequestV2(plan, linux_oci_retained_request_encode_v1(native).unwrap()),
+        scope: scope, action: action, native_id: native_id, image: native.image,
+        entrypoint: native.command, args: native.args, cpu_millis: native.cpu_limit_millis, memory_bytes: native.memory_limit_bytes,
+        pid_limit: native.pid_limit, timeout_ms: native.timeout_ms, helper_cpu_millis: 25, helper_memory_bytes: 1048576)
+
+fn residue_epoch_profile_v3() -> LinuxFreshEpochProfileV1:
+    LinuxFreshEpochProfileV1(fields: {"graphRoot": SdnValue.String("/var/lib/simple/epoch/graph"),
+        "runRoot": SdnValue.String("/var/lib/simple/epoch/run"), "delegatedCgroup": SdnValue.String("/simple/epoch/containers"),
+        "partitionCpuMillis": SdnValue.Int(4000), "reservedCpuMillis": SdnValue.Int(500),
+        "partitionMemoryBytes": SdnValue.Int(1073741824), "reservedMemoryBytes": SdnValue.Int(134217728)})
+
+describe "Group process stream profile leader residue V3":
+    it "leaves a profile without the policy byte-identical: fifteen fields, twelve words":
+        val plain = residue_profile_v3("")
+        val implicit = GroupProcessStreamProfileV3(helper_cpu: plain.helper_cpu, broker: plain.broker,
+            child_image_mode: plain.child_image_mode)
+        expect(group_process_stream_profile_validate_v3(plain)).to_equal("")
+        val encoded = group_process_stream_profile_encode_v3(plain)
+        expect(encoded).to_equal(group_process_stream_profile_encode_v3(implicit))
+        expect(encoded.split("\n").len()).to_equal(16)
+        expect(encoded.ends_with("trusted-local-admin-image-fd-v1\n")).to_equal(true)
+        expect(group_process_stream_profile_residue_words_v3(plain).len()).to_equal(0)
+        val restored = group_process_stream_profile_decode_v3(encoded)
+        expect(restored.is_ok()).to_equal(true)
+        expect(restored.unwrap().leader_residue_mode).to_equal("")
+
+    it "carries the policy as one more field and one more word, and round-trips it":
+        val asked = residue_profile_v3(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        expect(group_process_stream_profile_validate_v3(asked)).to_equal("")
+        val encoded = group_process_stream_profile_encode_v3(asked)
+        expect(encoded).to_equal(group_process_stream_profile_encode_v3(residue_profile_v3("")) + "move-to-engine-group-v1\n")
+        expect(group_process_stream_profile_residue_words_v3(asked)).to_equal([1])
+        val restored = group_process_stream_profile_decode_v3(encoded)
+        expect(restored.is_ok()).to_equal(true)
+        expect(restored.unwrap().leader_residue_mode).to_equal("move-to-engine-group-v1")
+        expect(group_process_stream_profile_encode_v3(restored.unwrap())).to_equal(encoded)
+
+    it "refuses an unknown policy, an empty sixteenth field and a trailing one":
+        val unknown = residue_profile_v3("keep-everything")
+        expect(group_process_stream_profile_validate_v3(unknown)).to_equal("unknown leader residue policy")
+        expect(group_process_stream_profile_encode_v3(unknown)).to_equal("")
+        expect(group_process_stream_resource_receipt_v3("f".repeat(64), unknown)).to_equal("")
+        val plain = group_process_stream_profile_encode_v3(residue_profile_v3(""))
+        for bad in [plain + "keep-everything\n", plain + "\n", plain + "move-to-engine-group-v1\nmore\n",
+                plain + "move-to-engine-group-v1\n\n"]:
+            expect(group_process_stream_profile_decode_v3(bad).is_err()).to_equal(true)
+
+    it "makes the policy part of the launch identity and of the resource receipt":
+        val plain = group_process_stream_identity_profiled_v3(residue_launch_v3(""))
+        val asked = group_process_stream_identity_profiled_v3(residue_launch_v3(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3))
+        expect(plain.byte_len()).to_equal(64)
+        expect(asked.byte_len()).to_equal(64)
+        expect(plain == asked).to_equal(false)
+        step("The receipt binds the encoded profile, so a broker cannot answer for the other policy")
+        val identity = "f".repeat(64)
+        val receipt_plain = group_process_stream_resource_receipt_v3(identity, residue_profile_v3(""))
+        val receipt_asked = group_process_stream_resource_receipt_v3(identity, residue_profile_v3(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3))
+        expect(receipt_plain == receipt_asked).to_equal(false)
+        expect(receipt_asked.contains(sha256_text(group_process_stream_profile_encode_v3(residue_profile_v3(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3))))).to_equal(true)
+
+    it "survives the launch wire and the published template wire with the policy set":
+        val asked = residue_launch_v3(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        val wire = group_process_stream_launch_encode_profiled_v3(asked)
+        expect(wire.byte_len() > 0).to_equal(true)
+        val restored = group_process_stream_launch_decode_profiled_v3(wire)
+        expect(restored.is_ok()).to_equal(true)
+        expect(restored.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("move-to-engine-group-v1")
+        expect(group_process_stream_launch_encode_profiled_v3(restored.unwrap())).to_equal(wire)
+        expect(group_process_stream_identity_profiled_v3(restored.unwrap())).to_equal(group_process_stream_identity_profiled_v3(asked))
+        step("The same launch without the policy is a different wire, and each decodes to itself")
+        val plain_wire = group_process_stream_launch_encode_profiled_v3(residue_launch_v3(""))
+        expect(plain_wire == wire).to_equal(false)
+        expect(group_process_stream_launch_decode_profiled_v3(plain_wire).unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("")
+        step("The template the owner publishes before the launch keeps it too")
+        val template = group_process_stream_template_encode_v3(asked)
+        expect(template.is_ok()).to_equal(true)
+        val template_back = group_process_stream_template_decode_v3(template.unwrap())
+        expect(template_back.is_ok()).to_equal(true)
+        expect(template_back.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("move-to-engine-group-v1")
+        expect(group_process_stream_template_encode_v3(template_back.unwrap()).unwrap()).to_equal(template.unwrap())
+
+    it "is set by the workload projection for Start and for no other action":
+        val base = residue_launch_v3("")
+        val started = linux_fresh_workload_project_launch_v2(residue_epoch_profile_v3(), base,
+            residue_command_v3(LinuxFreshWorkloadActionV2.Start, "a".repeat(64)))
+        expect(started.is_ok()).to_equal(true)
+        expect(started.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("move-to-engine-group-v1")
+        expect(started.unwrap().request.args[started.unwrap().request.args.len() - 3]).to_equal("start")
+        step("The projected Start launch is a valid, encodable launch")
+        expect(group_process_stream_launch_encode_profiled_v3(started.unwrap()).byte_len() > 0).to_equal(true)
+        for action in [LinuxFreshWorkloadActionV2.Inspect, LinuxFreshWorkloadActionV2.Stop, LinuxFreshWorkloadActionV2.Remove,
+                LinuxFreshWorkloadActionV2.Absence]:
+            val other = linux_fresh_workload_project_launch_v2(residue_epoch_profile_v3(), base, residue_command_v3(action, "a".repeat(64)))
+            expect(other.is_ok()).to_equal(true)
+            expect(other.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("")
+        val created = linux_fresh_workload_project_launch_v2(residue_epoch_profile_v3(), base, residue_command_v3(LinuxFreshWorkloadActionV2.Create, ""))
+        expect(created.is_ok()).to_equal(true)
+        expect(created.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("")
+        step("A base that already carries the policy cannot leak it into another action")
+        val carried = residue_launch_v3(GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3)
+        val leaked = linux_fresh_workload_project_launch_v2(residue_epoch_profile_v3(), carried,
+            residue_command_v3(LinuxFreshWorkloadActionV2.Stop, "a".repeat(64)))
+        expect(leaked.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("")
+        val again = linux_fresh_workload_project_launch_v2(residue_epoch_profile_v3(), carried,
+            residue_command_v3(LinuxFreshWorkloadActionV2.Start, "a".repeat(64)))
+        expect(again.unwrap().profile_v3.unwrap().leader_residue_mode).to_equal("move-to-engine-group-v1")
+
+    it "hands the runtime the word through the one word projector":
+        val owner = file_read_text("src/lib/nogc_sync_mut/io/linux_process_owner.spl")
+        expect(owner.contains("    row + group_process_stream_profile_residue_words_v3(profile)\n")).to_equal(true)
+        expect(owner.split("_linux_process_stream_profile_words_v3(profile)").len()).to_equal(5)

@@ -1049,6 +1049,8 @@ pub use value::{
     rt_enum_register_name,
     rt_enum_payload,
     rt_option_float_bits,
+    rt_option_float_pack,
+    rt_option_float_tag,
     rt_free,
     // Memory operations (raw pointer)
     rt_memcpy,

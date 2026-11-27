@@ -1,0 +1,202 @@
+# Purpose and audience: compiler engineers who own class identity in the
+# pure-Simple interpreter (src/compiler/10.frontend/core/interpreter).
+# @req REQ-SSPEC-COMPILER
+# Tracks: pure_simple_interpreter_class_table_keyed_by_bare_name_2026_11_27
+"""
+# Pure-Simple interpreter: same-named classes are identified by owner module
+
+Two fixture modules (`same_name_class/pa.spl`, `same_name_class/pb.spl`)
+each declare `class Thing`, `struct P` and a generic `struct Box<T>`.
+Owner decision 2026-11-27: a class is identified by its OWNER module, not
+its bare name. An import alias (`use pb.{Thing as Legacy}`) is a local name
+for pb's class, and a namespace-qualified use (`pb.Thing`) names it too;
+`create()`, statics, construction and self-method calls on a pb instance run
+pb's bodies. Each module's own functions keep seeing their own `Thing`,
+`P` and `Box`, and an instance keeps its bare type name in user-visible text.
+
+Before the fix the struct table was keyed by bare name, last write wins, so
+both modules' classes collapsed onto whichever loaded last.
+
+Every example runs a source through `core_interpret` (the pure-Simple
+interpreter, interpreted by the seed test runner).
+"""
+use std.spec.{describe, it, expect}
+use std.spec.step
+
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_get_int, val_get_text}
+use compiler.core.interpreter.eval_tables.{struct_unrouted_warned}
+
+val CALLER: text = "test/fixtures/compiler/interpreter/same_name_class_caller.spl"
+val USE_PA: text = "use test.fixtures.compiler.interpreter.same_name_class.pa.{{Thing}}\n"
+val USE_PB_ALIAS: text = "use test.fixtures.compiler.interpreter.same_name_class.pb.{{Thing as Legacy}}\n"
+val USE_PB_NS: text = "use test.fixtures.compiler.interpreter.same_name_class.pb\n"
+
+fn run_int(src: text) -> i64:
+    val result = core_interpret(src, CALLER)
+    expect(eval_get_error()).to_equal("")
+    val_get_int(result)
+
+describe "pure-Simple interpreter: same-named classes keep their owner module":
+    it "an import alias binds create() and statics to the owner class":
+        step("Legacy.create() / Legacy.tag() run pb's bodies, Thing stays pa's")
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn main() -> i64:\n" +
+            "    val a = Thing.create()\n" +
+            "    val l = Legacy.create()\n" +
+            "    a.n * 1000 + l.n * 100 + (Legacy.tag() - Thing.tag())\n"
+        expect(run_int(src)).to_equal(1300)
+
+    it "self-method calls on an aliased instance run the owner's methods":
+        step("l.compile() calls pb's self.size(), not pa's")
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn main() -> i64:\n" +
+            "    val a = Thing.create()\n" +
+            "    val l = Legacy.create()\n" +
+            "    a.compile() * 10000 + l.compile()\n"
+        expect(run_int(src)).to_equal(241010)
+
+    it "direct construction through the alias builds the owner class":
+        step("Legacy(n: 9).size() is pb's size")
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn main() -> i64:\n" +
+            "    val l = Legacy(n: 9)\n" +
+            "    val a = Thing(n: 8)\n" +
+            "    l.size() * 1000 + a.size() * 10 + l.n - a.n\n"
+        expect(run_int(src)).to_equal(10241)
+
+    it "a namespace-qualified class names the owner module's class":
+        step("pb.Thing.create() / pb.Thing.tag() beside plain pa Thing")
+        val src = USE_PA + USE_PB_NS +
+            "fn main() -> i64:\n" +
+            "    val a = Thing.create()\n" +
+            "    val q = pb.Thing.create()\n" +
+            "    a.compile() * 100000 + q.compile() * 10 + q.n + pb.Thing.tag() * 0\n"
+        expect(run_int(src)).to_equal(2410102)
+
+    it "each module's own functions see their own same-named classes":
+        step("pa_make / pb_make build their own Thing; P and Box match per owner")
+        val src = "use test.fixtures.compiler.interpreter.same_name_class.pa.{{pa_make, pa_px, pa_box}}\n" +
+            "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_make, pb_px, pb_box}}\n" +
+            "fn main() -> i64:\n" +
+            "    val a = pa_make()\n" +
+            "    val b = pb_make()\n" +
+            "    a.size() + b.size() * 100 + pa_px() * 10000 + pb_px() * 100000 + pa_box() * 10000000 + pb_box() * 10000000000\n"
+        expect(run_int(src)).to_equal(2071041131024)
+
+    it "an owner instance keeps its bare type name in user-visible text":
+        step("display of a pb instance built through the alias reads Thing, never Legacy or a path")
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn main() -> text:\n" +
+            "    val l = Legacy.create()\n" +
+            "    \"{{l}}\"\n"
+        val result = core_interpret(src, CALLER)
+        expect(eval_get_error()).to_equal("")
+        expect(val_get_text(result)).to_equal("Thing(...)")
+
+    it "a typed pattern through the alias matches only the owner's instances":
+        step("case Legacy t matches a pb Thing and rejects a pa Thing")
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn kind(v: Legacy) -> i64:\n" +
+            "    match v:\n" +
+            "        case Legacy t:\n" +
+            "            t.size()\n" +
+            "        case _:\n" +
+            "            -1\n" +
+            "fn main() -> i64:\n" +
+            "    kind(Legacy.create()) * 100 + kind(Thing.create())\n"
+        expect(run_int(src)).to_equal(999)
+
+    it "an instance passed to its owner module keeps dispatching there":
+        step("pb_size_of(Legacy(n: 1)) and the entry file's own Thing stay apart")
+        val src = USE_PA + "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_size_of, Thing as Legacy}}\n" +
+            "fn main() -> i64:\n" +
+            "    pb_size_of(Legacy(n: 1)) * 100 + Thing(n: 1).size()\n"
+        expect(run_int(src)).to_equal(1024)
+
+describe "pure-Simple interpreter: unique class controls":
+    it "an alias of a single-owner class names that class":
+        step("Solo as L: create(), fields and methods")
+        val src = "use test.fixtures.compiler.interpreter.same_name_class.solo.{{Solo as L}}\n" +
+            "fn main() -> i64:\n" +
+            "    val l = L.create()\n" +
+            "    l.n * 10 + l.size() + L(n: 2).n * 100\n"
+        expect(run_int(src)).to_equal(247)
+
+    it "a namespace-qualified single-owner class names that class":
+        step("solo.Solo.create() and solo.Solo(n: 2)")
+        val src = "use test.fixtures.compiler.interpreter.same_name_class.solo\n" +
+            "fn main() -> i64:\n" +
+            "    val l = solo.Solo.create()\n" +
+            "    l.n * 10 + l.size() + solo.Solo(n: 2).n * 100\n"
+        expect(run_int(src)).to_equal(247)
+
+    it "enums sharing a name keep their own variants per module":
+        step("pa's Mode.Slow and pb's Mode.Off match in their own modules")
+        val src = "use test.fixtures.compiler.interpreter.same_name_class.pa.{{pa_mode}}\n" +
+            "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_mode}}\n" +
+            "fn main() -> i64:\n" +
+            "    pa_mode() * 10 + pb_mode()\n"
+        expect(run_int(src)).to_equal(23)
+
+    it "trait impls on same-named classes dispatch to the owner's impl":
+        step("Thing.create().label() is pa's 7, Legacy.create().label() is pb's 8")
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn main() -> i64:\n" +
+            "    Thing.create().label() * 10 + Legacy.create().label()\n"
+        expect(run_int(src)).to_equal(78)
+
+    it "a glob import beside a later same-named owner keeps the glob owner":
+        step("use pa.* then pb loaded: bare Thing is pa's class")
+        val src = "use test.fixtures.compiler.interpreter.same_name_class.pa.*\n" +
+            "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_make}}\n" +
+            "fn main() -> i64:\n" +
+            "    Thing.create().compile() * 10000 + pb_make().compile()\n"
+        expect(run_int(src)).to_equal(241010)
+
+val USE_PA_PX: text = "use test.fixtures.compiler.interpreter.same_name_class.pa.{{pa_px}}\n"
+val USE_PB_PX: text = "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_px}}\n"
+val ENTRY_P: text = "struct P:\n    x: i64\n" +
+    "val E = P(x: 9)\n" +
+    "fn kind(p) -> i64:\n    match p:\n        case P q:\n            q.x\n        case _:\n            -1\n" +
+    "fn main() -> i64:\n    kind(E) * 1000 + kind(P(x: 7)) * 10 + pa_px() * 0 + pb_px() * 0\n"
+
+describe "pure-Simple interpreter: same-named class negatives":
+    it "entry top-level code builds the entry file's class (pa then pb)":
+        step("val E = P(x: 9) at top level is the entry's P, not the last import's")
+        expect(run_int(USE_PA_PX + USE_PB_PX + ENTRY_P)).to_equal(9070)
+
+    it "entry top-level code builds the entry file's class (pb then pa)":
+        step("import order must not change which P top-level code builds")
+        expect(run_int(USE_PB_PX + USE_PA_PX + ENTRY_P)).to_equal(9070)
+
+    it "a top-level alias constructs the owner class":
+        step("val L0 = Legacy(n: 5) at top level is pb's Thing")
+        val src = USE_PA + USE_PB_ALIAS +
+            "val L0 = Legacy(n: 5)\n" +
+            "fn main() -> i64:\n" +
+            "    L0.n * 100 + L0.size()\n"
+        expect(run_int(src)).to_equal(510)
+
+    it "a method only the other same-named class has is not found":
+        step("pa's Thing.pa_only() works; pb's Thing has none and must not borrow it")
+        expect(run_int(USE_PA + "fn main() -> i64:\n    Thing.create().pa_only()\n")).to_equal(5)
+        val src = USE_PA + USE_PB_ALIAS +
+            "fn main() -> i64:\n" +
+            "    Legacy.create().pa_only()\n"
+        core_interpret(src, CALLER)
+        expect(eval_has_error()).to_equal(true)
+        expect(eval_get_error()).to_contain("pa_only")
+
+    it "an unrouted shared class name warns, an imported one does not":
+        step("bare Thing with neither module's Thing imported fires the warning")
+        val routed = USE_PA + "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_make}}\n" +
+            "fn main() -> i64:\n    Thing(n: 1).n\n"
+        expect(run_int(routed)).to_equal(1)
+        expect(struct_unrouted_warned("Thing")).to_equal(false)
+        val unrouted = "use test.fixtures.compiler.interpreter.same_name_class.pa.{{pa_make}}\n" +
+            "use test.fixtures.compiler.interpreter.same_name_class.pb.{{pb_make}}\n" +
+            "fn main() -> i64:\n    Thing(n: 1).n\n"
+        expect(run_int(unrouted)).to_equal(1)
+        expect(struct_unrouted_warned("Thing")).to_equal(true)

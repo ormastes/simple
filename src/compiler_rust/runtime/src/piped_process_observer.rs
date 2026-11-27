@@ -72,3 +72,43 @@ pub extern "C" fn rt_process_piped_exit_status_value(pid: i64) -> *mut c_void {
     // This is allocation only; all receipt policy above is evaluated in Rust.
     unsafe { simple_piped_receipt_new_v1(state, code, error) }
 }
+
+// Explicit child environment + bounded readiness. Argument policy is evaluated
+// here; the canonical C piped registry owns the OS handles, exactly like the
+// observers above. Codes mirror runtime_process_observer_private.h.
+const PIPED_ENV_INVALID: i64 = -22;
+const PIPED_STREAM_STDOUT: i64 = 1;
+const PIPED_STREAM_STDERR: i64 = 2;
+const PIPED_WAIT_MAX_MS: i64 = 86_400_000;
+const PIPED_WAIT_INVALID: i64 = -22;
+const PIPED_WAIT_OS_ERROR: i64 = -5;
+
+unsafe extern "C" {
+    fn simple_piped_owner_spawn_environment_v1(
+        cmd: *const u8, args: *mut c_void, environment: *mut c_void, mode: i64) -> i64;
+    fn simple_piped_owner_wait_readable_v1(pid: i64, stream: i64, timeout_ms: i64) -> i64;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn_piped_environment_v1(
+    cmd: *const u8, args: *mut c_void, environment: *mut c_void, mode: i64,
+) -> i64 {
+    if cmd.is_null() || unsafe { *cmd } == 0 || (mode != 0 && mode != 1) {
+        return PIPED_ENV_INVALID;
+    }
+    let pid = unsafe { simple_piped_owner_spawn_environment_v1(cmd, args, environment, mode) };
+    // Only a PID, the rejection code, or the spawn-failure sentinel may escape.
+    if pid > 0 || pid == PIPED_ENV_INVALID { pid } else { -1 }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_wait_readable_v1(pid: i64, stream: i64, timeout_ms: i64) -> i64 {
+    if pid <= 0 || (stream != PIPED_STREAM_STDOUT && stream != PIPED_STREAM_STDERR)
+        || !(0..=PIPED_WAIT_MAX_MS).contains(&timeout_ms) {
+        return PIPED_WAIT_INVALID;
+    }
+    match unsafe { simple_piped_owner_wait_readable_v1(pid, stream, timeout_ms) } {
+        code @ (1 | 0 | -2 | -3 | -5 | -22) => code,
+        _ => PIPED_WAIT_OS_ERROR,
+    }
+}

@@ -28,6 +28,17 @@ use compiler.hir.hir_lowering._Expressions.call_arity.*
 fn _hir_callable_named_var_payload(symbol: SymbolId, name: text) -> HirExprKind:
     HirExprKind.NamedVar(symbol, name)
 
+# True when a call argument list carries a `capabilities:`-named argument.
+# Private predicate for the unsafe-header misuse guard in lower_hir_expr's
+# Call arm; the spelling is conclusive there because `unsafe`/`danger` name
+# no callable builtin.
+fn call_args_have_capabilities_name(args: [CallArg]) -> bool:
+    for raw_arg in args:
+        val arg_t: CallArg = raw_arg
+        if arg_t.has_name and arg_t.name == "capabilities":
+            return true
+    false
+
 impl HirLowering:
     # Preprocessor cfg-select marker chain -> target-neutral CfgSelect: every
     # arm is kept with its condition text; MIR picks the arm for its target.
@@ -867,6 +878,37 @@ impl HirLowering:
                                     type_: cast_target,
                                     span: e.span
                                 )
+                        if callee_ident_t == "unsafe" or callee_ident_t == "danger":
+                            # Misuse guard (bug unsafe_capabilities_block_
+                            # unsupported_in_expression_position_2026-08-30):
+                            # an unsafe-block header written in value position
+                            # WITHOUT its trailing `: block` cannot be
+                            # rejected by the parser alone - a function or
+                            # variable genuinely named `unsafe` must keep
+                            # working as an ordinary call - so the shape used
+                            # to decay into a call to an undeclared callee and
+                            # fail, when it failed at all, as a bare
+                            # "unresolved name" at HIR (warning-only on lenient
+                            # lanes, an LLVM codegen failure on strict ones).
+                            # A `capabilities:`-named argument on a callee
+                            # that no surface declares is conclusive: fail
+                            # fast here and name the block form.
+                            if call_args_have_capabilities_name(call_args_t):
+                                var unsafe_callee_is_declared = false
+                                if val candidate = self.symbols.lookup(callee_ident_t):
+                                    if candidate.is_valid() and candidate.id < self.symbols.next_symbol_id:
+                                        unsafe_callee_is_declared = true
+                                if not unsafe_callee_is_declared:
+                                    if self.try_register_bootstrap_global_symbol(callee_ident_t, e.span):
+                                        unsafe_callee_is_declared = true
+                                if not unsafe_callee_is_declared:
+                                    self.error("`" + callee_ident_t + "(capabilities: ...)` is an unsafe block header without its `: block`; `unsafe`/`danger` are block keywords, not functions - write `" + callee_ident_t + "(capabilities: [...]): <expr>`", e.span)
+                                    return HirExpr(
+                                        kind: HirExprKind.Error,
+                                        has_type_: false,
+                                        type_: HirType(kind: HirTypeKind.Error, span: e.span),
+                                        span: e.span
+                                    )
                     case ExprKind.OptionalChain(oc_receiver, oc_method):
                         # `recv?.m(args)` parses as Call(OptionalChain(recv, m), args).
                         return self.lower_hir_expr(optional_chain_desugar(oc_receiver, oc_method, true, call_args_t, e.explicit_call_types, e.span, self.optional_chain_receiver_is_result(oc_receiver)))

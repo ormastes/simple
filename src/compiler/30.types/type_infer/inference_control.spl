@@ -848,6 +848,7 @@ impl HmInferContext:
         self.collect_traits_from_module(module)
         self.collect_impls_from_module(module)
         self._register_module_symbols(module)
+        self._bind_imported_function_symbols(module)
         self.module_env_vars = self.env_free_var_ids()
         self.module_env_vars_ready = true
 
@@ -913,3 +914,28 @@ impl HmInferContext:
                 case SymbolKind.Class: "class"
                 case SymbolKind.Enum: "enum"
                 case _: "type"
+
+    me _bind_imported_function_symbols(module: HirModule):
+        # Cross-module argument checking (bug
+        # function_argument_types_unchecked_2026-09-01): the caller's symbol
+        # table carries every imported function's declared Function type (set
+        # from the module surface), but infer_module only forward-declared
+        # signatures for module.functions — the module's OWN functions — so a
+        # callee reached through a `use` bound to `undefined: <name>` and no
+        # argument check ran. Bind imported function symbols by their
+        # module-local SymbolId (the key a callee Var/NamedVar reads first, per
+        # lookup_local_or_name) so Check-mode argument inference sees the
+        # declared parameter types. Local functions are bound later by the
+        # forward-declare loop under their own ids and by name, so a local
+        # declaration still shadows an import. Generic imports keep type_ = nil
+        # (generic_param_count > 0) and stay unbound, exactly as before.
+        for sym_key in module.symbols.symbols.keys():
+            val sym: HirSymbol = module.symbols.symbols[sym_key]
+            if sym.kind == SymbolKind.Function and not module.functions.has(sym.id) and sym.generic_param_count == 0:
+                match sym.type_:
+                    case Some(declared):
+                        match declared.kind:
+                            case HirTypeKind.Function(_, _, _):
+                                self.bind_mono(sym.id.id.to_text(), declared)
+                            case _: pass
+                    case _: pass

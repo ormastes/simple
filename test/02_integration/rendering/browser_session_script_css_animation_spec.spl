@@ -39,7 +39,7 @@ use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
 }
-use std.js.engine.interpreter.{
+use std.nogc_sync_mut.js.engine.interpreter.{
     JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS,
     JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
 }
@@ -134,6 +134,28 @@ fn _expect_browser_animation_draw_ir_frame(
     expect(trace.rect_pixel_count).to_equal(32 * 24)
     expect(trace.outside_color_count).to_equal(0)
     expect(trace.skipped_command_count).to_equal(0)
+
+# @inline
+fn _open_raf_promise_microtask_frame() -> BrowserSession:
+    var session = BrowserSession.new()
+    match session.open_html(
+        "https://example.test/raf-promise-paint",
+        "<html><head><title>Waiting</title><style>#stage { width: 32px; height: 24px; background-color: #ef4444; }</style></head><body><div id='stage'></div><script>var stage = document.getElementById('stage'); requestAnimationFrame(function(){ Promise.resolve().then(function(){ stage.style.backgroundColor = '#2563eb'; document.title = 'microtask'; }); });</script></body></html>"
+    ):
+        Ok(_): session
+        Err(reason): fail("Expected rAF Promise page to open: {reason}")
+
+fn _duplicate_offset_animation_html() -> text:
+    "<!DOCTYPE html><html><head><style>" +
+    "@keyframes DuplicateOffset {" +
+    "0% { background-color: #ef4444; }" +
+    "50% { background-color: #2563eb; }" +
+    "50% { background-color: #22c55e; }" +
+    "100% { background-color: #000000; }" +
+    "}" +
+    "#stage { width: 32px; height: 24px; " +
+    "animation: DuplicateOffset 1000ms linear forwards; }" +
+    "</style></head><body><div id='stage'></div></body></html>"
 
 describe "BrowserSession script CSS animation rendering":
 
@@ -291,7 +313,6 @@ describe "BrowserSession script CSS animation rendering":
             wrapped_state.runtime.interpreter.host_dom_mutation_generation = (
                 9223372036854775807
             )
-            wrapped_state.dom_mutation_generation = 9223372036854775807
             session.runtime_state = Some(wrapped_state)
 
         expect(session.advance_time(16)).to_equal(1)
@@ -360,7 +381,6 @@ describe "BrowserSession script CSS animation rendering":
             wrapped_state.runtime.interpreter.host_dom_bridge_generation = (
                 9223372036854775807
             )
-            wrapped_state.dom_bridge_generation = 9223372036854775807
             session.runtime_state = Some(wrapped_state)
 
         expect(session.eval_script(
@@ -690,17 +710,17 @@ describe "BrowserSession script CSS animation rendering":
             "document.title = 'runtime-ready'"
         ).is_ok()).to_equal(true)
         var exercised = false
-        var per_generation_budget_checked = false
+        var admitted_checked = false
+        var object_limit_checked = false
+        var byte_limit_checked = false
         if val Some(state) = session.runtime_state:
             exercised = true
-            # Saturate tracked DOM retention from prior frames to verify
-            # future mutations are budgeted by current plan only.
             var bounded_state = state
+            # list + fresh element/style pairs for implicit html, head, and div
+            val replacement_object_count: i64 = 7
             bounded_state.runtime.interpreter.host_dom_mutation_retained_objects = (
-                JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS
-            )
-            bounded_state.runtime.interpreter.host_dom_mutation_retained_bytes = (
-                JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
+                JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS -
+                replacement_object_count
             )
             session.runtime_state = Some(bounded_state)
             expect(session.eval_script(
@@ -709,21 +729,42 @@ describe "BrowserSession script CSS animation rendering":
             expect(session.current_title).to_equal("distinct")
             expect(session.current_body_html).to_contain("id=\"last\"")
             if val Some(after_first) = session.runtime_state:
+                admitted_checked = true
                 val allocated = after_first.runtime.interpreter.object_store.next_id
                 expect(session.eval_script(
-                    "document.body.innerHTML = '<div id=\"again\"></div>';" +
-                    "document.title = document.getElementById('again') !== null ? 'applied' : 'rejected'"
+                    "document.body.innerHTML = '<div id=\"rejected\"></div>'"
                 ).is_ok()).to_equal(true)
-                expect(session.current_title).to_equal("applied")
-                expect(session.current_body_html).to_contain("id=\"again\"")
-                expect(session.current_body_html.contains("id=\"last\"")).to_equal(false)
-                if val Some(after_second) = session.runtime_state:
-                    per_generation_budget_checked = true
+                if val Some(after_limit) = session.runtime_state:
+                    object_limit_checked = true
                     expect(
-                        after_second.runtime.interpreter.object_store.next_id
-                    ).to_be_greater_than(allocated)
+                        after_limit.runtime.interpreter.object_store.next_id
+                    ).to_equal(allocated)
+                expect(session.current_body_html).to_contain("id=\"last\"")
+                expect(session.current_body_html.contains(
+                    "id=\"rejected\""
+                )).to_equal(false)
+                if val Some(after_object_limit) = session.runtime_state:
+                    var byte_bounded_state = after_object_limit
+                    byte_bounded_state.runtime.interpreter.host_dom_mutation_retained_objects = 0
+                    byte_bounded_state.runtime.interpreter.host_dom_mutation_retained_bytes = (
+                        JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
+                    )
+                    session.runtime_state = Some(byte_bounded_state)
+                    expect(session.eval_script(
+                        "document.body.innerHTML = '<div id=\"byte-rejected\"></div>'"
+                    ).is_ok()).to_equal(true)
+                    if val Some(after_byte_limit) = session.runtime_state:
+                        byte_limit_checked = true
+                        expect(
+                            after_byte_limit.runtime.interpreter.object_store.next_id
+                        ).to_equal(allocated)
+                    expect(session.current_body_html.contains(
+                        "id=\"byte-rejected\""
+                    )).to_equal(false)
         expect(exercised).to_equal(true)
-        expect(per_generation_budget_checked).to_equal(true)
+        expect(admitted_checked).to_equal(true)
+        expect(object_limit_checked).to_equal(true)
+        expect(byte_limit_checked).to_equal(true)
 
     it "keeps the prior body when a synchronous mutation plan exceeds its element bound":
         # @req REQ-SSPEC-INTEGRATION

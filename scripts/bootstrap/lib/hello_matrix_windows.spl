@@ -1,0 +1,88 @@
+# Native Windows containment for the phase-3 Hello matrix twin.
+#
+# Twin of hello-sanity-matrix-windows.py plus the per-command bounded collector
+# that run-process-group-bounded-log-windows.py provided. Both use the existing
+# Simple Win32 owner (std.nogc_sync_mut.io.windows_process_owner[_abi]):
+#   * windows_install_memory_budget: assigns THIS process to a kill-on-close
+#     Job with an aggregate JOB_MEMORY limit, exactly the Python flags
+#     (0x2000 | 0x200) and failure points; the handle is retained until exit.
+#   * windows_bounded_command: one owned child per command in its own nested
+#     Job (wall-time bound, exact stdout/stderr files, tree collection proof).
+use std.nogc_sync_mut.io.windows_process_owner_abi.{CreateJobObjectW, SetInformationJobObject, AssignProcessToJobObject, CloseHandle, GetLastError, windows_abi_pointer_bytes, windows_abi_get_process_heap, windows_abi_heap_alloc, windows_abi_heap_free, windows_abi_job_extended_limit_size, windows_abi_job_limit_flags_offset, windows_abi_job_memory_limit_offset, windows_abi_write_ptr}
+use std.nogc_sync_mut.io.volatile_ops.{volatile_write_u32}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessInputV1, WindowsProcessLeaseV1, WindowsProcessPollV1, windows_process_start_v1, windows_process_poll_v1, windows_process_cancel_v1, windows_process_collect_v1, windows_process_file_digest_v1}
+
+# GetCurrentProcess() pseudo-handle.
+pub val CURRENT_PROCESS_PSEUDO_HANDLE: i64 = -1
+
+pub fn _win_error(code: u32) -> text:
+    "[WinError {code}]"
+
+# install_memory_budget(max_bytes). Ok(job handle) is owned until process exit:
+# closing it while still assigned would kill this owner before its final
+# evidence is flushed (same contract as the Python helper).
+pub fn windows_install_memory_budget(max_bytes: i64) -> Result<i64, text>:
+    if windows_abi_pointer_bytes() != 8:
+        return Err("matrix memory containment requires a native 64-bit stage binary")
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val job = CreateJobObjectW(0, 0)
+        if job == 0:
+            return Err(_win_error(GetLastError()))
+        val size = windows_abi_job_extended_limit_size()
+        val heap = windows_abi_get_process_heap()
+        val limits = windows_abi_heap_alloc(heap, size)
+        if limits == 0:
+            CloseHandle(job)
+            return Err("matrix memory containment: limit buffer allocation failed")
+        # kill-on-close; aggregate job memory.
+        volatile_write_u32(limits + windows_abi_job_limit_flags_offset(), 8704u32)
+        windows_abi_write_ptr(limits + windows_abi_job_memory_limit_offset(), max_bytes)
+        if SetInformationJobObject(job, 9, limits, size as u32) == 0:
+            val error = GetLastError()
+            windows_abi_heap_free(heap, limits)
+            CloseHandle(job)
+            return Err(_win_error(error))
+        windows_abi_heap_free(heap, limits)
+        if AssignProcessToJobObject(job, CURRENT_PROCESS_PSEUDO_HANDLE) == 0:
+            val error = GetLastError()
+            CloseHandle(job)
+            return Err("Windows parent does not permit nested Job containment: " + _win_error(error))
+        Ok(job)
+
+# Terminal facts of one bounded Windows command (written to <name>.owner.env).
+pub struct WindowsCommandOutcome:
+    exit_code: i64
+    reason: text
+    timed_out: bool
+    cancelled: bool
+    tree_empty: bool
+    leader_reaped: bool
+    pid: i64
+
+pub fn windows_outcome_env(o: WindowsCommandOutcome) -> text:
+    "format=hello-matrix-windows-owner-v1\nexit_code={o.exit_code}\nreason=" + o.reason + "\ntimed_out=" + _b01(o.timed_out) + "\ncancelled=" + _b01(o.cancelled) + "\ntree_empty=" + _b01(o.tree_empty) + "\nleader_reaped=" + _b01(o.leader_reaped) + "\npid={o.pid}\n"
+
+pub fn _b01(value: bool) -> text:
+    if value: "1" else: "0"
+
+# Start one owned command. program must be an absolute path; its digest is
+# pinned by the owner for the life of the child.
+pub fn windows_start_command(program: text, args: [text], environment: [text], directory: text, stdout_path: text, stderr_path: text, timeout_ms: i64) -> Result<WindowsProcessLeaseV1, text>:
+    val digest = windows_process_file_digest_v1(program)
+    if digest == "":
+        return Err("cannot pin Windows command executable: " + program)
+    val inputs: [WindowsProcessInputV1] = []
+    windows_process_start_v1(WindowsProcessRequestV1(program: program, producer_digest: digest, args: args, environment: environment, directory: directory, inputs: inputs, stdout_path: stdout_path, stderr_path: stderr_path, timeout_ms: timeout_ms))
+
+pub fn windows_poll_command(lease: WindowsProcessLeaseV1) -> Result<WindowsProcessPollV1, text>:
+    windows_process_poll_v1(lease)
+
+pub fn windows_cancel_command(lease: WindowsProcessLeaseV1) -> Result<bool, text>:
+    windows_process_cancel_v1(lease)
+
+# Collect: proves the leader is reaped and the Job tree is empty.
+pub fn windows_collect_command(lease: WindowsProcessLeaseV1, reason: text) -> Result<WindowsCommandOutcome, text>:
+    match windows_process_collect_v1(lease):
+        case Ok(p):
+            Ok(WindowsCommandOutcome(exit_code: p.exit_code, reason: reason, timed_out: p.timed_out, cancelled: p.cancelled, tree_empty: p.tree_empty, leader_reaped: p.leader_reaped, pid: p.pid))
+        case Err(e): Err(e)

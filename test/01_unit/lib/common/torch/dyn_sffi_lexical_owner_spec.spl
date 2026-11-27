@@ -1,0 +1,200 @@
+"""
+## Purpose and audience
+Regression oracle for the dynamic Torch facade lexical raw-SFFI ownership gap
+(doc/08_tracking/bug/sffi_torch_dynamic_facade_lexical_owner_gap_2026-08-27).
+It proves that src/lib/common/torch/dyn_sffi_ops.spl declares no raw externs
+locally (the provider std.nogc_sync_mut.torch.sffi is the single owner), that
+every raw provider call sits inside a private always-inline `_raw` lexical
+owner with the typed wrappers holding zero unsafe blocks, that the three
+provider externs the facade needs are imported from the provider, and that
+the unowned legacy fixed-dimension constructor ABI fails closed with typed
+errors instead of issuing an unbacked FFI call.
+Audience: the engineer touching the dynamic Torch facade, the provider raw
+declarations, or the audit gate, who needs one spec that turns RED when a
+raw call escapes its lexical owner or a raw extern is re-declared in the
+facade.
+## Operator workflow
+SIMPLE_LIB=src build/p3cache/fresh-seed/simple.exe test test/01_unit/lib/common/torch/dyn_sffi_lexical_owner_spec.spl --mode=interpreter --no-cache --no-session-daemon
+A red ownership scenario names the escape (local extern re-declaration,
+unsafe block outside an owner, or a raw call outside a `_raw` owner); a red
+behavioral scenario names the lost typed error lane.
+## Compatibility and limitations
+Real libtorch execution is not exercised: the interpreter host has no
+libtorch, so availability-dependent scenarios branch on dyn_torch_available()
+and the source-contract scenarios read the product sources and assert tokens
+through named locals, mirroring dyn_sffi_ops_readiness_spec.spl. Handles
+passed to every runtime call here are the documented failure sentinels (zero
+or negative), never live tensors.
+## Verification guidance and troubleshooting
+Captures record the ownership tokens and typed statuses per scenario. A red
+"single provider owner" scenario means a raw extern came back into the
+facade; a red "lexical owners" scenario means a wrapper gained a direct
+unsafe block or lost its owner routing; a red "legacy family" scenario means
+the unbacked fixed-dimension ABI became callable again.
+"""
+# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
+# doc/03_plan/sspec_modernization_plan.md ;
+# doc/04_architecture/sspec_documentization_maintenance.md ;
+# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+# @manual_section: dynamic-torch-sffi-lexical-owners
+# @req REQ-SSPEC-LIB
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file}
+use std.common.torch.dyn_sffi_ops.{
+    dyn_torch_available,
+    dyn_torch_tensor_linalg_solve_result,
+    dyn_torch_tensor_zeros_2d_result,
+    dyn_torch_tensor_ones_3d_result,
+    dyn_torch_tensor_full_4d_result,
+    dyn_torch_tensor_eye_result,
+    dyn_torch_tensor_arange_result,
+    dyn_torch_tensor_linspace_result,
+    dyn_torch_tensor_sum_result,
+    dyn_torch_tensor_sub_scalar_result,
+    dyn_torch_tensor_relu_result
+}
+
+fn facade_source() -> text:
+    read_file("src/lib/common/torch/dyn_sffi_ops.spl") ?? ""
+
+fn provider_source() -> text:
+    read_file("src/lib/nogc_sync_mut/torch/sffi.spl") ?? ""
+
+fn count_occurrences(haystack: text, needle: text) -> i64:
+    val needle_len = needle.len()
+    if needle_len == 0:
+        return 0
+    val idx = haystack.find(needle)
+    if idx < 0:
+        return 0
+    1 + count_occurrences(haystack.slice(idx + needle_len, haystack.len()), needle)
+
+describe "dynamic torch facade lexical raw owners":
+
+    it "keeps every raw declaration owned by the single provider module":
+        # @req REQ-SSPEC-LIB
+        step("Read the facade and provider sources and compare declaration ownership")
+        val facade_text = facade_source()
+        val provider_text = provider_source()
+        # @capture(statistics): facade free of raw extern declarations, provider owning the three added ABI families
+        step("Verify the facade declares no externs and the provider owns the linalg solve and scalar ABI")
+        val facade_declares_externs = facade_text.contains("extern fn")
+        expect(facade_declares_externs).to_equal(false)
+        expect(provider_text).to_contain("extern fn rt_torch_torchtensor_linalg_solve(a: i64, b: i64) -> i64")
+        expect(provider_text).to_contain("extern fn rt_torch_torchtensor_sub_scalar(handle: i64, scalar: f64) -> i64")
+        expect(provider_text).to_contain("extern fn rt_torch_torchtensor_div_scalar(handle: i64, scalar: f64) -> i64")
+        step("Verify the facade imports the provider externs instead of re-declaring them")
+        expect(facade_text).to_contain("rt_torch_torchtensor_linalg_solve")
+        expect(facade_text).to_contain("rt_torch_torchtensor_sub_scalar")
+        expect(facade_text).to_contain("rt_torch_torchtensor_div_scalar")
+
+    it "routes eye, arange, and linspace through the provider-owned backed names":
+        # @req REQ-SSPEC-LIB
+        step("Check the constructor owners call the provider-owned tensor_* names")
+        val facade_text = facade_source()
+        # @capture(statistics): backed constructor names in owners and absence of the unbacked torchtensor_ name-variants
+        step("Verify no unbacked torchtensor_ name-variant remains for these constructors")
+        expect(facade_text).to_contain("rt_torch_tensor_eye(n)")
+        expect(facade_text).to_contain("rt_torch_tensor_arange(start, end, step)")
+        expect(facade_text).to_contain("rt_torch_tensor_linspace(start, end, steps)")
+        val unbacked_eye = facade_text.contains("rt_torch_torchtensor_eye")
+        expect(unbacked_eye).to_equal(false)
+        val unbacked_arange = facade_text.contains("rt_torch_torchtensor_arange")
+        expect(unbacked_arange).to_equal(false)
+        val unbacked_linspace = facade_text.contains("rt_torch_torchtensor_linspace")
+        expect(unbacked_linspace).to_equal(false)
+
+    it "places every raw call inside a private always-inline lexical owner":
+        # @req REQ-SSPEC-LIB
+        step("Count unsafe blocks, always-inline markers, and representative owner signatures")
+        val facade_text = facade_source()
+        # @capture(statistics): one unsafe block per always-inline owner and zero unsafe blocks in typed wrappers
+        step("Verify each unsafe block belongs to an always-inline owner and owners cover every ABI family")
+        val unsafe_sites = count_occurrences(facade_text, "unsafe(capabilities: [ffi]):")
+        val inline_markers = count_occurrences(facade_text, "@always_inline")
+        expect(unsafe_sites).to_equal(inline_markers)
+        expect(unsafe_sites).to_be_greater_than(30)
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_sum_dim_raw(handle: i64, dim: i64, keepdim: bool) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_argmax_raw(handle: i64, dim: i64, keepdim: bool) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_add_scalar_raw(handle: i64, scalar: f64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_sub_scalar_raw(handle: i64, scalar: f64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_div_scalar_raw(handle: i64, scalar: f64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_pow_raw(handle: i64, exp: f64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_leaky_relu_raw(handle: i64, negative_slope: f64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_relu_raw(handle: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_gelu_raw(handle: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_abs_raw(handle: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_contiguous_raw(handle: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_softmax_raw(handle: i64, dim: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_unsqueeze_raw(handle: i64, dim: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_slice_raw(handle: i64, dim: i64, start: i64, end: i64, step: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_eye_raw(n: i64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_arange_raw(start: f64, end: f64, step: f64) -> i64:")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_linspace_raw(start: f64, end: f64, steps: i64) -> i64:")
+
+    it "fails closed on the unowned legacy fixed-dimension constructor ABI":
+        # @req REQ-SSPEC-LIB
+        step("Verify the facade neither declares nor calls the colliding legacy constructor ABI")
+        val facade_text = facade_source()
+        # @capture(statistics): legacy ABI tokens absent from the facade and the fail-closed marker present
+        step("Check the legacy family has no call sites and reports a typed unbacked error")
+        val legacy_zeros = facade_text.contains("rt_torch_tensor_zeros(")
+        expect(legacy_zeros).to_equal(false)
+        val legacy_ones = facade_text.contains("rt_torch_tensor_ones(")
+        expect(legacy_ones).to_equal(false)
+        val legacy_rand = facade_text.contains("rt_torch_tensor_rand(")
+        expect(legacy_rand).to_equal(false)
+        val legacy_randn = facade_text.contains("rt_torch_tensor_randn(")
+        expect(legacy_randn).to_equal(false)
+        val legacy_full = facade_text.contains("rt_torch_tensor_full(")
+        expect(legacy_full).to_equal(false)
+        val legacy_empty = facade_text.contains("rt_torch_tensor_empty(")
+        expect(legacy_empty).to_equal(false)
+        expect(facade_text).to_contain("unbacked_provider_abi")
+
+    it "reports typed errors for the legacy family on every availability lane":
+        # @req REQ-SSPEC-LIB
+        step("Call legacy constructors with valid and invalid dimensions and read the typed errors")
+        val zeros = dyn_torch_tensor_zeros_2d_result(2, 3)
+        # @capture(statistics): legacy constructor outcomes on the unavailable and unbacked lanes
+        step("Verify valid dimensions never reach an FFI call and invalid dimensions stay typed")
+        expect(zeros.is_err()).to_equal(true)
+        if dyn_torch_available():
+            expect(zeros.unwrap_err()).to_equal("unbacked_provider_abi")
+            expect(dyn_torch_tensor_ones_3d_result(1, -1, 1).unwrap_err()).to_equal("invalid_dimension")
+        else:
+            expect(zeros.unwrap_err()).to_equal("libtorch_unavailable")
+            expect(dyn_torch_tensor_ones_3d_result(1, -1, 1).unwrap_err()).to_equal("libtorch_unavailable")
+        expect(dyn_torch_tensor_full_4d_result(1, 1, 1, 1, 2.0).is_err()).to_equal(true)
+
+    it "keeps lane-consistent typed outcomes for owned families":
+        # @req REQ-SSPEC-LIB
+        step("Call owned wrappers on the zero handle and read the typed errors")
+        # @capture(statistics): unavailable and invalid-handle lanes for owned families
+        step("Verify unavailable and invalid-handle lanes stay explicit through the owners")
+        if dyn_torch_available():
+            expect(dyn_torch_tensor_relu_result(0).unwrap_err()).to_equal("invalid_handle")
+            expect(dyn_torch_tensor_sub_scalar_result(0, 1.0).unwrap_err()).to_equal("invalid_handle")
+            expect(dyn_torch_tensor_sum_result(0).unwrap_err()).to_equal("invalid_handle")
+            expect(dyn_torch_tensor_eye_result(-1).unwrap_err()).to_equal("invalid_dimension")
+        else:
+            expect(dyn_torch_tensor_relu_result(0).unwrap_err()).to_equal("libtorch_unavailable")
+            expect(dyn_torch_tensor_sub_scalar_result(0, 1.0).unwrap_err()).to_equal("libtorch_unavailable")
+            expect(dyn_torch_tensor_sum_result(0).unwrap_err()).to_equal("libtorch_unavailable")
+            expect(dyn_torch_tensor_eye_result(-1).unwrap_err()).to_equal("libtorch_unavailable")
+
+    it "preserves the explicit linalg solve status lanes":
+        # @req REQ-SSPEC-LIB
+        step("Solve with zero handles and read the typed status")
+        val result = dyn_torch_tensor_linalg_solve_result(0, 0)
+        # @capture(statistics): solve status lanes through the provider-owned extern
+        step("Verify the solve wrapper still names unavailable or invalid explicitly")
+        expect(result.handle).to_equal(0)  # oracle: 0 — null-handle sentinel reserved for failure
+        if dyn_torch_available():
+            expect(result.status).to_equal("invalid")
+            expect(result.reason).to_equal("invalid_handle")
+        else:
+            expect(result.status).to_equal("unavailable")
+            expect(result.reason).to_equal("libtorch_unavailable")

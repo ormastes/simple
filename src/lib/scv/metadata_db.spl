@@ -113,6 +113,13 @@ class ScvMetaDb:
             return false
         if not self.db.get_table(table).?:
             return false
+        # Admission boundary (bug scv_distributed_textual_db_missing_production_
+        # boundaries_2026-09-13): the first column is a permanent primary key.
+        # SdnTable.add_row always appends and re-points the index, so a key that
+        # is already settled — even tombstoned — would be silently clobbered.
+        # Fail closed before the WAL append: a refused write leaves no trace.
+        if self.row(table, values[0]).?:
+            return false
         var row = SdnRow.empty()
         var i = 0
         while i < cols.len():
@@ -148,6 +155,7 @@ class ScvMetaDb:
             return false
         var rows: [SdnRow] = []
         var entries: [WalEntry] = []
+        var admitted: [text] = []
         var remaining = 1048576
         for item in batch:
             val columns = scv_metadb_columns(item.table)
@@ -165,6 +173,15 @@ class ScvMetaDb:
                 index = index + 1
             if item.values[0] == "" or item.values[0].contains("|"):
                 return false
+            # Same admission boundary as insert: refuse keys already settled in
+            # the table and duplicates within this batch, before any WAL append.
+            # values[0] cannot contain "|" here, so the composite is unambiguous.
+            if self.row(item.table, item.values[0]).?:
+                return false
+            val seen_key = "{item.table}|{item.values[0]}"
+            if admitted.contains(seen_key):
+                return false
+            admitted.push(seen_key)
             rows.push(row)
             entries.push(WalEntry(
                 sequence: 0, entry_type: WalEntryType.Insert,
@@ -186,6 +203,10 @@ class ScvMetaDb:
         true
 
     # Next synthetic key for a table, "<prefix>_<n>" over current row count.
+    # Never allocates a settled alias: row count alone is unsafe for permanent
+    # shared allocation (a non-sequential key may already occupy the candidate),
+    # so the scan advances past any settled key. Bug
+    # scv_distributed_textual_db_missing_production_boundaries_2026-09-13.
     fn next_key(table: text, prefix: text) -> text:
         val t = self.db.get_table(table)
         var n = 0
@@ -194,7 +215,11 @@ class ScvMetaDb:
                 n = tv.rows.len()
             nil:
                 n = 0
-        "{prefix}_{n + 1}"
+        var candidate = "{prefix}_{n + 1}"
+        while self.row(table, candidate).?:
+            n = n + 1
+            candidate = "{prefix}_{n + 1}"
+        candidate
 
     # Atomic CRC-checked snapshot + WAL checkpoint.
     me save() -> bool:

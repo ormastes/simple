@@ -1,0 +1,39 @@
+# Regression for compiler_interpreter_integration_real_gaps_found_2026-09-06
+# gap 4 (export visibility, REQ-COMPINT-MOD-002): a `_`-prefixed top-level fn
+# is module-internal by naming convention and must not be importable through
+# `use mod.{...}` even from a same-directory sibling. Plain (non-underscore)
+# private names keep the documented same-directory sibling exemption, pinned
+# here as a positive control. Runs the real seed binary as a subprocess.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{write_file, file_exists, env_get}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+describe "underscore-prefixed private fn is not importable even same-directory":
+    it "rejects a same-directory use of a never-exported `_`-prefixed fn with exit 1":
+        step("Write helper and main in one directory; main imports the helper's `_secret_add`")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap4_vis"
+        expect(dir_create_all(dir)).to_equal(true)
+        val _h = write_file(dir + "/sec_mod.spl", "fn _secret_add(a: i64, b: i64) -> i64:\n    a + b\n")
+        val _m = write_file(dir + "/main_vis.spl", "use sec_mod." + "{" + "_secret_add" + "}" + "\nprint(_secret_add(1, 2))\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["run", dir + "/main_vis.spl"], 300000)
+        expect(rc).to_equal(1)
+        expect(err.contains("_secret_add")).to_equal(true)
+        expect(err.contains("not visible")).to_equal(true)
+
+    it "keeps the same-directory sibling exemption for plain private names":
+        step("Same shape with a plain (non-underscore) private helper fn must still run")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap4_vis"
+        expect(dir_create_all(dir)).to_equal(true)
+        val _h = write_file(dir + "/plain_mod.spl", "fn plain_add(a: i64, b: i64) -> i64:\n    a + b\n")
+        val _m = write_file(dir + "/main_plain.spl", "use plain_mod." + "{" + "plain_add" + "}" + "\nprint(plain_add(1, 2))\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["run", dir + "/main_plain.spl"], 300000)
+        expect(rc).to_equal(0)
+        expect(out.contains("3")).to_equal(true)

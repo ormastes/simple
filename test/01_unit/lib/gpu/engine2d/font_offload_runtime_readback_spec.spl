@@ -1,0 +1,126 @@
+use std.spec
+use std.io_runtime.{file_read}
+use std.gpu.engine2d.backend_lane.{
+    FontRuntimeProvenance, engine2d_font_runtime_provenance_valid
+}
+use std.gpu.engine2d.vector_font_offload.{
+    vector_font_runtime_provenance_valid,
+    vector_font_glyph_pixels_readback_verify,
+    vector_font_glyph_pixels_checksum
+}
+use std.gpu.engine2d.bitmap_font_offload.{
+    bitmap_font_runtime_provenance_valid,
+    bitmap_glyph_raster_mask_readback_verify,
+    bitmap_glyph_raster_expected_pixels
+}
+use std.gpu.engine2d.backend_cuda.{CudaBackend}
+use std.nogc_sync_mut.text_layout.font_rasterizer.{VectorFontAcceleratorStats}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+fn _valid_provenance() -> FontRuntimeProvenance:
+    FontRuntimeProvenance(
+        runtime_status: "pass",
+        selected_backend: "cuda",
+        font_backend: "cuda",
+        driver: "cuda-driver-12080",
+        device_handle: 101,
+        module_or_queue_handle: 102,
+        kernel_or_pipeline_handle: 103,
+        fence_handle: 104,
+        readback_checksum: 105,
+        parity_status: "pass"
+    )
+
+describe "Production GUI font offload runtime readback and provenance":
+    it "accepts non-CPU provenance only when driver, opaque handles, fence, and parity pass":
+        val ok_prov = _valid_provenance()
+        expect(engine2d_font_runtime_provenance_valid(ok_prov)).to_equal(true)
+        expect(vector_font_runtime_provenance_valid(ok_prov)).to_equal(true)
+        expect(bitmap_font_runtime_provenance_valid(ok_prov)).to_equal(true)
+
+        var cpu_prov = _valid_provenance()
+        cpu_prov.selected_backend = "cpu"
+        cpu_prov.font_backend = "cpu"
+        expect(engine2d_font_runtime_provenance_valid(cpu_prov)).to_equal(false)
+
+        var zero_fence = _valid_provenance()
+        zero_fence.fence_handle = 0
+        expect(vector_font_runtime_provenance_valid(zero_fence)).to_equal(false)
+
+        var parity_fail = _valid_provenance()
+        parity_fail.parity_status = "fail"
+        expect(bitmap_font_runtime_provenance_valid(parity_fail)).to_equal(false)
+
+    it "verifies element-wise vector glyph pixel readback against GPU stats":
+        val expected = [0u8, 64u8, 255u8, 128u8]
+        val stats_ok = VectorFontAcceleratorStats(
+            attempts: 1,
+            cuda_hits: 1,
+            opencl_hits: 0,
+            cpu_fallback_hits: 0,
+            gpu_returned_glyphs: 1,
+            gpu_returned_glyph_pixels: 4,
+            unavailable_reason: "cuda-vector-font-glyph-pixels-returned"
+        )
+        val matched = vector_font_glyph_pixels_readback_verify(
+            "cuda", 4, 1, 4096, 102, 103, true, true, true, stats_ok, expected, expected
+        )
+        expect(matched.production_ready).to_equal(true)
+        expect(matched.gpu_glyph_readback_matched).to_equal(true)
+        expect(matched.execution.expected_checksum).to_equal(vector_font_glyph_pixels_checksum(expected))
+        expect(matched.execution.actual_checksum).to_equal(matched.execution.expected_checksum)
+
+        val mismatched = vector_font_glyph_pixels_readback_verify(
+            "cuda", 4, 1, 4096, 102, 103, true, true, true, stats_ok, expected, [0u8, 64u8, 254u8, 128u8]
+        )
+        expect(mismatched.production_ready).to_equal(false)
+        expect(mismatched.execution.actual_checksum).to_equal(0)
+
+    it "verifies element-wise bitmap glyph mask readback pixels":
+        val mask = [1u32, 0u32, 3u32, 0u32]
+        val color: u32 = 0xff224466u32
+        val expected_pixels = bitmap_glyph_raster_expected_pixels(mask, 2, 2, color)
+        val matched = bitmap_glyph_raster_mask_readback_verify(
+            "cuda", mask, 2, 2, color, 4096, 102, 103, true, true, true, expected_pixels
+        )
+        expect(matched.production_ready).to_equal(true)
+        expect(matched.gpu_glyph_rasterized).to_equal(true)
+
+        val tampered = [0xff224466u32, 0u32, 0xff224465u32, 0u32]
+        val bad = bitmap_glyph_raster_mask_readback_verify(
+            "cuda", mask, 2, 2, color, 4096, 102, 103, true, true, true, tampered
+        )
+        expect(bad.production_ready).to_equal(false)
+        expect(bad.execution.actual_checksum).to_equal(0)
+
+    it "fails closed on uninitialized CudaBackend draw_font_batch_with_readback":
+        var backend = CudaBackend.create()
+        val batch = FontRenderBatch(
+            program_version: 1,
+            font_identity: "test-owner",
+            face_generation: 1,
+            valid: true,
+            atlas_width: 4,
+            atlas_height: 1,
+            atlas_pixels: [0x00000000u32, 0x80ffffffu32, 0xffffffffu32, 0xffffffffu32],
+            quads: [FontRenderQuad(
+                codepoint: 65,
+                byte_offset: 0,
+                dst_x: 0,
+                dst_y: 0,
+                width: 4,
+                height: 1,
+                atlas_x: 0,
+                atlas_y: 0,
+                color: 0x80402010u32
+            )],
+            atlas_generation: 1,
+            dirty_rects: []
+        )
+        val rb = backend.draw_font_batch_with_readback(0, 0, batch)
+        expect(rb.source).to_equal("font_batch_submit_incomplete")
+        expect(rb.pixels.len()).to_equal(0)
+
+        val offload_gate = file_read("scripts/check/check-production-gui-font-offload-evidence.shs")
+        expect(offload_gate.contains("runtime-font-provenance-missing")).to_equal(true)
+        expect(offload_gate.contains("runtime-evidence-generator-failed")).to_equal(true)

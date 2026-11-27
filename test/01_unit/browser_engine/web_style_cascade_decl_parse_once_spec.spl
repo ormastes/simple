@@ -1,0 +1,173 @@
+# Purpose and audience: executable regression spec for
+# doc/08_tracking/bug/web_style_cascade_apply_decls_reparses_per_node_2026-09-12.md.
+# Pins PARSE-ONCE semantics of the style cascade: a declaration block that many
+# nodes share is parsed into a declaration table ONCE per distinct text, even
+# across nodes whose INHERITED base differs (the case the bug record called out
+# as unsafe to memoise). Values only, never durations: a re-introduced per-node
+# re-parse shows up as miss counts growing with the node count, which is a VALUE
+# change this spec catches with absolute counters.
+# @req REQ-SSPEC-LIB
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl 60%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 40%
+# @tag: unit, browser_engine, style, perf
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    parse_html, extract_css_vw, build_child_index, compute_styles,
+    renderer_default_style,
+    decl_table_memo_reset, decl_table_memo_hits, decl_table_memo_misses}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    web_style_cascade_memo_reset, web_style_cascade_memo_hits,
+    web_style_cascade_memo_misses}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    web_argb}
+
+fn _items(n: i32) -> text:
+    var lis: [text] = []
+    var i = 0
+    while i < n:
+        lis.push("<li class=\"item\">it</li>")
+        i = i + 1
+    lis.join("")
+
+fn _one_group_fixture(n: i32) -> text:
+    "<!doctype html><html><head><style>" +
+        ".item {{ width: 5em; padding: 4px; color: #334455; }}" +
+        "</style></head><body>" +
+        "<ul style=\"font-size: 16px\">" + _items(n) + "</ul></body></html>"
+
+fn _two_group_fixture(per_group: i32) -> text:
+    "<!doctype html><html><head><style>" +
+        ".item {{ width: 5em; padding: 4px; color: #334455; }}" +
+        "</style></head><body>" +
+        "<ul style=\"font-size: 13px\">" + _items(per_group) + "</ul>" +
+        "<ul style=\"font-size: 20px\">" + _items(per_group) + "</ul></body></html>"
+
+fn _count_class(nodes, cls: text) -> i64:
+    var c = 0
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].class_attr == cls:
+            c = c + 1
+        i = i + 1
+    c
+
+fn _first_item_style(styles, nodes):
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].class_attr == "item":
+            return styles[i]
+        i = i + 1
+    renderer_default_style()
+
+describe "web style cascade declaration parse-once":
+    it "AC-1: one shared declaration block is parsed once for 60 same-base nodes", \:
+        step("Style 60 class-sharing items under one parent and count declaration-table parses")
+        val html = _one_group_fixture(60)
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 800, false)
+        val cidx = build_child_index(nodes)
+        decl_table_memo_reset()
+        val styles = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        expect(_count_class(nodes, "item")).to_equal(60)
+        # Exactly two declaration texts reach the table builder for this whole
+        # document: the merged .item rule block and the ul's inline
+        # "font-size: 16px". 60 nodes sharing the block must not produce 60
+        # parses: misses == 2 is the parse-once oracle (hits == 0 because the
+        # whole-style cascade memo absorbs the repetition before the apply).
+        expect(decl_table_memo_misses()).to_equal(2)
+        expect(decl_table_memo_hits()).to_equal(0)
+        expect(web_style_cascade_memo_hits()).to_equal(59)
+        # Behavior parity: every item computes 5em of 16px, 4px padding, #334455.
+        val st = _first_item_style(styles, nodes)
+        expect(st.width_px).to_equal(80)
+        expect(st.pad_l).to_equal(4)
+        expect(st.fg).to_equal(web_argb(51, 68, 85))
+
+    it "AC-2: doubling the nodes leaves the parse count unchanged", \:
+        step("Re-run AC-1's fixture with 120 items; parse count must not grow")
+        val html = _one_group_fixture(120)
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 800, false)
+        val cidx = build_child_index(nodes)
+        decl_table_memo_reset()
+        val styles = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        expect(_count_class(nodes, "item")).to_equal(120)
+        # The per-node re-parse this bug filed would report 120+ misses here.
+        expect(decl_table_memo_misses()).to_equal(2)
+        expect(decl_table_memo_hits()).to_equal(0)
+        val st = _first_item_style(styles, nodes)
+        expect(st.width_px).to_equal(80)
+
+    it "AC-3: the same block under two DIFFERENT inherited bases parses once and serves the second base from cache", \:
+        step("Two groups of 30 items whose parents set different font sizes")
+        val html = _two_group_fixture(30)
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 800, false)
+        val cidx = build_child_index(nodes)
+        decl_table_memo_reset()
+        val styles = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        expect(_count_class(nodes, "item")).to_equal(60)
+        # Three distinct declaration texts: the shared .item block plus each
+        # group's distinct ul inline style. The .item block is parsed on the
+        # first group's first miss; the second group's first apply — a
+        # DIFFERENT inherited base, so the whole-style cascade memo cannot
+        # answer it — must be served by the declaration-table cache: exactly
+        # one hit. A memo keyed on declaration text alone (without the safety
+        # analysis the bug record required) still cannot mis-style here: the
+        # cache stores the PARSED TABLE, not the computed style, and em/%
+        # resolution happens per apply against the live em_base.
+        expect(decl_table_memo_misses()).to_equal(3)
+        expect(decl_table_memo_hits()).to_equal(1)
+        # The whole-style cascade memo sees one new inherited base per group.
+        expect(web_style_cascade_memo_misses()).to_equal(2)
+        # Behavior parity WITH per-base em resolution: 5em of 13px vs of 20px,
+        # everything else identical across all 60 items.
+        var first_w = -1
+        var group2_w = -1
+        var mismatches = 0
+        var seen = 0
+        var i = 0
+        while i < nodes.len():
+            if nodes[i].class_attr == "item":
+                if seen == 0:
+                    first_w = styles[i].width_px
+                if styles[i].width_px == 100:
+                    group2_w = 100
+                if styles[i].pad_l != 4 or styles[i].fg != web_argb(51, 68, 85):
+                    mismatches = mismatches + 1
+                seen = seen + 1
+            i = i + 1
+        expect(first_w).to_equal(65)
+        expect(group2_w).to_equal(100)
+        expect(mismatches).to_equal(0)
+
+    it "AC-4: repeated cascade passes with full memo resets recompute identical styles", \:
+        step("Three passes over the two-group fixture; all item styles field-equal")
+        val html = _two_group_fixture(20)
+        val nodes = parse_html(html)
+        val rules = extract_css_vw(html, 800, false)
+        val cidx = build_child_index(nodes)
+        decl_table_memo_reset()
+        web_style_cascade_memo_reset()
+        val s1 = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        decl_table_memo_reset()
+        web_style_cascade_memo_reset()
+        val s2 = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        decl_table_memo_reset()
+        web_style_cascade_memo_reset()
+        val s3 = compute_styles(nodes, rules, cidx, false, false, 800, 600)
+        var mismatches = 0
+        var i = 0
+        while i < nodes.len():
+            if nodes[i].class_attr == "item":
+                if s1[i].width_px != s2[i].width_px or s2[i].width_px != s3[i].width_px:
+                    mismatches = mismatches + 1
+                if s1[i].fg != s2[i].fg or s2[i].fg != s3[i].fg:
+                    mismatches = mismatches + 1
+                if s1[i].pad_l != s2[i].pad_l or s2[i].pad_l != s3[i].pad_l:
+                    mismatches = mismatches + 1
+                if s1[i].bg != s2[i].bg or s2[i].bg != s3[i].bg:
+                    mismatches = mismatches + 1
+            i = i + 1
+        expect(mismatches).to_equal(0)

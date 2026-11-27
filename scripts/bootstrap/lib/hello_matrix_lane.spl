@@ -1,0 +1,148 @@
+# Native lanes + interpreter case of the phase-3 Hello matrix twin
+# (Matrix.compile/check_executable/verify_capture/replay/shared_provider/
+# prior_native_inputs/lane/interpreter in hello-sanity-matrix.py). Each step
+# returns "" on success or the Python owner's ValueError text.
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_read_bytes, file_copy, file_size, is_file, is_dir, dir_walk, list_dir, time_now_monotonic_ms}
+use scripts.bootstrap.lib.hello_matrix_policy.{SdnField, EnvPair, sdn_s, sdn_i, sdn_b, sdn_set, sdn_get, sdn_parse_raw, env_put, env_value, has_text, verify_capture_receipt_text, first_command_executable, replace_inputs, tokens_chroot, posix_relpath, interpreter_argv, interpreter_env, EXPECTED_STDOUT, FIXTURES}
+use scripts.bootstrap.lib.hello_matrix_quote.{shlex_split, shlex_join, list2cmdline, response_tokens}
+use scripts.bootstrap.lib.hello_matrix_tar.{tar_extract}
+use scripts.bootstrap.lib.hello_matrix_run.{MatrixContext, RunResult, run_command, digest, join, write_text, write_sdn, mkdir_exclusive, which_in, elapsed_text}
+
+var _pending = false
+
+pub fn pending_cleanup() -> bool:
+    _pending
+
+pub fn _run(ctx: MatrixContext, lane: text, name: text, argv: [text], extra: [EnvPair], cwd: text, seconds: i64) -> RunResult:
+    val r = run_command(ctx, lane, name, argv, extra, cwd, seconds)
+    if r.pending: _pending = true
+    r
+
+pub fn _msvc(ctx: MatrixContext) -> bool:
+    ctx.windows and ctx.windows_abi == "msvc"
+
+pub fn _fields(path: text) -> [EnvPair]:
+    if not file_exists(path): return []
+    match sdn_parse_raw(file_read(path)):
+        case Ok(f): f
+        case Err(_): []
+
+pub fn _q(value: text) -> text:
+    "\"" + value + "\""
+
+pub fn _parent(path: text) -> text:
+    var at = path.len()
+    while at > 0 and path.substring(at - 1, at) != "/" and path.substring(at - 1, at) != "\\":
+        at = at - 1
+    if at > 0: path.substring(0, at - 1) else: path
+
+pub fn _leaf(path: text) -> text:
+    var at = path.len()
+    while at > 0 and path.substring(at - 1, at) != "/" and path.substring(at - 1, at) != "\\":
+        at = at - 1
+    path.substring(at, path.len())
+
+pub fn _fixture(ctx: MatrixContext, name: text) -> text:
+    join(FIXTURES, name)
+
+pub fn compile(ctx: MatrixContext, lane: text, name: text, entry: text, output: text, flags: [text], extra: [EnvPair]) -> text:
+    var command = [ctx.compiler, "native-build", "--backend", ctx.backend, "--runtime-bundle", "core-c-bootstrap", "--runtime-path", ctx.runtime, "--threads", "1", "--cache-dir", join(join(lane, "cache"), name), "--output", output]
+    if ctx.compile_route == "positional":
+        command = [command[0], command[1], entry] + command[2..command.len()] + ["--low-memory"]
+    else:
+        command = command + ["--entry-closure", "--mode", "one-binary", "--entry", entry]
+    command = command + flags
+    if ctx.target != "":
+        command = command + ["--target", ctx.target]
+    var env = extra
+    if ctx.trace_stages:
+        for p in [EnvPair(key: "SIMPLE_BOOTSTRAP_DIAG", value: "1"), EnvPair(key: "SIMPLE_COMPILER_PHASE_PROFILE", value: "1"), EnvPair(key: "SIMPLE_COMPILER_TRACE", value: "1"), EnvPair(key: "SIMPLE_KEEP_LLVM_IR", value: "0"), EnvPair(key: "SIMPLE_MEM_SNAPSHOT", value: "0")]:
+            env = env_put(env, p.key, p.value)
+    val r = _run(ctx, lane, name, command, env, "", 0)
+    if not r.ok: return r.error
+    if not is_file(output) or file_size(output) == 0:
+        return name + ": missing/empty artifact"
+    ""
+
+pub fn check_executable(ctx: MatrixContext, lane: text, executable: text) -> text:
+    val r = _run(ctx, lane, "execute", [executable], [], "", 5)
+    if not r.ok: return r.error
+    if r.stdout != EXPECTED_STDOUT or r.stderr != "":
+        return "executable output differs: stdout=" + r.stdout + " stderr=" + r.stderr
+    ""
+
+pub fn verify_capture(ctx: MatrixContext, lane: text, capture: text, captured_output: text) -> text:
+    if not ctx.windows:
+        val receipt = capture + ".tool.sdn"
+        if not file_exists(receipt): return "phase2+ capture receipt missing"
+        match verify_capture_receipt_text(file_read(receipt), digest(capture), digest(captured_output), ctx.linker_sha):
+            case Ok(_): return ""
+            case Err(e): return e
+    var records: [text] = []
+    for path in dir_walk(_parent(captured_output)):
+        val leaf = _leaf(path)
+        if leaf.starts_with(_leaf(captured_output)) and leaf.ends_with(".link-command.txt"):
+            records.push(path)
+    if records.len() != 1:
+        return "natural Windows link lacks unique actual tool metadata"
+    val tool = match first_command_executable(file_read(records[0])):
+        case Ok(t): t
+        case Err(e): return e
+    val resolved = which_in(tool, env_value(ctx.base, "PATH"), true)
+    if resolved == "" or digest(resolved) != ctx.linker_sha or _leaf(resolved).lower() != _leaf(ctx.linker).lower():
+        return "natural Windows linker differs from pinned replay driver"
+    write_sdn(ctx, join(lane, "capture-binding.sdn"), [sdn_s("schema", "hello-matrix-link-capture-v1"), sdn_s("archive_sha256", digest(capture)), sdn_s("output_sha256", digest(captured_output)), sdn_s("linker_sha256", ctx.linker_sha), sdn_s("tool_metadata_sha256", digest(records[0])), sdn_b("admitted", false)])
+    ""
+
+pub fn replay(ctx: MatrixContext, lane: text, main: text, provider: text, capture: text, output: text, captured_output: text) -> text:
+    val bad = verify_capture(ctx, lane, capture, captured_output)
+    if bad != "": return bad
+    val unpack = join(lane, "link-reproduction")
+    match mkdir_exclusive(unpack):
+        case Err(e): return e
+        case Ok(_): ()
+    match tar_extract(capture, unpack):
+        case Err(e): return e
+        case Ok(_): ()
+    var responses: [text] = []
+    for child in list_dir(unpack):
+        val candidate = join(join(unpack, _leaf(child)), "response.txt")
+        if is_file(candidate): responses.push(candidate)
+    if responses.len() != 1:
+        return "expected one genuine LLD response.txt"
+    val root = _parent(responses[0])
+    var tokens = match response_tokens(file_read(responses[0]), _msvc(ctx)):
+        case Ok(t): t
+        case Err(e): return e
+    var shas: [text] = []
+    for t in tokens:
+        shas.push(digest(join(root, t)))
+    tokens = match replace_inputs(tokens, shas, root, main, digest(main), provider, digest(provider)):
+        case Ok(t): t
+        case Err(e): return e
+    val selected = if tokens_chroot(tokens): posix_relpath(output, root) else: output
+    tokens = tokens + (if _msvc(ctx): ["/out:" + selected] else: ["-o", selected])
+    val response = join(lane, "explicit-inputs.rsp")
+    write_text(ctx, response, if _msvc(ctx): list2cmdline(tokens) else: shlex_join(tokens))
+    val r = _run(ctx, lane, "link-explicit-objects", [ctx.linker, "@" + response], [], root, 0)
+    if not r.ok: return r.error
+    write_sdn(ctx, join(lane, "link-inputs.sdn"), [sdn_s("main_object", main), sdn_s("main_sha256", digest(main)), sdn_s("provider", provider), sdn_s("provider_sha256", digest(provider)), sdn_b("exact_emitted_inputs_consumed", true), sdn_s("reproduction_sha256", digest(capture))])
+    ""
+
+pub fn shared_provider(ctx: MatrixContext, lane: text, provider_object: text, library: text) -> text:
+    var command: [text] = []
+    if not ctx.windows:
+        command = [ctx.linker, "-shared", "--no-undefined", "-soname", _leaf(library), "-o", library, provider_object]
+    elif _msvc(ctx):
+        command = [ctx.linker, "/DLL", "/NOENTRY", "/EXPORT:hello_value", "/OUT:" + library, "/IMPLIB:" + join(lane, "hello.lib"), provider_object]
+    else:
+        val head = file_read_bytes(provider_object)
+        val machine = if head.len() >= 2: (head[0] as i64) + (head[1] as i64) * 256 else: 0
+        val emulation = if machine == 34404: "i386pep" elif machine == 332: "i386pe" elif machine == 43620: "arm64pe" else: ""
+        if emulation == "": return "unsupported Windows GNU provider object machine"
+        command = [ctx.linker, "-m", emulation, "-shared", "--export-all-symbols", "--entry", "0", "--out-implib", join(lane, "hello.dll.a"), "-o", library, provider_object]
+    val r = _run(ctx, lane, "link-provider-shared", command, [], "", 0)
+    if not r.ok: return r.error
+    if not is_file(library) or file_size(library) == 0:
+        return "platform linker produced no shared provider"
+    ""

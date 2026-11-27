@@ -1,0 +1,86 @@
+# Regression spec for doc/08_tracking/bug/nested_array_element_bound_to_var_copies_2026-09-05.md
+#
+# The bug doc expected `var row = outer[1]; row[0] = X` to alias (reach back
+# into `outer`), or failing that, to be a compile error. BOTH resolutions are
+# non-conformant against the normative array ABI:
+#
+# - doc/04_architecture/compiler/array_value_abi_contract.md §3.1 (NORMATIVE):
+#   "arrays are value types with copy-on-write. Passing an array copies it
+#   observably." Binding an array value — including a nested element — to a
+#   variable is such a pass, so the write through the binding MUST be local.
+# - A compile error would contradict the pinned
+#   test/01_unit/compiler/interpreter/core_array_cow_spec.spl fixture
+#   `case_nested_arrays` (`var copy = source; copy[0][1] = 9` must compile,
+#   run, and leave `source` unchanged) — the same shape one level up.
+#
+# Verified LIVE on the fresh HEAD seed (both `--mode=interpreter` and default
+# JIT): the write lands on the binding and `outer` is unchanged. Verified LIVE
+# on the pure-Simple core evaluator (both the JIT-disabled and JIT-threshold
+# paths) via the guests below: detach (0), not alias (1), not local-lost (2).
+#
+# This spec freezes that conformant behavior so the bug title's expectation
+# can never silently regress the ABI. The class-field case pins that a class
+# INSTANCE is a reference (§3.1) but the ARRAY VALUE behind its field is not.
+
+use std.spec.{describe, it, expect}
+use compiler.core.interpreter.mod.{core_jit_interpret}
+use compiler.core.interpreter.eval.{eval_has_error}
+use compiler.core.interpreter.value.{val_is_int, val_get_int}
+
+class RowGrid:
+    rows: [[text]]
+
+# Guests for the core-evaluator section. `via_var` returns 0 when the write
+# detached (conform), 1 when it aliased into `outer` (§3.1 violation), 2 when
+# even the local binding lost the write (broken). `direct` returns 0 when a
+# chained index write is visible through the container (control: a probe that
+# cannot observe a real mutation would be blind and must not pass).
+val GUEST_VIA_VAR = "var outer: [[text]] = [[\"a\", \"b\"], [\"c\", \"d\"]]\n"
+    + "fn main() -> i64:\n"
+    + "    var row = outer[1]\n"
+    + "    row[0] = \"VIA_VAR\"\n"
+    + "    if row[0] != \"VIA_VAR\": return 2\n"
+    + "    if outer[1][0] == \"c\": return 0\n"
+    + "    return 1\n"
+
+val GUEST_DIRECT = "var outer: [[text]] = [[\"a\", \"b\"], [\"c\", \"d\"]]\n"
+    + "fn main() -> i64:\n"
+    + "    outer[1][0] = \"DIRECT\"\n"
+    + "    if outer[1][0] == \"DIRECT\": return 0\n"
+    + "    return 3\n"
+
+fn core_run(source: text, path: text, threshold: i64) -> i64:
+    val vid = core_jit_interpret(source, path, threshold)
+    expect(eval_has_error()).to_equal(false)
+    if val_is_int(vid):
+        val_get_int(vid)
+    else:
+        -1
+
+describe "nested array element bound to var copies observably (bug nested_array_element_bound_to_var_copies_2026-09-05)":
+    it "write through the binding lands locally and does not reach outer":
+        var outer: [[text]] = [["a", "b"], ["c", "d"]]
+        var row = outer[1]
+        row[0] = "VIA_VAR"
+        expect(row[0]).to_equal("VIA_VAR")
+        expect(outer[1][0]).to_equal("c")
+    it "chained direct index write still mutates in place":
+        var outer: [[text]] = [["a", "b"], ["c", "d"]]
+        outer[0][1] = "MUT"
+        expect(outer[0][1]).to_equal("MUT")
+    it "class instance is a reference but the array value behind its field still detaches":
+        var g = RowGrid(rows: [["a", "b"], ["c", "d"]])
+        var row = g.rows[1]
+        row[0] = "VIA_VAR"
+        expect(row[0]).to_equal("VIA_VAR")
+        expect(g.rows[1][0]).to_equal("c")
+        g.rows[0][1] = "MUT"
+        expect(g.rows[0][1]).to_equal("MUT")
+
+describe "pure-Simple core evaluator conforms on the bug shape":
+    it "interpreter path (JIT disabled) detaches, and the direct control stays visible":
+        expect(core_run(GUEST_VIA_VAR, "nested_via_var_core_interp.spl", 999999)).to_equal(0)
+        expect(core_run(GUEST_DIRECT, "nested_direct_core_interp.spl", 999999)).to_equal(0)
+    it "jit-threshold path detaches, and the direct control stays visible":
+        expect(core_run(GUEST_VIA_VAR, "nested_via_var_core_jit.spl", 1)).to_equal(0)
+        expect(core_run(GUEST_DIRECT, "nested_direct_core_jit.spl", 1)).to_equal(0)

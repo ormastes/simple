@@ -1340,12 +1340,23 @@ impl ExecCore {
             std::collections::HashMap::new()
         };
         let _ = hir::take_dropped_unsupported_exprs();
+        // Script mode is the file kind (owner decision 2026-11-27): `.shs` and
+        // `.sscript` entries are scripts, `.spl` (specs included) is compiled.
+        // A script's own functions keep dynamically typed value joins.
+        // A file-header source-mode attribute, `--source-mode` and `simple.sdn [source_mode]` are
+        // not read here yet (plan lanes S4-A / S4-B).
+        let entry_is_script = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("shs" | "sscript")
+        );
+        hir::set_entry_script_mode(entry_is_script);
         let lowered = hir::lower_with_context_lenient_project_hint_and_duplicate_structs(
             &ast,
             path,
             project_hint.as_deref(),
             duplicate_structs,
         );
+        hir::set_entry_script_mode(false);
         // References to a private fn of another directory found in the
         // lowered unit; judged below, once it is known the JIT will run it.
         let private_refs = hir::take_private_ref_violations();
@@ -2066,7 +2077,64 @@ fn source_uses_jit_unsafe_graphics_runtime(path: &Path) -> bool {
     // gpu.engine2d sources JIT by default since the cross-module private-symbol
     // collision fix (cranelift_f32_trig_wrapper_codegen_2026-07-02 Residual).
     // Escape hatch: SIMPLE_EXECUTION_MODE=interpreter.
-    source.contains("window_winit")
+    //
+    // The gate keys on what the program IMPORTS, not on text it happens to
+    // contain: the old `source.contains("window_winit")` divert sent any file
+    // that merely mentioned the token in a comment or string literal to the
+    // interpreter, so lane choice depended on comment text and 2D startup
+    // timings were lane timings in disguise. Parse the entry file and divert
+    // only when a `use`-family declaration names `window_winit` as an exact
+    // module path segment or import target. A parse failure keeps the old
+    // conservative substring divert: a winit program must not reach the JIT
+    // lane through a gate-time parse hiccup. See
+    // doc/08_tracking/bug/seed_window_winit_substring_lane_gate_2026-11-26.md.
+    let Ok(ast) = Parser::new(&source).parse() else {
+        return source.contains("window_winit");
+    };
+    ast.items.iter().any(item_imports_window_winit)
+}
+
+/// A top-level item triggers the graphics gate when it is a `use`-family
+/// declaration naming `window_winit` as a module path segment or import
+/// target. Segment-exact, never substring: `std.io.window_winit` matches,
+/// `my_window_winit_utils` does not.
+fn item_imports_window_winit(item: &simple_parser::ast::Node) -> bool {
+    use simple_parser::ast::Node as N;
+    match item {
+        N::UseStmt(stmt) => import_names_window_winit(&stmt.path.segments, &stmt.target),
+        N::MultiUse(multi) => multi
+            .imports
+            .iter()
+            .any(|(path, target)| import_names_window_winit(&path.segments, target)),
+        N::ExportUseStmt(stmt) => import_names_window_winit(&stmt.path.segments, &stmt.target),
+        N::CommonUseStmt(stmt) => import_names_window_winit(&stmt.path.segments, &stmt.target),
+        _ => false,
+    }
+}
+
+fn import_names_window_winit(segments: &[String], target: &simple_parser::ast::ImportTarget) -> bool {
+    use simple_parser::ast::ImportTarget as T;
+    if segments.iter().any(|segment| segment == "window_winit") {
+        return true;
+    }
+    match target {
+        // `use std.io.window_winit` binds the module itself: the final segment
+        // lands in the single/aliased target instead of the path.
+        T::Single(name) => name == "window_winit",
+        T::Aliased { name, .. } => name == "window_winit",
+        T::Group(items) => items.iter().any(import_target_names_window_winit),
+        T::Glob => false,
+    }
+}
+
+fn import_target_names_window_winit(target: &simple_parser::ast::ImportTarget) -> bool {
+    use simple_parser::ast::ImportTarget as T;
+    match target {
+        T::Single(name) => name == "window_winit",
+        T::Aliased { name, .. } => name == "window_winit",
+        T::Group(items) => items.iter().any(import_target_names_window_winit),
+        T::Glob => false,
+    }
 }
 
 fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
@@ -2363,6 +2431,57 @@ mod tests {
 
         assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
         assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
+    }
+
+    /// Regression for
+    /// doc/08_tracking/bug/seed_window_winit_substring_lane_gate_2026-11-26.md:
+    /// the gate used to be `source.contains("window_winit")`, so a COMMENT
+    /// mentioning the token diverted the whole program to the interpreter
+    /// (measured: ~4x faster "startup" that was just the cheaper lane). Only
+    /// an actual import may divert.
+    #[test]
+    fn comment_mention_of_window_winit_stays_on_jit_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("commented.spl");
+        fs::write(
+            &script,
+            "# window_winit\nuse std.gc_async_mut.gpu.engine2d.engine.{Engine2D}\nfn main():\n    print \"ok\"\n",
+        )
+        .unwrap();
+
+        assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
+    }
+
+    /// The string-literal twin of the comment case (the exact shape of
+    /// test/fixtures/engine_receipt/demote_graphics_text.spl): a program that
+    /// stores "window_winit" in a text value imports nothing and must keep
+    /// the JIT lane.
+    #[test]
+    fn string_literal_mention_of_window_winit_stays_on_jit_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("literal.spl");
+        fs::write(
+            &script,
+            "fn main():\n    val backend = \"window_winit\"\n    print \"backend={backend}\"\n",
+        )
+        .unwrap();
+
+        assert!(!source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(!should_prefer_interpreter_for_source(&script, "spl", true));
+    }
+
+    /// The single-item form `use std.io.window_winit` binds the module itself:
+    /// the final path segment lands in the import target, not the path, and
+    /// must still divert.
+    #[test]
+    fn single_item_window_winit_import_uses_interpreter_fast_path() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("single.spl");
+        fs::write(&script, "use std.io.window_winit\nfn main():\n    print \"gui\"\n").unwrap();
+
+        assert!(source_uses_jit_unsafe_graphics_runtime(&script));
+        assert!(should_prefer_interpreter_for_source(&script, "spl", true));
     }
 
     #[test]

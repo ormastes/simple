@@ -1,0 +1,56 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-RUNTIME
+#
+# Extern return-shape canonicalisation, GPU batch (PR 7).
+# doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md
+#
+# Each name below has ONE declared return shape tree-wide, and the seed
+# interpreter's registry must hand back a Value of that shape:
+#   rt_opencl_is_available / rt_webgpu_is_available -> bool  (C + hosted Rust return bool)
+#   rt_cuda_stream_destroy                           -> i64   (0 ok, negative = CUDA error)
+#   rt_metal_get_last_error                          -> text  (cstring-return table)
+#   rt_vulkan_fence_submission_supported             -> i64   (nonzero = supported)
+
+@unsafe(reason: "raw OpenCL availability ABI", capabilities: [ffi])
+extern fn rt_opencl_is_available() -> bool
+@unsafe(reason: "raw WebGPU availability ABI", capabilities: [ffi])
+extern fn rt_webgpu_is_available() -> bool
+@unsafe(reason: "raw CUDA stream release status ABI", capabilities: [ffi])
+extern fn rt_cuda_stream_destroy(stream: i64) -> i64
+@unsafe(reason: "raw Metal runtime-owned error text ABI", capabilities: [ffi])
+extern fn rt_metal_get_last_error() -> text
+@unsafe(reason: "raw Vulkan fence capability ABI", capabilities: [ffi])
+extern fn rt_vulkan_fence_submission_supported() -> i64
+
+describe "extern return shapes: GPU batch":
+    it "availability probes return bool, not a 0/1 integer":
+        step("rt_webgpu_is_available is exactly false in the interpreter")
+        val webgpu = unsafe(capabilities: [ffi]):
+            rt_webgpu_is_available()
+        expect(webgpu).to_equal(false)
+        step("rt_opencl_is_available is a bool on every host")
+        val opencl = unsafe(capabilities: [ffi]):
+            rt_opencl_is_available()
+        expect(opencl == true or opencl == false).to_equal(true)
+
+    it "rt_cuda_stream_destroy is registered and a null stream is a no-op status 0":
+        step("destroying stream 0 returns the i64 status 0")
+        val rc = unsafe(capabilities: [ffi]):
+            rt_cuda_stream_destroy(0)
+        expect(rc).to_equal(0)
+        step("a negative handle is rejected with a negative status")
+        val bad = unsafe(capabilities: [ffi]):
+            rt_cuda_stream_destroy(-5)
+        expect(bad < 0).to_equal(true)
+
+    it "rt_metal_get_last_error returns text":
+        step("the error detail is text (empty when there is none)")
+        val msg = unsafe(capabilities: [ffi]):
+            rt_metal_get_last_error()
+        expect(msg.len() >= 0).to_equal(true)
+
+    it "rt_vulkan_fence_submission_supported returns an i64 capability flag":
+        step("the flag compares as an integer")
+        val flag = unsafe(capabilities: [ffi]):
+            rt_vulkan_fence_submission_supported()
+        expect(flag >= 0).to_equal(true)

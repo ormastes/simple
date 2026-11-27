@@ -10,7 +10,7 @@ use std.nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiWindowEvent, GUI_EVT_NONE
 use std.gpu.engine2d.engine.{Engine2D}
 use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, file_write, file_write_bytes, dir_create_all, getpid, time_now_unix_micros}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
-use std.common.image.ppm_decode.{decode_ppm_to_argb}
+use std.common.image.ppm_decode.{decode_ppm_to_argb, encode_ppm_p6}
 use std.common.science_math.perf_sugar.{alloc_i64}
 # Direct defining-module imports, NOT the app.io.mod hub: the hub re-exports
 # cli_ops -> run_commands -> compiler.driver -> hir, dragging the ENTIRE
@@ -19,7 +19,7 @@ use std.common.science_math.perf_sugar.{alloc_i64}
 # proven by RUST_LOG module trace 2026-07-18).
 use app.io.process_ops.{process_spawn_async, process_kill}
 use app.io.process_env_ops.{process_spawn_async_env}
-use app.io.env_ops.{host_os, cwd}
+use app.io.env_ops.{host_os, cwd, env_set}
 use common.window_protocol.geometry.{Size}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.ui.wm_app_process_contract.{WEB_STANDARDS_SHOWCASE_APP_SOURCE, WEB_STANDARDS_SHOWCASE_TITLE, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, wm_fs_bridge_decode, wm_web_standards_showcase_client_env, wm_web_standards_showcase_event_path, wm_web_standards_showcase_frame_seq_path, wm_fs_app_event, wm_fs_app_event_encode, wm_fs_app_event_seq_path}
@@ -418,7 +418,15 @@ fn launch_showcase_child(bridge_path: text, frame_path: text, repo_root: text) -
     val event_path = wm_web_standards_showcase_event_path(frame_path)
     val seq_path = wm_web_standards_showcase_frame_seq_path(frame_path)
     if host_os().lower().contains("windows"):
-        return process_spawn_async_env(simple_bin, ["run", showcase_source_path], env)
+        # process_spawn_async_env routes on Windows to the env-overlay native
+        # spawn, which refuses to run on the interpreted/JIT lane (-95,
+        # launch-admission-requires-native-core-c-provider-before-effect) — the
+        # only lane the seed offers. The plain async spawn works there and the
+        # child inherits this process's environment, so publish the client env
+        # in-process before spawning (same contract as the POSIX `env` route).
+        for key in env.keys():
+            env_set(key, env[key] ?? "")
+        return process_spawn_async(simple_bin, ["run", showcase_source_path])
     process_spawn_async("env", [
         "SIMPLE_WM_APP_MODE=client",
         "SIMPLE_WM_BRIDGE_FILE={bridge_path}",
@@ -484,6 +492,12 @@ fn env_i64(key: text, default_value: i64) -> i64:
     if raw == "":
         return default_value
     raw.to_i64() ?? default_value
+
+fn configured_showcase_backend() -> text:
+    val raw = (env_get("SIMPLE_GUI_BACKEND") ?? "").trim()
+    if raw == "":
+        return "cpu_simd"
+    raw
 
 fn wait_for_first_child_frame(frame_path: text, timeout_ms: i64) -> ChildFrame:
     val deadline = time_now_unix_micros() + timeout_ms * 1000
@@ -574,6 +588,8 @@ fn run_headless_capture(repo_root: text) -> i64:
 
 fn main() -> i64:
     print "WM Web Standards Showcase GUI - launching same source from filesystem"
+    if (env_get("SIMPLE_WM_HEADLESS_CAPTURE") ?? "") == "1":
+        return run_headless_capture(resolve_repo_root())
     if (env_get("SIMPLE_GUI") ?? "") != "1":
         print "[wm-web-standards] error=no-gui-requested (launch via macos-gui-run.shs)"
         return 2
@@ -632,7 +648,7 @@ fn main() -> i64:
         cleanup(child_pid, gui)
         return 1
     write_wm_trace(trace_path, "before_first_present")
-    var b = Engine2D.create_with_backend_fast(W, H, requested_backend)
+    var b = Engine2D.create_with_backend_fast(W, H, configured_showcase_backend())
     val (b1, ok1) = render_and_present(gui, b, comp, frame_w, frame_h, frame_path, "launched", trace_path)
     b = b1
     if not ok1:
