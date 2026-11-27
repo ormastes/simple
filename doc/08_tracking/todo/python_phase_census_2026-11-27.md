@@ -16,7 +16,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 - DEAD_CANDIDATE: 8 (owner: keep)
 - OWNED_HELLO_SANITY: 13
 - PORTED: 3 (sdk-observer-evidence-v1; riscv64-unknown-elf-tool-wrapper PR #12221; run-build-test; bump per port)
-- P3_PLUS_ONLY: 31 (33 on the prior base minus riscv64 wrapper and run-build-test now PORTED; still includes sdk-observer and durable_wal_fsync)
+- P3_PLUS_ONLY: 28 (counted from the table rows; the earlier 33 summary was stale against the table. Table total 104 rows = sum of these class counts)
 - INDEPENDENT_ORACLE: 9 (policy exception, stays Python)
 - BLOCKED: 7 (2 cgroupfs rows: `python_port_cgroupfs_sffi_gaps_2026-11-27.md`; see `python_test_oracle_piped_process_gaps_2026-11-27.md`)
 - BENCHMARK_FIXTURE: 1 (kept)
