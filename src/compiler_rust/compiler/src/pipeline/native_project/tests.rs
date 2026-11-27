@@ -11002,3 +11002,137 @@ fn native_typed_f64_option_some_readers_keep_exact_bits_against_c_runtime() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Inline (tag, bits) typed `f64?` locals, built as a real native archive and
+/// linked against the core-C runtime (the C twins of `rt_option_float_tag` /
+/// `rt_option_float_pack`). Bit `k` of the result marks a mismatch. Covers the
+/// nil-word denormal (`4.9e-324 * 3.0`, bits == 3), None vs Some(NaN), every
+/// carrier (local, copy, return, param, struct field, array element, erased
+/// generic), and the `unwrap_or` / `?` readers (`expect` is left to the JIT spec: the
+/// core-C runtime has no `rt_expect_or_trap`).
+/// seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27
+/// seed_jit_f64_option_unwrap_or_expect_try_readers_lossy_2026-11-27
+#[cfg(target_os = "linux")]
+#[test]
+fn native_inline_f64_option_carriers_and_readers_are_exact_against_c_runtime() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("probe.spl"),
+        concat!(
+            "struct Holder:\n    a: f64?\n",
+            "fn same(g: f64, w: f64) -> bool:\n    if w != w:\n        return g != g\n",
+            "    if w == 0.0:\n        return g == 0.0 and (1.0 / g) == (1.0 / w)\n    g == w\n",
+            "fn bit(ok: bool, k: i64) -> i64:\n    if ok:\n        return 0\n    k\n",
+            "fn mk(x: f64) -> f64?:\n    return Some(x)\n",
+            "fn flat(x: f64) -> f64?:\n    return x\n",
+            "fn thru(c: f64?) -> f64?:\n    c\n",
+            "fn ident<T>(o: T?) -> T?:\n    o\n",
+            "fn tryq(c: f64?) -> f64?:\n    val v = c?\n    Some(v)\n",
+            "fn chk(x: f64) -> i64:\n    val c: f64? = Some(x)\n    var r = 0\n",
+            "    r = r + bit(same(c ?? 9.0, x), 1)\n",
+            "    r = r + bit(same(c.unwrap(), x), 2)\n",
+            "    var iv = 9.0\n    if val v = c:\n        iv = v\n    r = r + bit(same(iv, x), 4)\n",
+            "    var mv = 9.0\n    match c:\n        Some(v): mv = v\n        None: mv = 8.0\n    r = r + bit(same(mv, x), 8)\n",
+            "    r = r + bit(c != nil, 16)\n",
+            "    var d: f64? = None\n    r = r + bit(d == nil, 32)\n    d = c\n    r = r + bit(same(d ?? 9.0, x), 64)\n",
+            "    d = nil\n    r = r + bit(same(d ?? 9.0, 9.0), 128)\n",
+            "    val m: f64? = mk(x)\n    r = r + bit(same(m ?? 9.0, x), 256)\n",
+            "    val p: f64? = thru(c)\n    r = r + bit(same(p ?? 9.0, x), 512)\n",
+            "    val fl: f64? = flat(x)\n    r = r + bit(same(fl ?? 9.0, x), 1024)\n",
+            "    val h = Holder(a: c)\n    r = r + bit(same(h.a ?? 9.0, x), 2048)\n",
+            "    val xs: [f64?] = [c, None]\n    r = r + bit(same(xs[0] ?? 9.0, x), 4096)\n",
+            "    val e1: f64? = xs[1]\n    r = r + bit(e1 == nil, 8192)\n",
+            "    val g: f64? = ident(c)\n    r = r + bit(same(g ?? 9.0, x), 16384)\n",
+            "    val u: f64 = c.unwrap_or(9.0)\n    r = r + bit(same(u, x), 32768)\n",
+            "    val nn: f64? = None\n    r = r + bit(same(nn.unwrap_or(9.0), 9.0), 65536)\n",
+            "    val nl: f64? = nil\n    val ud: f64 = nl.unwrap_or(x)\n    r = r + bit(same(ud, x), 262144)\n",
+            // The same local escapes twice: both callees must see the value.
+            "    r = r + bit(same(thru(c) ?? 9.0, x) and same(thru(c) ?? 9.0, x), 524288)\n",
+            "    val t: f64? = tryq(c)\n    r = r + bit(same(t ?? 9.0, x), 131072)\n",
+            "    r\n",
+            "fn check() -> i64:\n    val nan = 0.0 / 0.0\n",
+            "    chk(4.9e-324 * 3.0) + chk(0.1) + chk(nan) + chk(4.9e-324) + chk(4.9e-324 * 2.0) + chk(-0.0)\n",
+        ),
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "cranelift".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("native-project compilation");
+    assert_eq!(result.failed, 0);
+    let runtime = build_core_c_runtime_library(temp.path()).expect("real core-C runtime");
+    let runner = temp.path().join("runner.c");
+    fs::write(
+        &runner,
+        "#include <stdint.h>\n#include <stdio.h>\nextern int64_t probe__check(void);\nint main(void) {\n    int64_t r = probe__check();\n    printf(\"mismatch=%lld\\n\", (long long)r);\n    return r != 0;\n}\n",
+    )
+    .unwrap();
+    let executable = temp.path().join("probe");
+    let link = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root_for_native_project_tests().join("src/runtime"))
+        .arg(runner)
+        .arg(archive)
+        .arg(runtime)
+        .args(["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm", "-o"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+    let output = std::process::Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "inline f64? carriers/readers mismatch: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The one-word form of an escaping inline `f64?` local is built at the
+/// ASSIGNMENT, like the one-word slot it replaces. Built lazily at the first
+/// escaping read it belonged to the transient scope open at that read:
+/// assigned outside a scope, first read inside one, read again after
+/// `rt_transient_array_scope_end` returned a freed pointer (`b` and `k` read
+/// 1081.0, a later allocation, instead of 1.25).
+/// seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27
+#[test]
+fn jit_inline_f64_option_word_outlives_the_scope_of_its_first_escaping_read() {
+    let source = concat!(
+        "extern fn rt_transient_array_scope_begin() -> bool\n",
+        "extern fn rt_transient_array_scope_end() -> bool\n",
+        "fn id(o: f64?) -> f64?:\n    o\n",
+        "fn rd(o: f64?) -> f64:\n    o ?? -1.0\n",
+        "fn churn(n: i64) -> f64:\n    var t = 0.0\n    var xs: [f64?] = []\n    var i = 0\n",
+        "    while i < n:\n        xs.push(Some(i.to_f64() + 1000.0))\n        i = i + 1\n",
+        "    for x in xs:\n        t = t + (x ?? 0.0)\n    t\n",
+        "fn main() -> i64:\n    val c: f64? = Some(1.25)\n",
+        "    rt_transient_array_scope_begin()\n    val a = rd(id(c))\n    rt_transient_array_scope_end()\n",
+        "    val t = churn(2000)\n    val b = rd(id(c))\n    val k = id(c)\n    var r = 0\n",
+        "    if a != 1.25:\n        r = r + 1\n    if b != 1.25:\n        r = r + 2\n",
+        "    if (k ?? -2.0) != 1.25:\n        r = r + 4\n    if t != 3999000.0:\n        r = r + 8\n    r\n",
+    );
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    let main = mir.functions.iter().find(|f| f.name == "main").expect("main");
+    assert!(
+        main.locals.iter().any(|l| l.name == "c$word"),
+        "the escaping local keeps a one-word slot"
+    );
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 0);
+}

@@ -13,6 +13,7 @@ mod lower;
 pub mod parallel;
 pub mod reachability;
 mod state_machine_utils;
+pub mod float_option_inline;
 pub mod string_accum;
 
 // Note: instructions module now contains submodules:

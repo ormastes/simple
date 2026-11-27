@@ -2100,6 +2100,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_once_new",
     "rt_option_map",
     "rt_option_float_bits",
+    "rt_option_float_pack",
+    "rt_option_float_tag",
     "rt_package_chmod",
     "rt_package_copy_file",
     "rt_package_create_symlink",
