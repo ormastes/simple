@@ -192,32 +192,32 @@ fn compiler_inventory_event_push_v1(
 ) -> [CompileSourceEventV1]?:
     compiler_inventory_event_push_cost_v1(events, root, operation, path, nil)
 
-fn compiler_inventory_event_push_cost_v1(
-    events: [CompileSourceEventV1], root: text, operation: text, path: text,
-    cost: ScvCompileCostV1?
-) -> [CompileSourceEventV1]?:
+fn _compiler_inventory_event_for_path_cost_v1(
+    root: text, operation: text, path: text, cost: ScvCompileCostV1?
+) -> Result<CompileSourceEventV1?, text>:
     # Preserve literal leading/trailing spaces in a Git path. Git quotes
     # control-character names even with core.quotePath=false; that encoding
     # cannot be treated as the canonical source identity, so refuse the batch.
     if path.starts_with("\""):
-        return None
+        return Err("invalid")
     val normalized = if path.contains("\\"): path.replace("\\", "/") else: path
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
-        return Some(events)
+        return Ok(None)
     # The inventory tracks compilable sources only (.spl and simple.sdn
     # manifests). Release/development checkouts carry tens of thousands of
     # other files under src/ (vendored C, fonts, docs); admitting the first
     # one fails apply with event-invalid, and hashing them dominated
     # cold-init wall time. Filter before touching the file.
     if not compile_source_inventory_path_valid_v1(normalized):
-        return Some(events)
-    if compiler_inventory_family_v1(normalized) == "": return None
+        return Ok(None)
+    if compiler_inventory_family_v1(normalized) == "":
+        return Err("invalid")
     if operation == "delete":
         val started = scv_cost_now_v1(cost)
         val deleted = compile_source_inventory_git_event_cost_v1("delete", normalized, "", cost)
         if cost.is_some(): cost!.record_event(scv_cost_elapsed_v1(cost, started))
-        return Some(events.push(deleted))
+        return Ok(Some(deleted))
     val absolute = root + "/" + normalized
     val exists_started = scv_cost_now_v1(cost)
     val exists = file_exists(absolute)
@@ -226,7 +226,7 @@ fn compiler_inventory_event_push_cost_v1(
         val started = scv_cost_now_v1(cost)
         val deleted = compile_source_inventory_git_event_cost_v1("delete", normalized, "", cost)
         if cost.is_some(): cost!.record_event(scv_cost_elapsed_v1(cost, started))
-        return Some(events.push(deleted))
+        return Ok(Some(deleted))
     # Reducing straight to an event here (digests + byte_count only) rather
     # than collecting a change record that keeps `content` alive is the
     # point: the outer array below no longer has to retain every listed
@@ -237,8 +237,17 @@ fn compiler_inventory_event_push_cost_v1(
     # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
     val event = compiler_inventory_file_event_cost_v1(operation, normalized, absolute, cost)
     if event.is_none():
-        return None
-    Some(events.push(event!))
+        return Err("invalid")
+    Ok(Some(event!))
+
+fn compiler_inventory_event_push_cost_v1(
+    events: [CompileSourceEventV1], root: text, operation: text, path: text,
+    cost: ScvCompileCostV1?
+) -> [CompileSourceEventV1]?:
+    match _compiler_inventory_event_for_path_cost_v1(root, operation, path, cost):
+        case Err(_): None
+        case Ok(None): Some(events)
+        case Ok(Some(ev)): Some(events.push(ev))
 
 fn compiler_inventory_parse_name_status_v1(
     root: text, output: text, events: [CompileSourceEventV1]
@@ -436,7 +445,15 @@ fn _compiler_inventory_git_events_traced_cost_v1(
             if path != "" and not dirty_seen.has(path):
                 dirty_seen[path] = true
                 dirty_paths.push(path)
-        for line in listed!.split("\n"):
+        val listed_lines = listed!.split("\n")
+        val log_listed_progress = listed_lines.len() >= 5000
+        if log_listed_progress:
+            stderr_write("[scv] cold-init scan start lines={listed_lines.len()}\n")
+        var listed_idx = 0
+        for line in listed_lines:
+            listed_idx = listed_idx + 1
+            if log_listed_progress and listed_idx % 5000 == 0:
+                stderr_write("[scv] cold-init scan progress={listed_idx}/{listed_lines.len()} events={events.len()}\n")
             if line == "":
                 continue
             if line.byte_len() <= 2 or line.substring(1, 2) != " ":
@@ -453,12 +470,13 @@ fn _compiler_inventory_git_events_traced_cost_v1(
                     dirty_paths.push(path)
                 continue
             if tag == "?":
-                untracked_paths = untracked_paths.push(path)
-            val next = compiler_inventory_event_push_cost_v1(
-                events, root, "create", path, cost)
-            if next.is_none():
-                return None
-            events = next!
+                untracked_paths.push(path)
+            match _compiler_inventory_event_for_path_cost_v1(root, "create", path, cost):
+                case Err(_): return None
+                case Ok(Some(ev)): events.push(ev)
+                case Ok(None): ()
+        if log_listed_progress:
+            stderr_write("[scv] cold-init scan done events={events.len()}\n")
         val digests = compiler_inventory_untracked_digests_v1(
             untracked_paths.join("\n"), source_roots)
         if not digests.valid:

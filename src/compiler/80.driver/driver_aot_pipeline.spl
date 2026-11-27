@@ -29,7 +29,8 @@ use std.io_runtime.{env_get_opt, file_read_result, hash_text}
 use compiler.common.native_output_intent.{NativeOutputIntentV1, native_output_intent_decode_v1}
 use compiler.driver.driver_build.native_group_request.{native_group_request_path_v1}
 use compiler.driver.driver_build.native_staged_codegen.{NativeStagedCodegenStateV1,
-    NATIVE_STAGED_CODEGEN_BATCH_ENV_V1, native_staged_codegen_batch_size_v1}
+    NATIVE_STAGED_CODEGEN_BATCH_ENV_V1, native_staged_codegen_batch_size_v1,
+    native_staged_codegen_batch_attribute_v1}
 use compiler.driver.driver_build.native_mir_shard.{NATIVE_MIR_SHARD_QUEUE_ENV_V1,
     native_mir_shard_spec_v1, native_mir_shard_queue_v1, native_mir_shard_owner_v1,
     native_mir_shard_link_ledger_v1, native_mir_shard_publish_pass_v1,
@@ -653,9 +654,11 @@ impl CompilerDriver:
         # 1495-module build with ~224 objects). The global count still fails
         # the build after the last batch, so the link stays blocked.
         val errors_at_batch_start = self.ctx.error_count_value
+        var batch_diag_detail = ""
         if not self.native_staged_codegen.lowering_failed:
             if not self.verify_lowered_mir_v1():
                 self.native_staged_codegen.verify_failed = true
+                batch_diag_detail = "MIR verification failed in batch {batch_index}"
                 if go_to_end:
                     self.go_to_end_withhold_staged_batch_v1(batch_names, batch_index)
         if not self.native_staged_codegen.lowering_failed and
@@ -664,6 +667,7 @@ impl CompilerDriver:
             # from this batch's own check are a borrow failure.
             if not self.borrow_check() and self.ctx.error_count_value > errors_at_batch_start:
                 self.native_staged_codegen.borrow_failed = true
+                batch_diag_detail = "borrow check failed in batch {batch_index}"
         # `verify_failed` is part of both gates: under go-to-end the verify
         # errors were absorbed above, so the error count alone no longer
         # proves the batch is valid.
@@ -679,6 +683,11 @@ impl CompilerDriver:
                 not self.native_staged_codegen.verify_failed:
             if self.ctx.freeze_storage_registry_for_schedule(
                     self.native_staged_codegen.scheduled_names) == "invalid":
+                val reg_attr = native_staged_codegen_batch_attribute_v1(
+                    self.native_staged_codegen, 1,
+                    "typed storage registry is malformed before batch {batch_index}",
+                    "", batch_names)
+                log_error(reg_attr)
                 self.ctx.add_error("staged native codegen: typed storage registry is malformed before batch {batch_index}")
                 return false
             val output = self.ctx.options.output_file ?? _driver_default_output(self.ctx.options.input_files)
@@ -690,23 +699,33 @@ impl CompilerDriver:
                     case CompileResult.CodegenError(message): message
                     case _: "staged native codegen batch {batch_index} failed"
                 self.ctx.add_error(batch_error)
+                batch_diag_detail = batch_error
                 batch_failed = true
             elif smf_effective_output_is_both_v1(self.ctx.options.output_format):
                 # The SMF half reads this batch's parts after its MIR is gone.
                 val smf_error = self.smf_record_module_parts_v1(batch_names)
                 if smf_error != "":
                     self.ctx.add_error(smf_error)
+                    batch_diag_detail = smf_error
                     batch_failed = true
         if batch_failed:
             val failed_units = batch_names.join(",")
             self.native_staged_codegen.failed_batches = self.native_staged_codegen.failed_batches.push(
                 "batch-{batch_index}: {failed_units}")
+            val batch_attr = native_staged_codegen_batch_attribute_v1(
+                self.native_staged_codegen, 1, batch_diag_detail, "", batch_names)
+            log_error(batch_attr)
             print "[staged-codegen] batch {batch_index} failed; continuing codegen for later batches (build will fail at end)"
         val withheld_before_batch = self.native_staged_codegen.modules_withheld
         self.native_staged_codegen.record_batch_withheld_v1(batch_names.len(),
             self.native_staged_codegen.modules_flushed - flushed_before_batch)
         val withheld_in_batch = self.native_staged_codegen.modules_withheld - withheld_before_batch
         if withheld_in_batch > 0 and not batch_failed:
+            val withheld_attr = native_staged_codegen_batch_attribute_v1(
+                self.native_staged_codegen, 1,
+                "withheld {withheld_in_batch} module(s); lowering_failed={self.native_staged_codegen.lowering_failed} verify_failed={self.native_staged_codegen.verify_failed}",
+                "", batch_names)
+            log_error(withheld_attr)
             # A lowering/verify gate withheld the whole batch: say so, the
             # progress line alone used to report it as failed=0.
             print "[staged-codegen] batch {batch_index} withheld {withheld_in_batch} module(s) (lowering_failed={self.native_staged_codegen.lowering_failed} verify_failed={self.native_staged_codegen.verify_failed}); build will fail at end"
