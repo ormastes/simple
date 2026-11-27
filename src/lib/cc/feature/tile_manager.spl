@@ -1,0 +1,64 @@
+# CC TileManager — tracks compositor tiles, schedules high-priority raster tasks,
+# and supports tile invalidation.
+#
+# Provides: TileManager.
+
+use std.cc.entity.tile.{Tile, TileKey, TilePriority, TileDrawState}
+use std.cc.feature.raster_buffer_provider.{RasterBufferProvider}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+
+fn _is_now_priority(priority: TilePriority) -> bool:
+    priority == TilePriority.Now or priority == TilePriority.NowBin
+
+class TileManager:
+    raster_provider: RasterBufferProvider
+    tiles: [Tile]
+
+    static fn new(rp: RasterBufferProvider) -> TileManager:
+        TileManager(raster_provider: rp, tiles: [])
+
+    me add_tile(tile: Tile):
+        me.tiles.push(tile)
+
+    me schedule_tasks():
+        var i: i64 = 0
+        while i < me.tiles.len():
+            var t = me.tiles[i]
+            if _is_now_priority(t.priority) and not t.is_ready():
+                val w = t.content_rect.width() as i64
+                val h = t.content_rect.height() as i64
+                t.begin_raster()
+                t.complete_raster(me.raster_provider.allocate_tile_bitmap(w, h))
+                me.tiles[i] = t
+            i = i + 1
+
+    me invalidate_tile(key: TileKey):
+        var i: i64 = 0
+        while i < me.tiles.len():
+            var t = me.tiles[i]
+            if t.id.equals(key):
+                t.draw_state = TileDrawState.Unrasterized
+                t.has_raster_task = false
+                t.bitmap = Bitmap.zeros(0, 0)
+                me.tiles[i] = t
+            i = i + 1
+
+    fn ready_count() -> i64:
+        var count: i64 = 0
+        var i: i64 = 0
+        while i < self.tiles.len():
+            if self.tiles[i].is_ready():
+                count = count + 1
+            i = i + 1
+        count
+
+    fn pending_count() -> i64:
+        var count: i64 = 0
+        var i: i64 = 0
+        while i < self.tiles.len():
+            if not self.tiles[i].is_ready():
+                count = count + 1
+            i = i + 1
+        count
+
+export TileManager

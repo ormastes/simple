@@ -25,12 +25,15 @@
 # things. Confusing them is what makes a bare run look like a failing gate:
 #
 #   1. THE NAMED GATE — config/check/must_check_gates.sdn rows
-#      `push-no-direct-rt` (push, blocking) and `no-direct-rt` (bootstrap,
-#      advisory) both spell the command `... --roots src`, dispatched by
-#      check-push-must-pass.shs. Measured 2026-09-05:
-#        PASS — 16244 file(s) scanned (roots=src, src=6230), forbidden=6230,
-#        extern_decls=6459 (baseline 7776)
-#      The gate is GREEN and src debt (6230) is 1546 BELOW the baseline.
+#      `push-no-direct-rt` (push, advisory since 2026-09-23; run when
+#      `MUST_CHECK_ADVISORY=1` with `--roots src --rev $_ref --baseline-rev
+#      $_direct_rt_base`, skipped on ordinary fast pushes) and `no-direct-rt`
+#      (bootstrap, advisory, `--roots src`). Snapshot at baseline hardening
+#      (2026-09-05): 16244 file(s) scanned (roots=src, src=6230),
+#      extern_decls=6459 (historical baseline 7776, later tightened to 6290 in
+#      scripts/check/no_direct_rt_baseline.txt; note standalone `--roots src` on
+#      the full tree remains above 6290 pending paydown or deliberate
+#      re-baseline, whereas `push-no-direct-rt` ratchets against --baseline-rev).
 #
 #   2. THE MISSION-CRITICAL RELEASE LANE —
 #      check-simpleos-mission-critical-release.shs:348 runs this script BARE
@@ -381,34 +384,78 @@ scan_dir() {
     mv -f "$tmp_classified.c" "$tmp_classified"
     sd_scanned=$(tr '\0' '\n' < "$tmp_find" | awk -v root="$sd_repo_root/" 'FILENAME == ARGV[1] { keep[root $0] = 1; next } ($0 in keep) { n++ } END { print n + 0 }' "$RT_CLOSURE_LIST" -)
   fi
-  while IFS=: read -r f matched declarations; do
-    [ -n "$f" ] || continue
-    sd_decls=$((sd_decls + declarations))
-    n=$((matched - declarations))
-    [ "$n" -gt 0 ] || continue
-    case "$f" in
-      "$sd_repo_root"/*) rel=${f#"$sd_repo_root"/} ;;
-      ./*) rel=${f#./} ;;
-      *) rel=$f ;;
-    esac
-    allowed=0
-    if [ -f "$sd_allow" ]; then
-      while IFS= read -r pre; do
-        case "$pre" in ''|'#'*) continue ;; esac
-        case "$pre" in
-          suffix:*) sfx=${pre#suffix:}; case "$rel" in *"$sfx") allowed=1; break ;; esac ;;
-          */) case "$rel" in "$pre"*) allowed=1; break ;; esac ;;
-          *) if [ "$rel" = "$pre" ]; then allowed=1; break; fi ;;
-        esac
-      done < "$sd_allow"
-    fi
-    if [ $allowed -eq 1 ]; then
-      sd_allowed=$((sd_allowed + n))
-    else
-      sd_forbidden=$((sd_forbidden + n))
-      if [ -n "$sd_off" ]; then echo "$n $rel" >> "$sd_off"; fi
-    fi
-  done < "$tmp_classified"
+  rt_allow_arg="$sd_allow"
+  [ -f "$rt_allow_arg" ] || rt_allow_arg="/dev/null"
+  rt_counts=$(LC_ALL=C awk -v repo_root="$sd_repo_root" -v allow_file="$rt_allow_arg" -v off_file="$sd_off" '
+    function is_allowed(rel,   i, p, s, plen, rlen, slen) {
+      rlen = length(rel)
+      for (i = 1; i <= na; i++) {
+        p = allow[i]
+        if (substr(p, 1, 7) == "suffix:") {
+          s = substr(p, 8)
+          slen = length(s)
+          if (rlen >= slen && substr(rel, rlen - slen + 1) == s) return 1
+        } else if (substr(p, length(p)) == "/") {
+          plen = length(p)
+          if (rlen >= plen && substr(rel, 1, plen) == p) return 1
+        } else if (rel == p) {
+          return 1
+        }
+      }
+      return 0
+    }
+    BEGIN {
+      na = 0
+      while ((getline aline < allow_file) > 0) {
+        sub(/\r$/, "", aline)
+        if (aline == "" || substr(aline, 1, 1) == "#") continue
+        allow[++na] = aline
+      }
+      close(allow_file)
+      decls_sum = 0; allowed_sum = 0; forbidden_sum = 0
+      prefix = repo_root "/"
+      plen_root = length(prefix)
+    }
+    {
+      if ($0 == "") next
+      if (!match($0, /:[0-9]+:[0-9]+$/)) next
+      f = substr($0, 1, RSTART - 1)
+      if (f == "") next
+      rest = substr($0, RSTART + 1)
+      c = index(rest, ":")
+      matched = substr(rest, 1, c - 1) + 0
+      declarations = substr(rest, c + 1) + 0
+      decls_sum += declarations
+      n = matched - declarations
+      if (n <= 0) next
+      if (substr(f, 1, plen_root) == prefix) {
+        rel = substr(f, plen_root + 1)
+      } else if (substr(f, 1, 2) == "./") {
+        rel = substr(f, 3)
+      } else {
+        rel = f
+      }
+      if (is_allowed(rel)) {
+        allowed_sum += n
+      } else {
+        forbidden_sum += n
+        if (off_file != "") printf "%d %s\n", n, rel >> off_file
+      }
+    }
+    END {
+      printf "%d %d %d\n", decls_sum + 0, allowed_sum + 0, forbidden_sum + 0
+    }
+  ' "$tmp_classified")
+  if [ $? -ne 0 ]; then
+    rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"
+    rmdir "$tmp_scan"
+    echo "ERR"
+    return
+  fi
+  set -- $rt_counts
+  sd_decls=$1
+  sd_allowed=$2
+  sd_forbidden=$3
   rm -f "$tmp_find_raw" "$tmp_rg_raw" "$tmp_find" "$tmp_rg" "$tmp_matches" "$tmp_decls" "$tmp_classified"
   rmdir "$tmp_scan"
   echo "$sd_scanned $((sd_allowed + sd_forbidden)) $sd_allowed $sd_forbidden $sd_decls"
@@ -698,14 +745,34 @@ selftest() {
       rm -rf "$st_dir"; exit 2
     fi
   done
+  # fixture 24: allowlist exact / trailing-slash / suffix: / comments / CRLF
+  # classification plus decls-only subtraction and offender file output.
+  mkdir -p "$st_dir/o/src/prov" "$st_dir/o/src/sub" "$st_dir/o/src/prod"
+  printf 'fn a(): rt_ok1(1)\n' > "$st_dir/o/src/prov/p.spl"
+  printf 'fn b(): rt_ok2(1)\n' > "$st_dir/o/src/sub/item_runtime_leaf.spl"
+  printf 'extern fn rt_decl_only(x: i64)\n' > "$st_dir/o/src/prod/decl_only.spl"
+  printf 'fn c():\n    rt_bad1(1)\n    rt_bad2(2)\n' > "$st_dir/o/src/prod/bad.spl"
+  printf '# comment line\r\nsrc/prov/\r\nsuffix:_runtime_leaf.spl\r\n\r\n' > "$st_dir/o_allow.txt"
+  : > "$st_dir/o.off"
+  r=$(scan_dir "$st_dir/o" "$st_dir/o/src" "$st_dir/o_allow.txt" "$st_dir/o.off")
+  set -- $r
+  if [ "$r" != "4 4 2 2 1" ]; then
+    echo "ERROR — selftest failed: allowlist/offender classification wrong (got '$r', want '4 4 2 2 1')"
+    rm -rf "$st_dir"; exit 2
+  fi
+  st_off_line=$(cat "$st_dir/o.off")
+  if [ "$st_off_line" != "2 src/prod/bad.spl" ]; then
+    echo "ERROR — selftest failed: offender tally mismatch (got '$st_off_line', want '2 src/prod/bad.spl')"
+    rm -rf "$st_dir"; exit 2
+  fi
   rm -rf "$st_dir"
 }
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
   case "${RT_ST_PARITY:-}" in
-    *"NOT EXERCISED"*) echo "PASS — 22 selftest fixture(s) checked, 1 not exercised: $RT_ST_PARITY" ;;
-    *) echo "PASS — 23 selftest fixture(s) checked ($RT_ST_PARITY)" ;;
+    *"NOT EXERCISED"*) echo "PASS — 23 selftest fixture(s) checked, 1 not exercised: $RT_ST_PARITY" ;;
+    *) echo "PASS — 24 selftest fixture(s) checked ($RT_ST_PARITY)" ;;
   esac
   exit 0
 fi

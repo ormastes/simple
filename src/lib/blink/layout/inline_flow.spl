@@ -1,0 +1,139 @@
+# Blink Inline Formatting Context — packs inline items into line boxes.
+#
+# Provides: InlineItemKind, InlineItem, InlineBox, LineBox, InlineLayoutResult,
+#           inline_text, inline_element, estimate_text_width, wrap_text_run,
+#           layout_inline_flow.
+
+enum InlineItemKind:
+    Text
+    InlineElement
+
+class InlineItem:
+    kind: InlineItemKind
+    text: text
+    width: f64
+    height: f64
+    ref_id: i64
+
+class InlineBox:
+    item_id: i64
+    x: f64
+    y: f64
+    width: f64
+    height: f64
+
+class LineBox:
+    boxes: [InlineBox]
+    total_width: f64
+    max_height: f64
+
+class InlineLayoutResult:
+    lines: [LineBox]
+    total_height: f64
+
+fn inline_text(content: text, width: f64, height: f64) -> InlineItem:
+    InlineItem(
+        kind: InlineItemKind.Text,
+        text: content,
+        width: width,
+        height: height,
+        ref_id: 0
+    )
+
+fn inline_element(width: f64, height: f64, ref_id: i64) -> InlineItem:
+    InlineItem(
+        kind: InlineItemKind.InlineElement,
+        text: "",
+        width: width,
+        height: height,
+        ref_id: ref_id
+    )
+
+fn estimate_text_width(content: text, font_size: f64) -> f64:
+    ((content.len() as f64) * font_size * 55.0) / 100.0
+
+fn _split_words(content: text) -> [text]:
+    var words: [text] = []
+    var current = ""
+    var i: i64 = 0
+    val n = content.len()
+    while i < n:
+        val ch = content[i:i + 1]
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if current.len() > 0:
+                words.push(current)
+                current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current.len() > 0:
+        words.push(current)
+    words
+
+fn wrap_text_run(content: text, container_width: f64, font_size: f64, line_height: f64) -> [InlineItem]:
+    val words = _split_words(content)
+    val nw = words.len()
+    if nw == 0:
+        return []
+
+    val space_w = font_size * 0.30
+    var chunks: [InlineItem] = []
+    var cur_text = words[0]
+    var cur_w = estimate_text_width(cur_text, font_size)
+    var i: i64 = 1
+    while i < nw:
+        val w = words[i]
+        val ww = estimate_text_width(w, font_size)
+        val joined_w = cur_w + space_w + ww
+        if joined_w <= container_width:
+            cur_text = cur_text + " " + w
+            cur_w = joined_w
+        else:
+            chunks.push(inline_text(cur_text, cur_w, line_height))
+            cur_text = w
+            cur_w = ww
+        i = i + 1
+    chunks.push(inline_text(cur_text, cur_w, line_height))
+    chunks
+
+fn layout_inline_flow(items: [InlineItem], container_width: f64) -> InlineLayoutResult:
+    val n = items.len()
+    if n == 0:
+        return InlineLayoutResult(lines: [], total_height: 0.0)
+
+    var lines: [LineBox] = []
+    var cur_boxes: [InlineBox] = []
+    var cur_w = 0.0
+    var cur_h = 0.0
+    var total_y = 0.0
+
+    var i: i64 = 0
+    while i < n:
+        val item = items[i]
+        if cur_boxes.len() > 0 and cur_w + item.width > container_width:
+            lines.push(LineBox(boxes: cur_boxes, total_width: cur_w, max_height: cur_h))
+            total_y = total_y + cur_h
+            cur_boxes = []
+            cur_w = 0.0
+            cur_h = 0.0
+
+        cur_boxes.push(InlineBox(
+            item_id: i,
+            x: cur_w,
+            y: total_y,
+            width: item.width,
+            height: item.height
+        ))
+        cur_w = cur_w + item.width
+        if item.height > cur_h:
+            cur_h = item.height
+        i = i + 1
+
+    if cur_boxes.len() > 0:
+        lines.push(LineBox(boxes: cur_boxes, total_width: cur_w, max_height: cur_h))
+        total_y = total_y + cur_h
+
+    InlineLayoutResult(lines: lines, total_height: total_y)
+
+export InlineItemKind, InlineItem, InlineBox, LineBox, InlineLayoutResult
+export inline_text, inline_element, estimate_text_width, wrap_text_run, layout_inline_flow
