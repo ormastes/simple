@@ -376,3 +376,16 @@ turnip probing /dev/dri/renderD128) unrelated to this change. The
 baremetal serial gate itself remains pending a Stage-4 bootstrap
 artifact; the Qualcomm x86_64 source-level guard is now genuinely
 spec-covered.
+
+## Wave 5 Update (2026-11-27) — `fix-implemented-verification-pending`
+
+- **Implemented baremetal subprocess & hosted-GPU probe/create guards (`w5-2-simpleos-kernel-boot`)**:
+  - `src/lib/gc_async_mut/gpu/browser_engine/web_render_backend.spl`: added `web_render_backend_subprocess_refusal_reason(platform, kernel_env, target)` and `_subprocess_guard(context)` before `process_run` in both `_render_html_via_chromium` (returns `[]`) and `show_live_window` (returns `false`), preventing unguarded subprocess traps on baremetal/SimpleOS (`SIMPLE_OS_KERNEL=simpleos`, `platform`, or `SIMPLE_TARGET`).
+  - `src/lib/gc_async_mut/gpu/engine2d/engine.spl`: added `engine2d_is_hosted_hardware_backend` (excluding `"baremetal"`/`"virtio_gpu"`) and `engine2d_baremetal_hardware_refusal(backend_name, platform)`, invoked at entry to `Engine2D.create_requested_backend`, `Engine2D.create_with_backend_fast`, and `Engine2D.probe_backend`, failing closed before any hosted GPU `.create()`/`.init()`/FFI probe runs on baremetal/SimpleOS (covering every candidate post-`rocm` backend such as `qualcomm`, `vulkan`, `opengl`, `opencl`, `directx`, `webgpu`, `intel`, `metal`, `cuda`, `rocm` for cause (c) `FAULT @ 0x49bacXXX`).
+  - `src/lib/gc_async_mut/gpu/engine2d/compute_dispatch.spl`: refactored `ComputeDispatch.select_best()` to delegate to `select_best_for_platform(platform_name())`, skipping `probe_cuda`/`probe_rocm`/`probe_opencl` on baremetal/SimpleOS.
+- **Host specs run post-edit (interpreter, 3-slot semaphore)**:
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_render_backend_baremetal_guard_spec.spl` -> `5 examples, 0 failures`.
+  - `test/01_unit/lib/gpu/engine2d/backend_qualcomm_spec.spl` -> `20 examples, 0 failures`.
+  - `test/01_unit/lib/gc_async_mut/gpu/engine2d/host_bug_a07_baremetal_backend_probe_spec.spl` -> `4 examples, 0 failures`.
+- **Verification pending**: `waiting-for: QEMU SimpleOS serial verification` (run `sh scripts/check/check-simpleos-wm-visible-display-evidence.shs` under Linux/OVMF and confirm `FAULT @ 0x49bacXXX` no longer appears in `serial.log`).
+

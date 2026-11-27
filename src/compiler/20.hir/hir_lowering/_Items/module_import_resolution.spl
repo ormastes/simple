@@ -10,7 +10,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{imported_symbol_local_nam
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ParserModule, ParserImport, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ParserModule, ParserImport, ImportItem, Param, Export}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.hir.hir_lowering.hir_phase_profile.{
@@ -26,11 +26,12 @@ use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
-use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path}
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_scv_snapshot_split_v1, module_surface_package_name, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.{member_access_scope_for_modules}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
@@ -90,9 +91,45 @@ var _priv_import_dir_cache_scope_id: i64 = 0
 var _priv_import_dir_cache_session_id: u32 = 0u32
 val PRIV_IMPORT_DIR_CACHE_MASK: i64 = 4095
 
+fn private_import_norm_path(path: text) -> text:
+    var norm = path.replace("\\", "/")
+    if norm.starts_with("//?/"):
+        norm = norm.substring(4)
+    norm
+
 fn private_import_dir_of(path: text) -> text:
-    val parts = path.split("/")
-    parts[0:parts.len() - 1].join("/")
+    # Strip the trailing segment across both `/` and `\`, preserving earlier
+    # separators so private_import_repo_root matches Windows `get_temp_dir() + "/..."`.
+    val slash_parts = path.split("/")
+    val last_seg = slash_parts[slash_parts.len() - 1]
+    if last_seg.contains("\\"):
+        val bs_parts = last_seg.split("\\")
+        val parent_tail = bs_parts[0:bs_parts.len() - 1].join("\\")
+        if slash_parts.len() == 1:
+            return parent_tail
+        val prefix = slash_parts[0:slash_parts.len() - 1].join("/")
+        if parent_tail == "":
+            return prefix
+        return prefix + "/" + parent_tail
+    slash_parts[0:slash_parts.len() - 1].join("/")
+
+fn private_import_flatten_export_items(exports: [Export]) -> [text]:
+    """Flatten `ModuleSurface.exports` / `ParserModule.exports` (`[Export]`) to `"mod.item"` strings."""
+    var items: [text] = []
+    for exp in exports:
+        for exp_item in exp.items:
+            items = items.push(exp_item)
+    items
+
+fn private_import_is_reexport_item(exports: [text], module_spec: text, item_name: text, has_alias: bool, alias_name: text) -> bool:
+    if exports.len() == 0 or module_spec == "":
+        return false
+    val base_key = module_spec + "." + item_name
+    val aliased_key = if has_alias and alias_name != "": base_key + ":" + alias_name else: ""
+    for exp_item in exports:
+        if exp_item == base_key or (aliased_key != "" and exp_item == aliased_key):
+            return true
+    false
 
 fn private_import_is_test_importer(importer_path: text) -> bool:
     """Mirror of the seed's `is_test_caller` (interpreter_module/module_loader.rs),
@@ -229,7 +266,7 @@ fn private_import_repo_root(module_path: text) -> text:
         if file_exists(marker) or dir_exists(marker):
             found_root = dir
             break
-        if not dir.contains("/"):
+        if not dir.contains("/") and not dir.contains("\\"):
             break
         dir = private_import_dir_of(dir)
     if visited.len() > 0:
@@ -332,13 +369,31 @@ fn private_import_is_baselined(module_path: text, name: text) -> bool:
     """`rel|name` is frozen in the baseline at the repository root that
     contains `module_path`. Only that root's baseline counts; a module outside
     any repository (a scratch fixture) has none, so every pair is new."""
-    val root = private_import_repo_root(module_path)
+    val norm_path = private_import_norm_path(module_path)
+    val (scv_checkout, scv_snapshot, scv_rel) = module_surface_scv_snapshot_split_v1(norm_path)
+    # Try `module_path` first so `_priv_import_dir_cache` keys match Windows
+    # `get_temp_dir() + "/..."` strings in memo tests; fall back to `norm_path` for UNC `//?/`.
+    var root = private_import_repo_root(module_path)
+    if root == "" and norm_path != module_path:
+        root = private_import_repo_root(norm_path)
+    if root == "" and scv_checkout != "":
+        root = private_import_repo_root(scv_checkout + "/_probe")
     if root == "":
         return false
     private_import_baseline_load(root)
     if _priv_import_baseline_keys.len() == 0:
         return false
-    val key = module_path.substring(root.len() + 1) + "|" + name
+    root = private_import_norm_path(root)
+    var rel = ""
+    if scv_snapshot != "" and scv_rel != "":
+        rel = scv_rel
+        while rel.starts_with("/"):
+            rel = rel.substring(1)
+    elif norm_path.starts_with(root + "/"):
+        rel = norm_path.substring(root.len() + 1)
+    else:
+        return false
+    val key = rel + "|" + name
     var index = _priv_import_baseline_buckets[hash_text(key) & PRIV_IMPORT_BASELINE_MASK]
     while index >= 0:
         if _priv_import_baseline_keys[index] == key:
@@ -765,7 +820,8 @@ impl HirLowering:
                 glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
-        self.resolve_import_list(module.imports, module.name, false)
+        val module_exports = private_import_flatten_export_items(module.exports)
+        self.resolve_import_list(module.imports, module.name, false, module_exports)
 
     me resolve_lexical_import(path: text, names: [text], import_lazy: bool, span: Span):
         var items: [ImportItem] = []
@@ -783,7 +839,7 @@ impl HirLowering:
         self.registering_lexical_import = saved_lexical
         self.registering_import_symbols = saved_registering
 
-    me resolve_import_list(imports: [ParserImport], importer_name: text, lexical: bool):
+    me resolve_import_list(imports: [ParserImport], importer_name: text, lexical: bool, module_exports: [text] = []):
         # A module with NO imports has nothing to resolve, so it must not need a
         # registered surface of its own. Requiring one made
         # `HirLowering.with_filename(path).lower_module(parsed)` — the public
@@ -842,6 +898,11 @@ impl HirLowering:
         val importer_owner = if importer_surface_index >= 0:
             self.module_surfaces.surfaces[importer_surface_index].module_name
         else: importer_name
+        val effective_exports: [text] = if module_exports.len() > 0:
+            module_exports
+        elif not lexical and importer_surface_index >= 0:
+            private_import_flatten_export_items(self.module_surfaces.surfaces[importer_surface_index].exports)
+        else: []
         if lexical:
             importer_surface_index = -1
         var import_idx = 0
@@ -1033,8 +1094,10 @@ impl HirLowering:
                         val item_name = item_names[item_idx]
                         val local_name = imported_symbol_local_name(
                             item_name, item_has_alias[item_idx], item_aliases[item_idx])
+                        val is_reexport = private_import_is_reexport_item(
+                            effective_exports, imp.module, item_name, item_has_alias[item_idx], item_aliases[item_idx])
                         if braced_group and self.private_fn_import_denied(
-                                imported_surface, imp.module, item_name, importer_source_path, imp.span):
+                                imported_surface, imp.module, item_name, importer_source_path, imp.span, is_reexport):
                             item_idx = item_idx + 1
                             continue
                         # An explicit named import is a declaration about its
@@ -1120,43 +1183,34 @@ impl HirLowering:
             if module_surface_canonical_path(self.module_filename) != symbol.declaration_source_path_v1:
                 self.error("cannot import explicitly private declaration `" + local_name + "` from another file", span)
 
-    me private_fn_import_denied(imported: ModuleSurface, module_label: text, name: text, importer_path: text, span: Span) -> bool:
+    me private_fn_import_denied(imported: ModuleSurface, module_label: text, name: text, importer_path: text, span: Span, is_reexport: bool = false) -> bool:
         """interp_private_names_selfhost_check_2026-11-09: mirror of the seed
         interpreter's import-time `check_private_use_names`
         (src/compiler_rust/.../interpreter_module/module_loader.rs). A braced
         `use m.{name}` that names a bare (non-pub) top-level `fn` of `m` from a
-        file in a DIFFERENT directory is a visibility violation. A `rel|name`
-        pair frozen in scripts/check/private_import_baseline.txt at the
-        repository root is the seed's `[visibility-warning]` (legacy, ratchets
-        down). Same-directory siblings are the documented compatibility
-        exception; an importer with no directory (logical name, no registered
-        surface) is skipped like the seed's `current_file: None`; a module with
-        any plain `export` list or glob re-export is opaque to the seed
-        (`module_surface_is_opaque`) and skipped here too.
-
-        STAGED like W-HIR-UNDECL-IMPORT-001 (same reason: census non-zero).
-        A non-baselined pair is a recorded warning [W-HIR-PRIVATE-IMPORT-001]
-        by default and a hard error [E-HIR-PRIVATE-IMPORT-001] under
-        SIMPLE_STRICT_PRIVATE_IMPORTS=1. Textual census over the Stage 2
-        (bootstrap_main) and full-CLI (main.spl) closures found 49 distinct
-        non-baselined pairs the seed never reached (listed in the bug doc);
-        a hard default would stop Stage 2 on the first of them. Those 49 were
-        promoted to `pub` and the default flipped in #8456 (2026-11-12); run 14's
-        real-resolver full-CLI build then failed HIR on 78+ more non-baselined
-        importers the textual census missed, so the default is a warning again
-        until the real-resolver census is promoted.
-        Test importers are exempt (owner decision 2026-11-13: "test is
-        special, can access"), with the seed's `is_test_caller` definition
-        (`private_import_is_test_importer`).
+        file in a DIFFERENT directory is a hard error [E-HIR-PRIVATE-IMPORT-001]
+        by default. A `rel|name` pair frozen in
+        scripts/check/private_import_baseline.txt at the repository root (with
+        SCV snapshot prefix normalization) is the seed's `[visibility-warning]`.
+        Exemptions matching seed & HIR visibility rules:
+        - test/** callers (`private_import_is_test_importer`)
+        - same-directory sibling files (with Windows backslash normalization)
+        - importer with no directory segment (logical name, no registered surface)
+        - target modules with any plain `export` list or glob re-export
+        - declared `friend` / same-package `internal_export` symbols
+        - `export use` re-export facades (warn `[W-HIR-PRIVATE-IMPORT-001]`,
+          matching seed `export_handler.rs`).
         Returns true only when the import was rejected (nothing registered)."""
         if private_import_is_test_importer(importer_path):
             return false
-        if not importer_path.contains("/"):
+        val importer_norm = private_import_norm_path(importer_path)
+        if not importer_norm.contains("/"):
             return false
-        val importer_canon = module_surface_canonical_path(importer_path)
-        val imported_canon = module_surface_canonical_path(imported.canonical_path)
-        val importer_dir = if importer_canon != "": private_import_dir_of(importer_canon) else: private_import_dir_of(importer_path)
-        val imported_dir = if imported_canon != "": private_import_dir_of(imported_canon) else: private_import_dir_of(imported.canonical_path)
+        val importer_canon = module_surface_canonical_path(importer_norm)
+        val imported_norm = private_import_norm_path(imported.canonical_path)
+        val imported_canon = module_surface_canonical_path(imported_norm)
+        val importer_dir = if importer_canon != "": private_import_dir_of(importer_canon) else: private_import_dir_of(importer_norm)
+        val imported_dir = if imported_canon != "": private_import_dir_of(imported_canon) else: private_import_dir_of(imported_norm)
         if importer_dir == imported_dir:
             return false
         if imported.exports.len() > 0:
@@ -1170,15 +1224,23 @@ impl HirLowering:
         val callable: ModuleSurfaceCallable = imported.callable_values[pos]
         if callable.visibility != Visibility.Private or callable.is_method or callable.is_extern:
             return false
+        if imported.internal_exports.contains(name):
+            val requester_package = module_surface_package_name_from_name(module_logical_name_from_path(importer_norm))
+            val imported_package = module_surface_package_name(imported)
+            val scope = member_access_scope_for_modules(
+                importer_norm, requester_package, imported_norm, imported_package,
+                imported.friends, true)
+            if scope.same_package or (scope.declared_friend and scope.internally_exported):
+                return false
         if private_import_is_baselined(imported.canonical_path, name):
             self.warning("[visibility-warning] '{name}' is a private fn of module '{module_label}' ({imported.canonical_path}); mark it `pub` or `export` it (imported from {importer_path})", span)
             return false
         val message = "private fn `{name}` of module `{module_label}` ({imported.canonical_path}) is not visible to {importer_path}; mark it `pub` or `export` it"
-        if (hir_module_env_get("SIMPLE_STRICT_PRIVATE_IMPORTS") ?? "") == "1":
-            self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
-            return true
-        self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
-        false
+        if is_reexport:
+            self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
+            return false
+        self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
+        true
 
     me resolve_package_sibling_symbols(module: ParserModule):
         """Directory-package semantics: files in one source directory share a

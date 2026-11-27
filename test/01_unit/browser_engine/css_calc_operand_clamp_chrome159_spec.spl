@@ -1,0 +1,210 @@
+"""
+## Purpose and audience
+Purpose: Pin the calc() edges of the shared CSS length core
+(`css_length_milli`): a function operand (`var()`, `min()`, `atan2()`) may be
+a <number> or a <length>, so `calc(var(--n) * 1px)` is a VALID author margin
+and must not hand a `<p>` back its UA 1em; the constants `pi`, `e`,
+`infinity` and a division by zero resolve; a number factor keeps more than
+three decimals; nesting is capped where Chrome caps it (100 levels); and a
+huge length clamps instead of wrapping i32.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--dump-dom` + inline script
+reading getBoundingClientRect(), 900x2000, `body{margin:0}`,
+`.w{width:400px;padding-top:1px;height:60px;font-size:16px;overflow:hidden}`,
+every inner block `height:10px`, one case per wrapper (61px pitch),
+2026-11-27). UA <p> margin is 16px, so a dropped value would read 61k+17.
+
+| id | declaration                                  | Chrome y / x / w |
+|----|----------------------------------------------|------------------|
+| v1 | <p> --n:5; margin-top:calc(var(--n) * 1px)   | y 6              |
+| v2 | <p> --r:2; margin-top:calc(1rem / var(--r))  | y 70             |
+| v3 | <p> margin-top:calc(min(1,2) * 1px)          | y 124            |
+| v4 | <p> margin-top:calc(pi * 1px)                | y 187.140625     |
+| v5 | <p> margin-top:calc(e * 1px)                 | y 247.703125     |
+| v6 | <p> margin-top:calc(atan2(1px,1px)/1deg*1px) | y 351            |
+| v7 | <p> margin-top:calc(10px / 0)                | y 33554432       |
+| v8 | <p> margin-top:calc(infinity * 1px)          | y 33554432       |
+| k1 | margin-top:calc(48px * 0.6667)               | y 521            |
+| k2 | width:calc(48px * 0.6667)                    | w 32             |
+| d1 | margin-top:calc(40 x `(` 1px + 2px `)`)      | y 614            |
+| d2 | margin-top:calc(99 x `(` ... `)`)            | y 675            |
+| d3 | margin-top:calc(100 x `(` ... `)`) dropped   | y 733            |
+| x1 | width:1e10px                                 | w 33554428       |
+| x2 | margin-left:1e10px                           | x 33554428       |
+| x3 | margin-top:1e10px                            | y 33554432       |
+| x4 | margin-top:-1e10px                           | y -33553452      |
+| r1 | <p> margin-top:calc(10% * 10%) dropped     | y 1054 (UA 16)   |
+| r2 | <p> margin-top:calc(1px * 1vw) dropped     | y 1115 (UA 16)   |
+| r3 | <p> margin-top:calc(1vw + 2) dropped       | y 1176 (UA 16)   |
+| r4 | <p> margin-top:calc(5 / 1vw) dropped       | y 1237 (UA 16)   |
+| r5 | <p> margin-top:calc(2pt * 3)               | y 1290 (8px)     |
+| r6 | <p> margin-top:calc(1in - 90px)            | y 1349 (6px)     |
+| b1 | width:calc(1e13px)                         | w 33554428       |
+| b2 | width:calc(95e11px)                        | w 33554428       |
+| b3 | width:calc(1e13 * 1px)                     | w 33554428       |
+
+v1/v2/v3/v6 need var() substitution and math functions to reach Chrome's
+exact value; this spec pins that they stay AUTHORED (not the UA 1em at
+61k+17), which is what base did.
+x1..x4 and v7/v8 pin the clamp sign and magnitude: width/x by layout
+(> 1e6), vertical margins by the computed `margin_t` (Chrome 159 computes
++-3.35544e+07px). The block cursor itself still wraps i32 milli-px for a
+margin above ~2147483px (base too: `margin-top:30000000px` lands at
+y -64587); that is a layout_engine cause handed to the layout lane.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-LENGTH-NUMBER-002 — calc() function operands are number-or-length, constants and division by zero resolve, nesting caps at 100, huge lengths clamp.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val PAGE: text = "<html><head><style>body{{margin:0}} .w{{width:400px;padding-top:1px;height:60px;font-size:16px;overflow:hidden}} .w div,.w p{{height:10px}}</style></head><body>" +
+    "<div class=w><p id=v1 style=\"--n:5;margin-top:calc(var(--n) * 1px)\"></p></div>" +
+    "<div class=w><p id=v2 style=\"--r:2;margin-top:calc(1rem / var(--r))\"></p></div>" +
+    "<div class=w><p id=v3 style=\"margin-top:calc(min(1,2) * 1px)\"></p></div>" +
+    "<div class=w><p id=v4 style=\"margin-top:calc(pi * 1px)\"></p></div>" +
+    "<div class=w><p id=v5 style=\"margin-top:calc(e * 1px)\"></p></div>" +
+    "<div class=w><p id=v6 style=\"margin-top:calc(atan2(1px, 1px) / 1deg * 1px)\"></p></div>" +
+    "<div class=w><p id=v7 style=\"margin-top:calc(10px / 0)\"></p></div>" +
+    "<div class=w><p id=v8 style=\"margin-top:calc(infinity * 1px)\"></p></div>" +
+    "<div class=w><div id=k1 style=\"margin-top:calc(48px * 0.6667)\"></div></div>" +
+    "<div class=w><div id=k2 style=\"width:calc(48px * 0.6667)\"></div></div>" +
+    "<div class=w><div id=d1 style=\"margin-top:calc(((((((((((((((((((((((((((((((((((((((((1px + 2px)))))))))))))))))))))))))))))))))))))))))\"></div></div>" +
+    "<div class=w><div id=d2 style=\"margin-top:calc((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1px + 2px))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))\"></div></div>" +
+    "<div class=w><div id=d3 style=\"margin-top:calc(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1px + 2px)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))\"></div></div>" +
+    "<div class=w><div id=x1 style=\"width:1e10px\"></div></div>" +
+    "<div class=w><div id=x2 style=\"margin-left:1e10px\"></div></div>" +
+    "<div class=w><div id=x3 style=\"margin-top:1e10px\"></div></div>" +
+    "<div class=w><div id=x4 style=\"margin-top:-1e10px\"></div></div>" +
+    "<div class=w><p id=r1 style=\"margin-top:calc(10% * 10%)\"></p></div>" +
+    "<div class=w><p id=r2 style=\"margin-top:calc(1px * 1vw)\"></p></div>" +
+    "<div class=w><p id=r3 style=\"margin-top:calc(1vw + 2)\"></p></div>" +
+    "<div class=w><p id=r4 style=\"margin-top:calc(5 / 1vw)\"></p></div>" +
+    "<div class=w><p id=r5 style=\"margin-top:calc(2pt * 3)\"></p></div>" +
+    "<div class=w><p id=r6 style=\"margin-top:calc(1in - 90px)\"></p></div>" +
+    "<div class=w><div id=b1 style=\"width:calc(1e13px)\"></div></div>" +
+    "<div class=w><div id=b2 style=\"width:calc(95e11px)\"></div></div>" +
+    "<div class=w><div id=b3 style=\"width:calc(1e13 * 1px)\"></div></div>" +
+    "</body></html>"
+
+fn _f(id: text, field: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, field)
+
+fn _n(id: text, field: text) -> i64:
+    _f(id, field).parse_i64() ?? 0
+
+describe "a function operand keeps the author margin on a UA-margin <p>":
+    it "AC-1: calc(var(--n) * 1px) is authored, not the UA 1em":
+        step("Chrome 159: y 6 (5px); UA 1em would be 17")
+        expect(_f("v1", "y") != "17").to_equal(true)
+
+    it "AC-2: calc(1rem / var(--r)) is authored":
+        step("Chrome 159: y 70 (8px); UA 1em would be 78")
+        expect(_f("v2", "y") != "78").to_equal(true)
+
+    it "AC-3: calc(min(1,2) * 1px) is authored":
+        step("Chrome 159: y 124 (1px); UA 1em would be 139")
+        expect(_f("v3", "y") != "139").to_equal(true)
+
+    it "AC-4: calc(atan2(1px, 1px) / 1deg * 1px) is authored":
+        step("Chrome 159: y 351 (45px); UA 1em would be 322")
+        expect(_f("v6", "y") != "322").to_equal(true)
+
+describe "calc() constants and division by zero":
+    it "AC-5: calc(pi * 1px) is 3.14159px":
+        step("Chrome 159: y 183 + 1 + 3.140625 = 187.14 -> 187")
+        expect(_f("v4", "y")).to_equal("187")
+
+    it "AC-6: calc(e * 1px) is 2.71828px":
+        step("Chrome 159: y 244 + 1 + 2.703125 = 247.70 -> 248")
+        expect(_f("v5", "y")).to_equal("248")
+
+    it "AC-7: calc(10px / 0) is +infinity, clamped":
+        step("Chrome 159: computed margin-top 3.35544e+07px (y 33554432)")
+        expect(_n("v7", "margin_t") > 33554000).to_equal(true)
+
+    it "AC-8: calc(infinity * 1px) is clamped":
+        step("Chrome 159: computed margin-top 3.35544e+07px (y 33554432)")
+        expect(_n("v8", "margin_t") > 33554000).to_equal(true)
+
+describe "calc() number precision":
+    it "AC-9: margin-top calc(48px * 0.6667) is 32.0016px":
+        step("Chrome 159: y 488 + 1 + 32.0016 = 521")
+        expect(_f("k1", "y")).to_equal("521")
+
+    it "AC-10: width calc(48px * 0.6667) is 32px":
+        step("Chrome 159: w 32 (three-decimal truncation gave 31)")
+        expect(_f("k2", "w")).to_equal("32")
+
+describe "calc() nesting depth":
+    it "AC-11: 40 nested parens resolve":
+        step("Chrome 159: y 610 + 1 + 3 = 614")
+        expect(_f("d1", "y")).to_equal("614")
+
+    it "AC-12: 99 nested parens (100 levels) resolve":
+        step("Chrome 159: y 671 + 1 + 3 = 675")
+        expect(_f("d2", "y")).to_equal("675")
+
+    it "AC-13: 100 nested parens (101 levels) are dropped":
+        step("Chrome 159: y 732 + 1 + 0 = 733")
+        expect(_f("d3", "y")).to_equal("733")
+
+describe "a huge length clamps instead of wrapping":
+    it "AC-14: width 1e10px is huge and positive":
+        step("Chrome 159: w 33554428")
+        expect(_n("x1", "w") > 1000000).to_equal(true)
+
+    it "AC-15: margin-left 1e10px is huge and positive":
+        step("Chrome 159: x 33554428")
+        expect(_n("x2", "x") > 1000000).to_equal(true)
+
+    it "AC-16: margin-top 1e10px is huge and positive":
+        step("Chrome 159: computed margin-top 3.35544e+07px (y 33554432)")
+        expect(_n("x3", "margin_t") > 33554000).to_equal(true)
+
+    it "AC-17: margin-top -1e10px is huge and negative":
+        step("Chrome 159: computed margin-top -3.35544e+07px (y -33553452)")
+        expect(_n("x4", "margin_t") < -33554000).to_equal(true)
+
+describe "a real length unit keeps calc() type checking":
+    it "AC-18: calc(10% * 10%) is dropped, the <p> keeps its UA 1em":
+        step("Chrome 159: y 1037 + 1 + 16 = 1054")
+        expect(_f("r1", "y")).to_equal("1054")
+
+    it "AC-19: calc(1px * 1vw) is dropped":
+        step("Chrome 159: y 1098 + 1 + 16 = 1115")
+        expect(_f("r2", "y")).to_equal("1115")
+
+    it "AC-20: calc(1vw + 2) is dropped":
+        step("Chrome 159: y 1159 + 1 + 16 = 1176")
+        expect(_f("r3", "y")).to_equal("1176")
+
+    it "AC-21: calc(5 / 1vw) is dropped":
+        step("Chrome 159: y 1220 + 1 + 16 = 1237")
+        expect(_f("r4", "y")).to_equal("1237")
+
+    it "AC-22: calc(2pt * 3) is a valid authored margin":
+        step("Chrome 159: y 1290 (8px); UA 1em would be 1298")
+        expect(_f("r5", "y") != "1298").to_equal(true)
+
+    it "AC-23: calc(1in - 90px) is a valid authored margin":
+        step("Chrome 159: y 1349 (6px); UA 1em would be 1359")
+        expect(_f("r6", "y") != "1359").to_equal(true)
+
+describe "a huge calc() number clamps instead of wrapping":
+    it "AC-24: width calc(1e13px) clamps":
+        step("Chrome 159: w 33554428 (it read 1)")
+        expect(_n("b1", "w") > 1000000).to_equal(true)
+
+    it "AC-25: width calc(95e11px) clamps":
+        step("Chrome 159: w 33554428 (it read 95)")
+        expect(_n("b2", "w") > 1000000).to_equal(true)
+
+    it "AC-26: width calc(1e13 * 1px) clamps":
+        step("Chrome 159: w 33554428 (it read 1)")
+        expect(_n("b3", "w") > 1000000).to_equal(true)

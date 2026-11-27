@@ -1,0 +1,92 @@
+# Host verification spec for SimpleOS/baremetal subprocess & GPU hardware guards
+# Bug: doc/08_tracking/bug/simpleos_baremetal_backend_resolve_empty_override_rt_process_run_trap_2026-08-11.md
+# @req REQ-SSPEC-GPU
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set}
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{
+    WebRenderBackend,
+    web_render_backend_subprocess_refusal_reason
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D, engine2d_baremetal_hardware_refusal}
+use std.gc_async_mut.gpu.engine2d.compute_dispatch.{ComputeDispatch}
+use std.gpu.engine2d.backend_probe.{BackendStatus}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "SimpleOS baremetal web_render_backend and Engine2D hardware guards":
+    it "refuses subprocess execution on baremetal or SimpleOS targets while permitting hosted OS":
+        step("check subprocess refusal predicate across SimpleOS and hosted identities")
+        val simpleos_reason = web_render_backend_subprocess_refusal_reason(
+            "x86_64-baremetal-simpleos", "", "")
+        expect(simpleos_reason.len()).to_be_greater_than(0)
+        expect(simpleos_reason).to_contain("baremetal/SimpleOS")
+
+        val env_kernel_reason = web_render_backend_subprocess_refusal_reason(
+            "linux", "simpleos", "")
+        expect(env_kernel_reason.len()).to_be_greater_than(0)
+
+        val target_reason = web_render_backend_subprocess_refusal_reason(
+            "linux", "", "x86_64-unknown-none")
+        expect(target_reason.len()).to_be_greater_than(0)
+
+        val hosted_reason = web_render_backend_subprocess_refusal_reason(
+            "linux", "", "x86_64-unknown-linux-gnu")
+        expect(hosted_reason).to_equal("")
+
+    it "prevents WebRenderBackend chromium paths from calling process_run when SIMPLE_OS_KERNEL=simpleos":
+        step("exercise chromium render and show_live_window under SIMPLE_OS_KERNEL=simpleos")
+        val prev_kernel = env_get("SIMPLE_OS_KERNEL") ?? ""
+        env_set("SIMPLE_OS_KERNEL", "simpleos")
+
+        val backend = WebRenderBackend.create("chromium", 32, 32)
+        val pixels = backend.render_html_to_pixels("<p>SimpleOS</p>")
+        val window_opened = backend.show_live_window("index.html", 32, 32, "SimpleOS")
+
+        env_set("SIMPLE_OS_KERNEL", prev_kernel)
+
+        expect(pixels.len()).to_equal(0)
+        expect(window_opened).to_equal(false)
+
+    it "fails closed before hosted GPU probe/create on baremetal SimpleOS while allowing CPU/software":
+        step("check engine2d_baremetal_hardware_refusal across GPU and CPU backends")
+        val refused_backends = [
+            "cuda", "rocm", "vulkan", "metal", "qualcomm",
+            "opengl", "opencl", "directx", "webgpu", "intel"
+        ]
+        var idx = 0
+        while idx < refused_backends.len():
+            val name = refused_backends[idx]
+            val refusal = engine2d_baremetal_hardware_refusal(name, "x86_64-baremetal-simpleos")
+            expect(refusal).to_not_equal(nil)
+            val unwrapped = refusal.unwrap()
+            expect(unwrapped.status).to_equal(BackendStatus.Unavailable)
+            expect(unwrapped.reason).to_contain("disabled on baremetal/SimpleOS")
+            idx = idx + 1
+
+        expect(engine2d_baremetal_hardware_refusal("software", "x86_64-baremetal-simpleos")).to_equal(nil)
+        expect(engine2d_baremetal_hardware_refusal("cpu", "x86_64-baremetal-simpleos")).to_equal(nil)
+        expect(engine2d_baremetal_hardware_refusal("baremetal", "x86_64-baremetal-simpleos").is_none()).to_equal(true)
+        expect(engine2d_baremetal_hardware_refusal("virtio_gpu", "x86_64-baremetal-simpleos").is_none()).to_equal(true)
+        expect(engine2d_baremetal_hardware_refusal("native", "x86_64-baremetal-simpleos").is_none()).to_equal(true)
+        expect(engine2d_baremetal_hardware_refusal("virtio", "x86_64-baremetal-simpleos").is_none()).to_equal(true)
+        expect(engine2d_baremetal_hardware_refusal("vulkan", "linux")).to_equal(nil)
+
+    it "guards Engine2D.create_with_backend_fast before initializing Metal on baremetal SimpleOS":
+        step("verify create_with_backend_fast checks engine2d_baremetal_hardware_refusal prior to MetalBackend.create")
+        val src = (rt_file_read_text("src/lib/gc_async_mut/gpu/engine2d/engine.spl") ?? "").replace("\r\n", "\n")
+        val fn_pos = src.find("static fn create_with_backend_fast(") ?? -1
+        val guard_pos = src.find("engine2d_baremetal_hardware_refusal(requested_backend, platform_name())", fn_pos) ?? -1
+        val metal_pos = src.find("var metal = MetalBackend.create()", guard_pos) ?? -1
+        expect(fn_pos).to_be_greater_than(0)
+        expect(guard_pos).to_be_greater_than(fn_pos)
+        expect(metal_pos).to_be_greater_than(guard_pos)
+
+    it "skips hosted GPU probes in ComputeDispatch.select_best_for_platform on baremetal SimpleOS":
+        step("select best compute backend for x86_64-baremetal-simpleos")
+        val dispatch = ComputeDispatch.create()
+        val res = dispatch.select_best_for_platform("x86_64-baremetal-simpleos")
+        expect(res.selected_name == "cuda").to_equal(false)
+        expect(res.selected_name == "rocm").to_equal(false)
+        expect(res.selected_name == "opencl").to_equal(false)
+        expect(res.is_available()).to_equal(true)
