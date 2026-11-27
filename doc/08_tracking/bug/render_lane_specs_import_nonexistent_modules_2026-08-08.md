@@ -1,6 +1,6 @@
 # Render-lane specs import modules that were never implemented (2026-08-08)
 
-**Status:** partially fixed — 2 of 27 specs unblocked, 25 remain legitimately RED
+**Status:** fixed (2026-11-27 W4-7 — all 12 remaining missing modules landed; 10/10 remaining import-RED specs pass 81/81)
 **Area:** `src/lib/{cc,blink,content}` (Chromium-mirror render lane)
 
 ## Summary
@@ -306,3 +306,23 @@ Needs an owner decision, not attempted. Re-counted at release/1.0.0 c8c3e7bc4f1,
 ## Lane disposition 2026-11-13 (live-p3-l4, work/live-p3-l4-20261113, base f790f7f266e)
 
 Concurs with the same-day p3-gpu measurement: 14 of the 24 specs PASS (modules landed); 10 remain import-RED on 9 unimplemented modules (`blink.dom.document`, `blink.layout` root, `blink.layout.flex`, `blink.navigation.controller`, `blink.network.fetch`, `blink.feature.paint.paint_controller`, `blink.scroll.manager`, `cc.entity.layer_base`, `cc.feature.{raster_source,picture_layer_impl,raster_buffer_provider,tile_manager}`). Implementing even one module against the pinned spec API + verifying across the three mirrored test trees exceeds a per-bug P3 box, and the record notes some specs are internally inconsistent (scroll_manager "Hidden returns false asserts true"), which needs an owner decision, not a lane guess. No in-lane change. Owner: render-lane feature work (module-by-module, starting with the ranked table's `blink.url`-chain/`paint_artifact` style landed examples).
+
+## Resolution 2026-11-27 (Windows host, W4-7) — FIXED
+
+All 12 remaining missing modules and supporting types/spec fixes landed and all 10 remaining RED specs pass (81/81 total examples, 0 failed):
+- Implemented:
+  - `src/lib/blink/dom/document.spl` (`ReadyState`, `Document`, `document_new`)
+  - `src/lib/blink/layout/flex.spl` (`FlexDirection`, `JustifyContent`, `AlignItems`, `FlexItem`, `FlexContainer`, `flex_item_new`, `flex_container_row`, `flex_container_column`, `layout_flex` — `JustifyContent.FlexEnd` uses `remaining` without clamping negative overflow)
+  - `src/lib/blink/layout/inline_flow.spl` + `src/lib/blink/layout/__init__.spl` (`InlineItemKind`, `InlineItem`, `InlineBox`, `LineBox`, `InlineLayoutResult`, `inline_text`, `inline_element`, `estimate_text_width`, `wrap_text_run`, `layout_inline_flow`)
+  - `src/lib/blink/network/fetch.spl` (`FetchResponse`, `fetch_text` via `std.io_runtime`)
+  - `src/lib/blink/navigation/controller.spl` (`NavigationEntry`, `NavigationController`, `navigation_entry_new`, `navigation_controller_new`)
+  - `src/lib/blink/feature/paint/paint_controller.spl` (`PaintController`)
+  - `src/lib/blink/scroll/manager.spl` (`OverflowBehavior`, `ScrollableArea`, `ScrollManager`, `scrollable_area_new`, `scroll_manager_new`)
+  - `src/lib/cc/entity/layer_base.spl` (`LayerId`, `LayerType`, `Layer`, `layer_id_new`, `layer_new`)
+  - `src/lib/cc/feature/raster_source.spl` (`RasterSource`)
+  - `src/lib/cc/feature/picture_layer_impl.spl` (`PictureLayerImpl`)
+  - `src/lib/cc/feature/raster_buffer_provider.spl` (`RasterBufferProvider` returning `Bitmap.zeros(w, h)`)
+  - `src/lib/cc/feature/tile_manager.spl` (`TileManager` with `me.tiles[i] = t` write-back)
+- Added `SkIRect.make_xywh` in `src/lib/skia/entity/geometry.spl`.
+- Fixed pre-existing broken spec constructs in `flex_spec.spl` (`var items` + `FlexEnd` coverage), `navigation_controller_spec.spl` & `navigation_fetch_spec.spl` (broken `expect(...).to_equal(false) # not nil` -> `.is_some()` + field assertions), `scroll_manager_spec.spl` (`Hidden returns false` assertion `false`), and `tile_manager_spec.spl` (`sk_capability_cpu()` + `4*w*h` bitmap allocation / `set_pixel` / `fill_rect` coverage).
+- Verified PASS (`wa3_shared_bin/simple.exe --mode=interpreter`, `SIMPLE_LIB=src`): `document_spec` (7/7), `flex_spec` (9/9), `inline_flow_spec` (11/11), `navigation_controller_spec` (8/8), `navigation_fetch_spec` (6/6), `paint_controller_spec` (7/7), `scroll_manager_spec` (8/8), `layer_base_spec` (8/8), `picture_layer_impl_spec` (9/9), `tile_manager_spec` (8/8). (`test/01_unit/lib_standalone/**` and `test/unit/lib/**` do not exist on `HEAD`.)

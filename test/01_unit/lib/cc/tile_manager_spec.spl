@@ -4,11 +4,13 @@ use std.spipe.*
 use std.cc.entity.tile.{Tile, TileKey, TilePriority}
 use std.cc.feature.raster_buffer_provider.{RasterBufferProvider}
 use std.cc.feature.tile_manager.{TileManager}
-use std.skia.entity.geometry.{SkIRect}
-use std.skia.capability.{SkCapability}
+use std.skia.entity.geometry.{SkIRect, SkRect}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.backend.cpu.raster_prims.{fill_rect}
+use std.skia.capability.{SkCapability, sk_capability_cpu}
 
 fn make_manager() -> TileManager:
-    val rp = RasterBufferProvider.new(SkCapability.Software)
+    val rp = RasterBufferProvider.new(sk_capability_cpu())
     TileManager.new(rp)
 
 fn make_tile(layer_id: i32, i: i32, j: i32, priority: TilePriority) -> Tile:
@@ -55,6 +57,34 @@ describe "TileManager":
             expect(mgr.ready_count()).to_equal(1)
             mgr.invalidate_tile(key)
             expect(mgr.ready_count()).to_equal(0)
+
+        it "schedule_tasks allocates 4*w*h bitmap writable via set_pixel and fill_rect":
+            var mgr = make_manager()
+            val t = make_tile(1, 0, 0, TilePriority.NowBin)
+            mgr.add_tile(t)
+            mgr.schedule_tasks()
+            expect(mgr.ready_count()).to_equal(1)
+            val bmp = mgr.tiles[0].bitmap
+            expect(bmp.width).to_equal(256)
+            expect(bmp.height).to_equal(256)
+            expect(bmp.pixels.len()).to_equal(4 * 256 * 256)
+            bmp.set_pixel(1, 2, SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0))
+            val set_idx = (2 * 256 + 1) * 4
+            expect(bmp.pixels[set_idx] as i64).to_equal(255)
+            expect(bmp.pixels[set_idx + 3] as i64).to_equal(255)
+            fill_rect(bmp, SkRect(left: 4.0, top: 3.0, right: 8.0, bottom: 7.0), SkColor4f(r: 0.0, g: 1.0, b: 0.0, a: 1.0))
+            val rect_idx = (4 * 256 + 5) * 4
+            expect(bmp.pixels[rect_idx + 1] as i64).to_equal(255)
+            expect(bmp.pixels[rect_idx + 3] as i64).to_equal(255)
+
+        it "allocate_tile_bitmap returns 4*w*h buffer safe for pixel writes":
+            val rp = RasterBufferProvider.new(sk_capability_cpu())
+            val bmp = rp.allocate_tile_bitmap(8, 6)
+            expect(bmp.pixels.len()).to_equal(4 * 8 * 6)
+            bmp.set_pixel(0, 0, SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: 1.0))
+            fill_rect(bmp, SkRect(left: 2.0, top: 1.0, right: 5.0, bottom: 4.0), SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 1.0))
+            expect(bmp.pixels[0] as i64).to_equal(255)
+            expect(bmp.pixels[(2 * 8 + 3) * 4 + 2] as i64).to_equal(255)
 
     context "counts":
         it "ready_count + pending_count equals tile count":

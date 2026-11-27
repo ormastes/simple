@@ -35,3 +35,23 @@ Fixed and verified in W2-3:
 - `test/01_unit/app/ui/backend_matrix_spec.spl`: 10/10 PASS (`src/app/ui.render/_TuiWidgets/extended_widgets.spl` adds `tui_renders_own_children` including `"dropdown"`, `"table"`, `"radio"`, etc. so `render_tui_tree` does not re-render child widgets over self-rendering widgets; `backend_matrix_spec.spl` uses `480x40` TUI viewport matching `nav_panel width: 240` and adds a radio group marker test).
 - Re-verified adjacent UI/TUI specs with zero regressions: `ui/ws_handler_spec.spl` 13/13 PASS, `ui/tui_cli_wiring_spec.spl` 7/7 PASS, `test/03_system/gui/tui_screen_spec.spl` 11/11 PASS, `backend_matrix_{web,tauri,electron}_spec.spl` 1/1 PASS each.
 - Remaining outside W2-3 / host scope: `browser/browser_render_lane_spec` (in excluded `simple_web_html_layout_renderer.spl`), `backend_matrix_browser_spec` (1/2 fails Engine2D GPU backend expectation software vs cuda/rocm/opencl), and `slang_pack/main_spec` (fixture). Bug remains open.
+
+## Progress 2026-11-27 (Windows host, W4-7)
+
+- Verified PASS (`wa3_shared_bin/simple.exe --mode=interpreter`, `SIMPLE_LIB=src`):
+  - `test/01_unit/app/browser/browser_render_lane_spec.spl` (12/12 PASS)
+  - `test/01_unit/app/ui/backend_matrix_spec.spl` (10/10 PASS)
+  - `test/01_unit/app/ui/session_spec.spl` (23/23 PASS)
+  - `test/01_unit/app/ui/ws_handler_spec.spl` (13/13 PASS)
+  - `test/01_unit/app/ui/wm_runtime_bridge_spec.spl` (6/6 PASS)
+  - `test/01_unit/app/serial_mcp/serial_mcp_spec.spl` (17/17 PASS)
+  - `test/01_unit/app/sj/forbidden_verbs_spec.spl` (28/28 PASS)
+  - `test/01_unit/app/test_daemon/test_daemon_mcdc_request_spec.spl` (8/8 PASS)
+  - `test/01_unit/app/test_runner/args_spec.spl` (103/103 PASS)
+  - `test/01_unit/app/test_runner/types_spec.spl` (36/36 PASS)
+  - `test/01_unit/app/tooling/compile_commands_spec.spl` (41/41 PASS)
+  - `test/01_unit/app/slang_pack/main_spec.spl` (5/5 PASS; fixed the malformed-safetensors test to actually write 12 invalid bytes `[4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0x42u8, 0x41u8, 0x44u8, 0x21u8]` to `/tmp/svllm_a2_cli_bad.safetensors` so it hits `parse_safetensors_header` error `malformed safetensors` instead of missing-file/short-read, and clean up `/tmp/svllm_a2_cli_*` scratch artifacts)
+- Remaining FAILs (honest environment / hardware / sparse-checkout constraints; row stays `open`):
+  - `test/01_unit/app/ui/backend_matrix_browser_spec.spl` (1/2 PASS, 1 FAIL): `keeps canonical Engine2D backend selection visible through the browser adapter` expects `cuda`/`rocm`/`opencl`/`vulkan` from `BrowserBackend.create`, but `resolve_gpu_backend` falls back to `"software"` on hosts without GPU hardware/drivers (`simd_cpu` -> `cpu_simd` passes).
+  - `test/01_unit/app/tooling/test_runner_simple_spec.spl` (68/74 PASS, 6 FAIL): only `Simple Test Runner Recursion Guard` fails because it reads `src/compiler_rust/**`, excluded from this slim sparse checkout cone.
+  - `test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl` (7/8 PASS, 1 FAIL): `finds at least one markdown code block in this repository` scans `./README*.md`, `doc/*.md`, and `doc/07_guide/**/*.md`, excluded from this slim sparse checkout cone.
