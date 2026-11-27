@@ -28,8 +28,3 @@ pub fn has_script_statements(items: &[Node]) -> bool {
         )
     })
 }
-
-/// Attribute `wrap_entry_script_as_main` puts on the `main` it synthesizes
-/// from a script's top-level statements, so HIR lowering can tell a script
-/// unit (where `any` is permitted) from a compiled module.
-pub const SCRIPT_ENTRY_ATTR: &str = "__script_entry";

@@ -20,7 +20,6 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::{GenericIdentityParamSpec, Lowerer};
 use crate::hir::types::{HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 
-use crate::pipeline::script_detection::SCRIPT_ENTRY_ATTR;
 
 fn is_numeric(ty: TypeId) -> bool {
     matches!(
@@ -122,37 +121,8 @@ impl Lowerer {
         }
     }
 
-    /// Whether the unit's entry is a script: its `main` was synthesized from
-    /// top-level statements (`wrap_entry_script_as_main`, the spec entry), or,
-    /// on the run lane only, it has executable top-level statements and no
-    /// `main` of its own (that lane lowers such a unit and then hands it to
-    /// the interpreter).
-    pub(super) fn is_script_entry(&self, module: &ast::Module) -> bool {
-        let mut has_entry_main = false;
-        let mut has_statement = false;
-        for item in &module.items {
-            match item {
-                Node::Function(f) if f.attributes.iter().any(|a| a.name == SCRIPT_ENTRY_ATTR) => return true,
-                Node::Function(f) if f.name == "main" => {
-                    has_entry_main |= Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str())).is_none();
-                }
-                Node::Expression(_)
-                | Node::Assignment(_)
-                | Node::If(_)
-                | Node::Match(_)
-                | Node::For(_)
-                | Node::While(_)
-                | Node::Loop(_)
-                | Node::With(_)
-                | Node::Context(_) => has_statement = true,
-                _ => {}
-            }
-        }
-        self.mainless_unit_is_script && has_statement && !has_entry_main
-    }
-
     /// `any` is permitted where the code under lowering is inside `unsafe:`
-    /// or belongs to a script entry (top-level statements; not a module).
+    /// or belongs to a script entry file (not to a module it imports).
     fn any_is_permitted(&self, ctx: &FunctionContext) -> bool {
         ctx.unsafe_depth > 0 || (self.entry_is_script && self.current_function_owner.is_none())
     }
@@ -233,10 +203,16 @@ impl Lowerer {
             return Ok(());
         };
         let function = self.current_function_name.clone().unwrap_or_default();
+        let file = (self.current_function_owner.clone())
+            .or_else(|| self.current_file.as_ref().map(|path| path.display().to_string()))
+            .unwrap_or_default();
+        let line = self.current_function_line.unwrap_or(0);
+        let location = format!("{}:{line}", file.trim_start_matches(r"\\?\"));
         let error = LowerError::UninferredType {
             origin,
             usage: usage.to_string(),
             function,
+            location,
         };
         // Every site of the unit is reported together once all bodies are
         // lowered (`judge_pending_uninferred_uses`).
@@ -244,19 +220,30 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Once every body is lowered: report every recorded use and fail with the
-    /// first. A use of a forward-referenced callee counts unless the callee
-    /// turned out to be a procedure.
+    /// Once every body is lowered: report every recorded use, as a warning by
+    /// default and as an error (failing with the first) under
+    /// `SIMPLE_STRICT_ANY=1`. A use of a forward-referenced callee counts
+    /// unless the callee turned out to be a procedure.
     pub(crate) fn judge_pending_uninferred_uses(&mut self) -> LowerResult<()> {
         let mut first = None;
+        let mut reported = std::collections::HashSet::new();
         for (callee, error) in std::mem::take(&mut self.pending_uninferred_uses) {
             let is_value = match &callee {
                 Some(callee) => self.unannotated_return_fns.get(callee) == Some(&Some(true)),
                 None => true,
             };
-            if is_value {
-                eprintln!("error[uninferred-any]: {error}");
+            if !is_value {
+                continue;
+            }
+            let text = error.to_string();
+            if !reported.insert(text.clone()) {
+                continue;
+            }
+            if self.strict_any {
+                eprintln!("error[uninferred-any]: {text}");
                 first.get_or_insert(error);
+            } else {
+                eprintln!("warning[uninferred-any]: {}", text.trim_start_matches("SIMPLE_JIT_STRICT: "));
             }
         }
         first.map_or(Ok(()), Err)

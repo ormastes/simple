@@ -213,7 +213,6 @@ pub fn lower_with_context_lenient_project_hint_and_duplicate_structs(
     lowerer.set_strict_mode(false);
     lowerer.set_lenient_types(true);
     lowerer.set_duplicate_global_struct_defs(std::sync::Arc::new(duplicate_struct_defs));
-    lowerer.set_mainless_unit_is_script(true);
     // This is the JIT run lane: product code must fail closed on a private fn
     // of another directory here too. The caller drains the findings with
     // `take_private_ref_violations` whether or not lowering succeeds.

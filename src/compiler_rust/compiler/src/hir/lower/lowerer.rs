@@ -346,11 +346,11 @@ pub struct Lowerer {
     /// lowered, error), judged once every body is lowered (a procedure's call
     /// is `()`, not an uninferred value).
     pub(super) pending_uninferred_uses: Vec<(Option<String>, super::error::LowerError)>,
-    /// The entry module is a script (top-level statements wrapped as `main`).
+    /// The entry file is a script by file kind (`.shs` / `.sscript`).
     pub(super) entry_is_script: bool,
-    /// Run lane: a unit with top-level statements and no `main` is handed to
-    /// the interpreter after lowering, so it is a script too.
-    pub(super) mainless_unit_is_script: bool,
+    /// Untyped values at typed uses are errors (`SIMPLE_STRICT_ANY=1`), not
+    /// the default warnings.
+    pub(super) strict_any: bool,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
     /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
@@ -561,7 +561,7 @@ impl Lowerer {
             unannotated_return_fns: HashMap::new(),
             pending_uninferred_uses: Vec::new(),
             entry_is_script: false,
-            mainless_unit_is_script: false,
+            strict_any: std::env::var_os("SIMPLE_STRICT_ANY").is_some_and(|v| v != "0"),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -675,7 +675,7 @@ impl Lowerer {
             unannotated_return_fns: HashMap::new(),
             pending_uninferred_uses: Vec::new(),
             entry_is_script: false,
-            mainless_unit_is_script: false,
+            strict_any: std::env::var_os("SIMPLE_STRICT_ANY").is_some_and(|v| v != "0"),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -812,7 +812,7 @@ impl Lowerer {
             unannotated_return_fns: HashMap::new(),
             pending_uninferred_uses: Vec::new(),
             entry_is_script: false,
-            mainless_unit_is_script: false,
+            strict_any: std::env::var_os("SIMPLE_STRICT_ANY").is_some_and(|v| v != "0"),
             global_struct_defs: None,
             global_struct_field_defaults: None,
             unique_global_struct_owners: None,
@@ -856,10 +856,10 @@ impl Lowerer {
         self.lenient_types = lenient;
     }
 
-    /// Run lane only: treat a mainless unit with top-level statements as a
-    /// script (see `implicit_generic.rs`).
-    pub fn set_mainless_unit_is_script(&mut self, script: bool) {
-        self.mainless_unit_is_script = script;
+    /// Make an untyped value at a typed use an error instead of a warning
+    /// (the `SIMPLE_STRICT_ANY=1` behaviour; see `implicit_generic.rs`).
+    pub fn set_strict_any(&mut self, strict: bool) {
+        self.strict_any = strict;
     }
 
     /// Attribute a name that the `lenient_types` fallback is about to lower to

@@ -6,12 +6,25 @@ use crate::hir::lower::{LowerResult, Lowerer};
 use crate::hir::types::{HirExprKind, HirModule, HirStmt, HirType, TypeId};
 use simple_parser::Parser;
 
-/// The run/JIT lane's lowering mode (unannotated parameters are accepted).
+/// The run/JIT lane's lowering mode (unannotated parameters are accepted),
+/// with untyped uses as errors (`SIMPLE_STRICT_ANY=1`).
 fn lower_run_lane(source: &str) -> LowerResult<HirModule> {
+    lower_with(source, true)
+}
+
+fn lower_with(source: &str, strict_any: bool) -> LowerResult<HirModule> {
     let module = Parser::new(source).parse().expect("parse failed");
     let mut lowerer = Lowerer::new();
     lowerer.set_lenient_types(true);
+    lowerer.set_strict_any(strict_any);
     lowerer.lower_module(&module)
+}
+
+#[test]
+fn untyped_use_is_a_warning_unless_strict() {
+    let source = "fn add(a, b):\n    a + b\nfn probe() -> i64:\n    0\n";
+    lower_with(source, false).expect("default rollout stage: warning only");
+    assert!(lower_with(source, true).is_err());
 }
 
 fn local_ty(module: &HirModule, function: &str, local: &str) -> TypeId {
@@ -117,16 +130,6 @@ fn unsafe_and_annotated_uses_stay_permitted() {
 }
 
 #[test]
-fn script_entry_keeps_dynamic_typing() {
-    let source = "fn add(a, b):\n    a + b\nval total = add(1, 2)\nprint(total + 1)\n";
-    let module = Parser::new(source).parse().expect("parse failed");
-    let wrapped = crate::pipeline::native_project::wrap_entry_script_as_main(module, false);
-    let mut lowerer = Lowerer::new();
-    lowerer.set_lenient_types(true);
-    lowerer.lower_module(&wrapped).expect("script mode permits `any`");
-}
-
-#[test]
 fn unannotated_procedure_call_is_not_an_uninferred_value() {
     let die = "fn die(msg: text):\n    print(msg)\n";
     let probe = "enum K:\n    A\n    B\n    C\nfn probe(xs: [f64], k: K) -> i64:\n    val r = match k:\n        case K.A: xs\n        case K.B: die(\"died\")\n        case K.C: xs\n    r.len()\n";
@@ -142,17 +145,24 @@ fn forward_referenced_unannotated_function_is_still_rejected() {
 }
 
 #[test]
-fn mainless_unit_with_top_level_statements_is_a_script() {
+fn script_mode_is_the_entry_file_kind() {
+    // `.shs` / `.sscript` entries are scripts; a `.spl` unit is compiled code
+    // whatever its top-level statements look like (spec files included).
     let source = "fn add(a, b):\n    a + b\nprint(add(1, 2) + 1)\n";
-    let module = Parser::new(source).parse().expect("parse failed");
-    let mut lowerer = Lowerer::new();
-    lowerer.set_lenient_types(true);
-    lowerer.set_mainless_unit_is_script(true);
-    lowerer.lower_module(&module).expect("a script unit keeps dynamic typing on the run lane");
-    // Per-module lanes: a module with a top-level statement is not a script.
-    rejected(source);
-    let module_with_main = "fn add(a, b):\n    a + b\nfn main():\n    print(add(1, 2))\n";
-    rejected(module_with_main);
+    let lower_as = |file: &str| {
+        let module = Parser::new(source).parse().expect("parse failed");
+        let path = std::path::PathBuf::from(file);
+        let resolver = crate::module_resolver::ModuleResolver::single_file(&path);
+        let mut lowerer = Lowerer::with_module_resolver(resolver, path);
+        lowerer.set_strict_mode(false);
+        lowerer.set_lenient_types(true);
+        lowerer.set_strict_any(true);
+        lowerer.lower_module(&module)
+    };
+    lower_as("/tmp/tool.shs").expect("a script file keeps dynamic typing");
+    lower_as("/tmp/tool.sscript").expect("a script file keeps dynamic typing");
+    assert!(lower_as("/tmp/tool.spl").is_err());
+    assert!(lower_as("/tmp/tool_spec.spl").is_err());
 }
 
 #[test]
