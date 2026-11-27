@@ -2,7 +2,7 @@
 
 Policy (owner): Python only up to a built+verified Phase 2; p3+ is pure Simple. See `.claude/rules/bootstrap.md` "Python phase policy".
 
-Scope: `git ls-files '*.py'` minus `vendor/` and `test/05_perf/fixtures/**` at `origin/release/1.0.0` `a4c98d2afb7`: **103 files** (the task estimate of ~215 predates PR #11828 / `02cd694e250` and the 2026-11-26/27 port lanes, which removed ~110). Companion tracker: `doc/08_tracking/bug/repo_hygiene_forbidden_extension_debt_2026-11-26.md`.
+Scope: `git ls-files '*.py'` minus `vendor/` and `test/05_perf/fixtures/**` at `origin/release/1.0.0` `a4c98d2afb7`: **103 files**, plus `sdk-observer-evidence-v1.py` which landed after that tip (104). The task estimate of ~215 predates PR #11828 / `02cd694e250` and the 2026-11-26/27 port lanes. Companion tracker: `doc/08_tracking/bug/repo_hygiene_forbidden_extension_debt_2026-11-26.md`.
 
 Phase rule: pre-p2 = seed build, stage2 build, stage2 admission / sanity / version admission, hello-sanity, phase1 test waves. p3+ = stage3/stage4, test runner, repo gates, test oracles, perf/dev tools. CI-run gates must get `.shs` twins (GitHub runners have no `bin/simple`).
 
@@ -13,9 +13,9 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 - ARCHIVE_EVIDENCE: 5
 - BOTH: 3
 - DEAD: 1
-- DEAD_CANDIDATE: 8
+- DEAD_CANDIDATE: 9
 - OWNED_HELLO_SANITY: 13
-- P3_PLUS_ONLY: 53
+- P3_PLUS_ONLY: 53 (+1 sdk-observer, -1 durable_wal_fsync)
 - PRE_P2_ONLY: 20
 
 ## Files
@@ -43,7 +43,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/bootstrap/owned_worker_wall_drain_windows.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `scripts/bootstrap/phase1-terminal-gate.py` | PRE_P2_ONLY | scripts/bootstrap/run-bootstrap-test-wave.py scripts/bootstrap/run-compiler-subsystem-test-products.shs scripts/bootstrap/tests/bootstrap-test-wave-test.py | seed/stage2/phase1 bootstrap path or its regression test |
 | `scripts/bootstrap/phase1-whole-tests.py` | PRE_P2_ONLY | scripts/bootstrap/run-bootstrap-test-wave.py scripts/bootstrap/tests/phase1-whole-stream-test.py | seed/stage2/phase1 bootstrap path or its regression test |
-| `scripts/bootstrap/run-bootstrap-test-wave.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
+| `scripts/bootstrap/run-bootstrap-test-wave.py` | PRE_P2_ONLY | scripts/bootstrap/tests/bootstrap-test-wave-test.py (stem import) | phase1 test wave; only its own test calls it (unwired; owner review) |
 | `scripts/bootstrap/run-process-group-bounded-log-windows.py` | BOTH | scripts/bootstrap/bootstrap-logged-process.shs scripts/bootstrap/collect-windows-phase2-objects.py scripts/bootstrap/hello-sanity-buildrunner.py +12 | exec by bootstrap-logged-process.shs (all phases) and phase-ladder-step.shs |
 | `scripts/bootstrap/tests/bootstrap-test-wave-test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `scripts/bootstrap/tests/hello-sanity-buildrunner-receipt-test.py` | OWNED_HELLO_SANITY | test/01_unit/app/bootstrap_builder/result_receipt_decode_spec.spl | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
@@ -78,6 +78,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/check/lib/item5-hello-receipt.py` | OWNED_HELLO_SANITY | scripts/check/check-stage2-hello-world-native-build.shs | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/check/lib/stage4-retained-manual.py` | P3_PLUS_ONLY | scripts/bootstrap/bootstrap-phase-verification.shs scripts/check/lib/stage4-candidate-provenance.shs | stage3/stage4 (p3+) path |
 | `scripts/check/lib/stage4-retained-self-evidence.py` | P3_PLUS_ONLY | scripts/bootstrap/bootstrap-phase-verification.shs scripts/check/lib/stage4-candidate-provenance.shs scripts/check/lib/stage4-retained-manual.py +1 | stage3/stage4 (p3+) path |
+| `scripts/check/sdk-observer-evidence-v1.py` | P3_PLUS_ONLY | .github/workflows/sdk-worker-observer-cycle1.yml scripts/check/run-sdk-observer-cycle1.shs | CI evidence gate (landed after a4c98d2afb7); twin must be `.shs` |
 | `scripts/check/qmp-send-virtio-input.py` | P3_PLUS_ONLY | scripts/check/check-simpleos-arm64-unified-live.shs scripts/check/check-simpleos-virtio-snd-qemu.shs test/01_unit/os/simpleos_arm64_unified_live_adapter_spec.spl +1 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/check/replay-windows-ladder-providers.py` | P3_PLUS_ONLY | .github/workflows/windows-retained-provider-replay.yml scripts/check/guard_wiring_optout.txt | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/check/rt-binding-index.py` | P3_PLUS_ONLY | scripts/check/check-rt-c-contract-compile.py test/01_unit/app/check/rt_binding_index_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
@@ -88,7 +89,7 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/test/test-darwin-footprint-guard.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
 | `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` | P3_PLUS_ONLY | scripts/tool/renderdoc-export-events.shs test/02_integration/tool/renderdoc_exporter_contract_test.shs | port blocked: runs inside qrenderdoc embedded Python |
 | `scripts/tool/renderdoc-target-control-trigger.py` | P3_PLUS_ONLY | scripts/check/check-renderdoc-chrome-target-control.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
+| `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | P3_PLUS_ONLY | scripts/tool/riscv64-unknown-elf-gcc-wrapper.cmd scripts/tool/riscv64-unknown-elf-gxx-wrapper.cmd | dev toolchain wrapper (exec by .cmd shims) |
 | `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
 | `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
 | `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
@@ -112,11 +113,11 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `test/fixtures/database/sqlcipher4/gen_dense_messenger_fixture.py` | P3_PLUS_ONLY | test/fixtures/database/sqlcipher4/dense_ground_truth.json test/support/devhub_messenger_dense.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/database/sqlcipher4/gen_sqlcipher4_fixture.py` | P3_PLUS_ONLY | test/01_unit/lib/database/codec/sqlcipher4_independent_oracle_spec.spl test/01_unit/lib/database/server/storage_port_spec.spl test/02_integration/app/devhub/messenger/sqlcipher_messenger_e2e_spec.spl +1 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/database/sqlite/gen_fixtures.py` | P3_PLUS_ONLY | test/01_unit/lib/database/sqlite_format/header_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/devhub/fresh_secured_db/provision.py` | P3_PLUS_ONLY | build/review/p3fix-caret1-20261111.sdn build/review/p3fix-caret2-20261111-logs/devhub_interpreter_driver.py build/review/p3fix-caret2-20261111.sdn +4 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
+| `test/fixtures/devhub/fresh_secured_db/provision.py` | P3_PLUS_ONLY | build/review/p3fix-caret1-20261111.sdn build/review/p3fix-caret2-20261111.sdn +4 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/devhub/native_http_curl/verify_loopback.py` | P3_PLUS_ONLY | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/devhub/native_minio_binary_put/verify_health_cli.py` | P3_PLUS_ONLY | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/fixtures/devhub/native_minio_binary_put/verify_loopback.py` | P3_PLUS_ONLY | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/perf/bench/durable_wal_fsync.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
+| `test/perf/bench/durable_wal_fsync.py` | DEAD_CANDIDATE | - (mentioned by name in test/05_perf/bench/durable_wal_fsync.{shs,spl}, not exec'd) | superseded by the Simple bench twin; owner confirms before delete |
 | `test/perf/dbserver/live_pgbench_compare.py` | P3_PLUS_ONLY | test/perf/dbserver/test_live_pgbench_compare.py | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `test/perf/dbserver/pgwire_smoke_client.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
 | `test/perf/dbserver/test_live_pgbench_compare.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |

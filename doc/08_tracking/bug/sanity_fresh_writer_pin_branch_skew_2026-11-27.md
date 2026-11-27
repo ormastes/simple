@@ -15,7 +15,7 @@ On release, `scripts/bootstrap/tests/sanity-base-controls-test.py:63` lists
 `ed4787d0…` only as a *rejected* prior writer (negative case), which is correct.
 On main the module still pins the pre-`8fe2ea40` writer, so `verify_actual_writer`
 fails and `sanity-base-controls-test.py` (run by `.github/workflows/repo-hygiene.yml`)
-should be red there. Fix for main: forward-port the release re-pin (owner
+is expected to be red there (not checked against a CI run). Fix for main: forward-port the release re-pin (owner
 decision; the writer change `8fe2ea40` was reviewed on release as the
 `SIMPLE_NSCOPE_HIR_TRACE` passthrough). Checkout line endings were ruled out:
 `core.autocrlf=false`, blob `e877cfc781ea` hashes identically in both checkouts.
