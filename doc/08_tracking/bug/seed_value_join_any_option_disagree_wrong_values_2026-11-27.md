@@ -477,8 +477,11 @@ The first two behave the same on `r` and on the fixed seed.
   rule on seed `r`). (2) A guess is not evidence: once a suffix guess yields a
   float in a function, the float-into-int errors (argument, index, int-slot
   join) and the int/float value join are skipped for the rest of that function
-  (`guessed_float_in_function`). Coarse on purpose; the declared-return check
-  is unchanged.
+  (`guessed_float_in_function`). The exemption is PER FUNCTION, which is coarse:
+  one guessed float switches the checks off for unrelated, well-typed joins
+  later in the same function. A per-expression marker (the guessed call and
+  the locals bound from it) is the follow-up. The declared-return check is
+  unchanged.
 - OPEN: a float slice bound (`xs[a:3]` with `a: f64`) is not checked; only the
   plain index is.
 - OPEN: the interpreter accepts a float WRITE index (`xs[1.0] = 99`); the
