@@ -21,7 +21,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_f
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{line_h_frac_milli, inline_element_union_text_line_h, text_line_frac_record, text_line_steps_table, text_line_steps_restore}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_auto_content_w}
 
 
@@ -1147,16 +1147,19 @@ pub fn web_styles_with_painted_percent_padding(nodes: [HNode], styles: [Style], 
             basis = bw[p] - pst.border_l - pst.border_r - pst.pad_l - pst.pad_r
             val columns = if pst.display == "grid": grid_track_sizes(pst.grid_template_columns, basis, pst.column_gap_px) else: []
             if columns.len() > 0:
-                val left = bx[i] - bx[p] - pst.border_l - pst.pad_l
+                # The tracks sit where `justify-content` put them (lead + widened gutters).
+                val justify = grid_justify_content_offsets(pst, columns, basis, pst.grid_template_columns.contains("fr"))
+                val gap = pst.column_gap_px + justify[1]
+                val left = bx[i] - bx[p] - pst.border_l - pst.pad_l - justify[0]
                 var column = 0
-                while column + 1 < columns.len() as i32 and grid_track_offset(columns, pst.column_gap_px, column + 1) <= left:
+                while column + 1 < columns.len() as i32 and grid_track_offset(columns, gap, column + 1) <= left:
                     column = column + 1
                 var span = grid_placement_span(st.grid_column)
                 if st.grid_area != "":
                     for rect in grid_template_area_rects(pst.grid_template_areas):
                         if rect.area == st.grid_area:
                             span = rect.col_span
-                basis = grid_track_span_size(columns, pst.column_gap_px, column, span)
+                basis = grid_track_span_size(columns, gap, column, span)
         # A full copy: the layout clone behind style_with_resolved_percent_padding
         # keeps only what layout reads.
         val padded = style_with_resolved_percent_padding(st, if basis > 0: basis else: 0)
@@ -1358,7 +1361,7 @@ fn grid_template_auto_track_count(raw: text) -> i32:
             continue
         if t == "auto":
             has_auto = true
-        elif parse_int(if t.starts_with("0+"): t.substring(2, t.byte_len()) else: t) <= 0:
+        elif grid_fr_track_factor(t) <= 0:
             return 0
         n = n + 1
     if has_auto and n > 1: n else: 0
@@ -1374,10 +1377,9 @@ fn grid_template_auto_track_count(raw: text) -> i32:
 # justify-content normal, stretch or flex-start (the condition
 # `grid_column_sizes_with_implicit` uses). Lengths read as `grid_track_sizes`
 # reads them.
-# ponytail: a `minmax(<length>, Nfr)` floor is read as the content floor
-# (the length is dropped by `grid_expand_track_functions`, as before), and a
-# spanning item does not size any track. Upgrade: carry the length floor in the
-# token and spread spanning items (CSS Grid 12.5.2).
+# A `L+Nfr` token (`minmax(Lpx, Nfr)`) starts at L, with no content floor.
+# ponytail: a spanning item does not size any track. Upgrade: spread spanning
+# items (CSS Grid 12.5.2).
 fn grid_explicit_auto_column_sizes(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style,
     placements: [i32], column_count: i32, available_w: i32, widths: [i32]
@@ -1398,8 +1400,9 @@ fn grid_explicit_auto_column_sizes(
         if t == "auto":
             is_auto[column] = true
             auto_count = auto_count + 1
-        elif t.starts_with("0+"):
-            fr[column] = parse_int(t.substring(2, t.byte_len()))
+        elif t.contains("+"):
+            fr[column] = grid_fr_track_factor(t)
+            sizes[column] = grid_fr_track_floor(t)
             fr_total = fr_total + fr[column]
         elif t.ends_with("fr"):
             fr[column] = parse_int(t)
@@ -1579,6 +1582,41 @@ fn grid_column_sizes_with_implicit(
                 sizes[column] = sizes[column] + free_w / auto_count
             column = column + 1
     sizes
+
+# `justify-content` on grid columns (CSS Box Alignment 5.1, CSS Grid 11.1;
+# Chrome 159): [lead, extra gap]. With free space, center / end shift every
+# track and space-between / -around / -evenly widen the gutters (a spanning
+# item spans the widened gutters). Overflowing tracks (free < 0): center,
+# unsafe-center and end shift by the negative free space (Chrome overflows
+# both sides); safe-center and space-* fall back to start. start, normal,
+# stretch (auto tracks already took the space) and unknown values give
+# [0, 0]. `has_fr`: a flexible track is in the grid, so non-negative free
+# space is only its rounding remainder and gives [0, 0].
+# ponytail: free space is in whole CSS px, so an odd remainder centres half a
+# px early, and `left` / `right` ignore `direction`.
+fn grid_justify_content_offsets(st: Style, columns: [i32], available_w: i32, has_fr: bool) -> [i32]:
+    val n = columns.len() as i32
+    val jc = st.justify_content
+    if n == 0:
+        return [0, 0]
+    var free = available_w - st.column_gap_px * (n - 1)
+    for size in columns:
+        free = free - size
+    if free == 0 or (free > 0 and has_fr):
+        return [0, 0]
+    if jc == "center" or jc == "unsafe-center" or (jc == "safe-center" and free > 0):
+        return [free / 2, 0]
+    if jc == "end" or jc == "flex-end" or jc == "right":
+        return [free, 0]
+    if free < 0:
+        return [0, 0]
+    if jc == "space-between" and n > 1:
+        return [0, free / (n - 1)]
+    if jc == "space-around":
+        return [free / (n * 2), free / n]
+    if jc == "space-evenly":
+        return [free / (n + 1), free / (n + 1)]
+    [0, 0]
 
 # Used style of a grid item stretched to `outer_h`, the border-box height its
 # row span leaves it after its block margins.
@@ -2487,6 +2525,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 nodes, styles, child_index, i, st, grid_placements,
                 grid_explicit_column_count, grid_column_count, iw, out_intrinsic_widths
             )
+        # Implicit `grid-auto-columns` tracks count as flexible only when the grid has them.
+        val grid_has_fr = st.grid_template_columns.contains("fr") or (grid_column_count > grid_explicit_column_count and st.grid_auto_columns.contains("fr"))
+        val grid_justify = grid_justify_content_offsets(st, grid_columns, iw, grid_has_fr)
+        val grid_column_lead = grid_justify[0]
+        val grid_column_gap = st.column_gap_px + grid_justify[1]
         var grid_rows: [i32] = [0; grid_row_capacity]
         # A FIXED row (explicit, or a `grid-auto-rows` length) never grows with
         # its items; every other implicit row is content sized from its
@@ -2541,14 +2584,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             # item's margin box fills it (Chrome 159). Auto inline margins
             # keep the legacy 0 here.
             val grid_child_width = grid_track_span_size(
-                grid_columns, st.column_gap_px,
+                grid_columns, grid_column_gap,
                 grid_column, grid_column_span
             )
             val grid_margin_l = if grid_child_style.margin_l_auto: 0 else: resolve_horizontal_margin(grid_child_style.margin_l, grid_child_style.margin_l_pct, grid_child_width)
             val grid_margin_r = if grid_child_style.margin_r_auto: 0 else: resolve_horizontal_margin(grid_child_style.margin_r, grid_child_style.margin_r_pct, grid_child_width)
             var grid_child_x = (
-                ix + grid_track_offset(
-                    grid_columns, st.column_gap_px, grid_column
+                ix + grid_column_lead + grid_track_offset(
+                    grid_columns, grid_column_gap, grid_column
                 ) + grid_margin_l
             )
             val grid_margin_t = vertical_margin_px_in(

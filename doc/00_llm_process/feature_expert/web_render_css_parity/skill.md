@@ -5788,3 +5788,17 @@ pins the border-box form, the default-UA gap is unfiled.
   - `std.common.css.length` was checked for reuse: its `_unit_scale` has no dvh/svh/cqw/cap either, so it would reproduce the same regression.
   - Open: unit RESOLUTION is separate and still wrong for some units. At 400x300, `2vb` gives 26 and `1cap` gives 25 (Chrome 30 and 38), and `1e1px` resolves to 1 px (Chrome 10), `-.5em` to -5 px and `-0.5em` to 0 (Chrome -10 for both, font-size 20px). Base behaves the same.
   - `!important` is pinned: a stylesheet `margin-top:0 !important` beats an inline 30px (AC-17), and `appearance:none !important;appearance:checkbox` keeps the pill (form_control AC-17).
+## 2026-11-27 — grid `minmax(<length>, Nfr)` floors and grid `justify-content`
+
+- **Floor token.** `grid_expand_track_functions` writes `minmax(Lpx, Nfr)` (whole px L > 0) as `L+Nfr`; `minmax(0, Nfr)` stays `0+Nfr`. `normalized_grid_track_list` strips only a token-leading `0+` (the old `replace("0+", "")` would turn `120+1fr` into `121fr`).
+  - `grid_track_sizes` (`grid_floored_fr_track_sizes`) and `grid_explicit_auto_column_sizes` freeze a floored track at L when its fr share is smaller (CSS Grid 12.7.1). Floors may overflow the container.
+  - Rows drop the floor (`grid_track_list_without_floors`): row fr sizing has no available height and the row floor is not measured. The GPU adapter reports a `+` token as unsupported.
+- **`justify-content` on grid columns** (`grid_justify_content_offsets`): center / end / space-between / -around / -evenly give a lead offset plus a widened gutter. A spanning item spans the widened gutters. With an `fr` track and free >= 0 nothing moves (the free space is only rounding); implicit `grid-auto-columns` fr counts only when the grid has implicit columns.
+  - Overflow (free < 0, Chrome 159): center, unsafe-center and end shift by the negative free space, overflowing both sides. safe-center and space-* fall back to start.
+  - `web_styles_with_painted_percent_padding` finds an item's column with the same lead and widened gutter. Before, `20px 100px` centred resolved the item against the 100px column.
+  - GPU adapter: a grid whose `justify-content` is not start-like is `LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK`. Trap: the adapter reads tracks with `to_i64`, which gives 0 for `40px`, so today NO stored grid template is admitted to the GPU lane at all.
+- **Chrome 159, 200 px grid at x=40.** `minmax(120px,1fr) 1fr` -> col 2 at 160. `1fr minmax(80px,1fr) 1fr` -> 60/80/60. `40px 40px` space-around -> col 2 at 170. `auto auto` (30, 40) center -> col 2 at 135.
+- **Measuring trick.** Chrome `--headless=new --dump-dom` on a page whose script writes `getBoundingClientRect()` into `document.title` gives exact edges without a PNG decoder. Whole-px edges make the k=4 run exactly 4x.
+- **Pins:** `grid_minmax_floor_justify_content_chrome159_spec` AC-1..6; `grid_justify_content_followup_chrome159_spec` AC-1..5 (second freeze pass, gaps, overflow, painted percent padding, GPU admission).
+- **Open.** Free space is whole CSS px, so an odd centring remainder lands half a px early at 4x. `left` / `right` ignore `direction`. A non-px or fractional minmax floor is still dropped.
+- **Open (4x paint), bug `web_4x_percent_padding_content_box_clip_ignored_2026-11-27`.** At k=4 the device-scale paint path ignores percent padding under `background-clip:content-box`, even on a plain block: a 20px box with padding-left:50% paints from 320 device px (Chrome 360).
