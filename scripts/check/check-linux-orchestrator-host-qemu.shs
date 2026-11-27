@@ -239,79 +239,10 @@ install -d -o "$SVC" -g "$SVC" -m 0700 "$F/output-store" "$F/output-store/journa
 # (test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl) on every fresh run overlay.
 
 MID=$(cat /etc/machine-id)
-PODMAN=$(command -v podman); PODMAN_SHA=$(sha256sum "$PODMAN" | awk '{print $1}')
-UNIT=simple-orchestrator-host.service
 
-# Profile skeletons: field names are exactly the decoder key sets in
-# machine_policy_v1.spl, linux_fresh_epoch_v1.spl and
-# linux_installed_supervisor_profile_v1.spl. Digest fields that require the
-# canonical Simple encoder are AUTHOR_WITH_SIMPLE until a self-hosted binary
-# rewrites them; these files are NOT decoder-validated.
-cat > /etc/simple/container/machine-policy.sdn <<EOF
-version: 1
-kind: "machine-container-policy"
-authorityId: "fixture-authority"
-physicalHostId: "simple-orch-host"
-nativeMachineId: "${MID}"
-mode: "standalone"
-managedAuthorityId: ""
-managedAuthorityPolicyDigest: ""
-cpuMillis: 8000
-memoryBytes: 8589934592
-providers: [{backend: "linux-podman", identityDigest: "${PODMAN_SHA}", policyBytes: ""}]
-localPrincipals: ["${SVC}"]
-EOF
-cat > /etc/simple/container/fresh-epoch-profile.sdn <<EOF
-kind: "linux-fresh-provider-epoch"
-version: 1
-epochId: "fixture-epoch-1"
-machinePolicyDigest: "AUTHOR_WITH_SIMPLE"
-serviceName: "${SVC}"
-serviceUid: ${SVC_UID}
-serviceGid: ${SVC_GID}
-subuidStart: 200000
-subuidCount: 65536
-subgidStart: 200000
-subgidCount: 65536
-hostUnit: "${UNIT}"
-providerUnit: "simple-podman.service"
-providerSocketUnit: "simple-podman.socket"
-partitionCgroup: "/sys/fs/cgroup/simple.slice"
-delegatedCgroup: "/sys/fs/cgroup/system.slice/${UNIT}"
-supervisorCgroup: "/sys/fs/cgroup/system.slice/${UNIT}/supervisor"
-partitionCpuMillis: 6000
-partitionMemoryBytes: 6442450944
-reservedCpuMillis: 1000
-reservedMemoryBytes: 1073741824
-outsideCpuMillis: 1000
-outsideMemoryBytes: 1073741824
-providerExecutable: "${PODMAN}"
-providerExecutableSha256: "${PODMAN_SHA}"
-providerPolicyDigest: "AUTHOR_WITH_SIMPLE"
-graphRoot: "/var/lib/simple-host/podman/graph"
-runRoot: "/run/simple-host/podman"
-staticRoot: "/var/lib/simple-host/podman/libpod"
-endpointPath: "/run/simple-host/podman/podman.sock"
-storageDriver: "overlay"
-cgroupManager: "systemd"
-brokerExecutable: "/opt/simple/bin/simple"
-brokerExecutableSha256: "AUTHOR_WITH_SIMPLE"
-workloadBuildRootPrefix: "/var/lib/simple-host/live-work"
-workloadTerminalMode: "tty"
-EOF
-cat > /etc/simple/container/supervisor-profile.sdn <<EOF
-kind: "linux-installed-supervisor"
-version: 1
-machinePolicyDigest: "AUTHOR_WITH_SIMPLE"
-serviceUid: ${SVC_UID}
-supervisorUnit: "${UNIT}"
-providerUnit: "simple-podman.service"
-activationUnits: ["simple-podman.socket"]
-providerPolicy: "AUTHOR_WITH_SIMPLE"
-closedActivationModel: "dedicated-uid-system-units-no-login-user-manager-cron-v1"
-closedProviderModel: "single-rootless-uid-all-stores-pinned-v1"
-EOF
-chown root:root /etc/simple/container/*.sdn; chmod 0644 /etc/simple/container/*.sdn
+# The three /etc/simple/container profiles (machine-policy, fresh-epoch-profile, supervisor-profile) are
+# NOT written here: --run-specs generates them on every fresh run overlay with the canonical encoders
+# (enrolled_host_signed_fixture_gen.spl, todo 481), from this guest's machine-id, service UID/GID and podman sha256.
 
 # Protected acceptance environment (root:svc 0640, resolvable by the service UID).
 cat > /etc/simple/orchestrator-host.env <<EOF
@@ -376,7 +307,6 @@ echo "== id: $(id -un) uid=$(id -u)"
 echo "== marker: $(cat /var/lib/simple-orch-guest/provisioned.v1)"
 echo "== /etc/simple/container"; ls -l /etc/simple/container
 stat -c '%n %U:%G %a' /etc/simple/container /var/lib/simple/container
-head -5 /etc/simple/container/machine-policy.sdn
 echo "== unit"; systemctl cat simple-orchestrator-host.service | grep -E '^(User|Group|Delegate|EnvironmentFile)='
 echo "unit Delegate property: $(systemctl show -p Delegate simple-orchestrator-host.service)"
 echo "masked: podman.socket=$(systemctl is-enabled podman.socket 2>&1) user@950=$(systemctl is-enabled user@950.service 2>&1)"
@@ -493,35 +423,35 @@ do_run_specs() {
     [ -z "$ldd_missing" ] || run_error "binary has missing shared libraries in guest: $ldd_missing"
     ssh_vm 'cd /opt/simple/src && sudo timeout 120 bin/simple --version' >> "$RUN_OUT" 2>&1 \
         || run_error "binary --version failed in guest"
-    # Podman-live spec, header steps 1-3 on the fresh run overlay: env file from
-    # the shipped fixture, registry pull, then the template generator with the
-    # installed fresh-epoch profile's runRoot. It must print `TEMPLATE OK <path>`.
-    install_podman_live_env
-    guest_podman_live_script | ssh_vm 'sudo sh -s' >> "$RUN_OUT" 2>&1 || run_error "podman-live pull failed"
-    gen=test/fixtures/container/podman_live_launch_template_gen.spl
-    if git -C "$ROOT_DIR" cat-file -e "${src_sha}:$gen" 2>/dev/null; then
-        tpl_out=$(ssh_vm "sudo sh -c 'RR=\$(sed -n \"s/^runRoot: *\\\"\\(.*\\)\\\"\$/\\1/p\" /etc/simple/container/fresh-epoch-profile.sdn); \
-            cd /opt/simple/src && SIMPLE_PODMAN_LIVE_RUN_ROOT=\$RR timeout 600 bin/simple run $gen 2>&1'" || true)
-        printf '%s\n' "$tpl_out" | sed 's/^/# template-gen: /' >> "$RUN_OUT"
-        printf '%s\n' "$tpl_out" | grep -q '^TEMPLATE OK ' || printf '# template-gen: no TEMPLATE OK line; podman live spec will report BLOCKED\n' >> "$RUN_OUT"
-    fi
-    printf '# template: %s\n' "$(ssh_vm 'ls -l /etc/simple/podman-live-launch-template.sdn 2>&1')" >> "$RUN_OUT"
-    # Signed fixtures from the canonical encoders (todos 481-487): OpenSSH issuer/approver keys at their
-    # protected leaf names, the authority policy, the installed dispatch root, binding.sdn when its five
-    # pinned inputs exist, and the Caret inspection request. They replace the provision-time placeholders
-    # (the PKCS#8 .pem keys are removed first: host-linux-enrollment-issue reads OpenSSH files only).
+    # Signed fixtures and installed profiles from the canonical encoders (todos 481-487): the three
+    # /etc/simple/container profiles and engine-policy.sdn from this guest's machine-id, service UID/GID,
+    # podman path + sha256 and broker binary sha256; OpenSSH issuer/approver keys at their protected leaf
+    # names, the authority policy, the installed dispatch root, binding.sdn when its five pinned inputs
+    # exist, and the Caret inspection request (the PKCS#8 .pem keys are removed first:
+    # host-linux-enrollment-issue reads OpenSSH files only). Runs before the podman template generator,
+    # which needs the fresh-epoch profile; both take the run root from GUEST_RUN_ROOT.
     # `FIXTURE ERROR` is a canonical-encoder refusal and counts as FAIL; `FIXTURE BLOCKED` is reported
     # on its own and leaves the consuming spec's fixture unset, so that spec reports BLOCKED.
+    GUEST_RUN_ROOT=/run/simple-host/podman
     gen_fail=0
     sgen=test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl
     if git -C "$ROOT_DIR" cat-file -e "${src_sha}:$sgen" 2>/dev/null; then
-        sgen_out=$(ssh_vm "sudo sh -c 'F=/srv/simple-fixture; rm -f \$F/key-store/*.pem; \
+        sgen_out=$(ssh_vm "sudo sh -c 'F=/srv/simple-fixture; SVC=simple-host; rm -f \$F/key-store/*.pem; \
             install -d -o root -g root -m 0700 \$F/host-root; \
             cd /opt/simple/src && SIMPLE_ORCH_FIXTURE_KEY_STORE=\$F/key-store \
             SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT=\$F/machine-parent/dispatch SIMPLE_ORCH_FIXTURE_HOST_ROOT=\$F/host-root \
             SIMPLE_ORCH_FIXTURE_MACHINE_PARENT=\$F/machine-parent SIMPLE_ORCH_FIXTURE_INPUT_DIR=\$F/input \
             SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST=\$(sha256sum \$(command -v podman) | cut -d\" \" -f1) \
             SIMPLE_ORCH_FIXTURE_CARET_REQUEST=\$F/caret-ssh/request.sdn \
+            SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE=/etc/machine-id SIMPLE_ORCH_FIXTURE_PROFILE_DIR=/etc/simple/container \
+            SIMPLE_ORCH_FIXTURE_SERVICE_NAME=\$SVC SIMPLE_ORCH_FIXTURE_SERVICE_UID=\$(id -u \$SVC) \
+            SIMPLE_ORCH_FIXTURE_SERVICE_GID=\$(id -g \$SVC) SIMPLE_ORCH_FIXTURE_PODMAN_PATH=\$(command -v podman) \
+            SIMPLE_ORCH_FIXTURE_PODMAN_SHA256=\$(sha256sum \$(command -v podman) | cut -d\" \" -f1) \
+            SIMPLE_ORCH_FIXTURE_BROKER_PATH=/opt/simple/src/bin/simple \
+            SIMPLE_ORCH_FIXTURE_BROKER_SHA256=\$(sha256sum /opt/simple/src/bin/simple | cut -d\" \" -f1) \
+            SIMPLE_ORCH_FIXTURE_RUN_ROOT=$GUEST_RUN_ROOT \
+            SIMPLE_ORCH_FIXTURE_WORKLOAD_BUILD_ROOT_PREFIX=/var/lib/simple-host/live-work \
+            SIMPLE_ORCH_FIXTURE_WORKLOAD_TERMINAL_MODE=tty \
             timeout 600 bin/simple run $sgen 2>&1'" || true)
         printf '%s\n' "$sgen_out" | grep '^FIXTURE ' | sed 's/^/# signed-fixture-gen: /' >> "$RUN_OUT"
         printf '%s\n' "$sgen_out" | grep '^FIXTURE BLOCKED ' | sed 's/^FIXTURE BLOCKED /BLOCKED signed-fixture /' | tee -a "$RUN_OUT"
@@ -532,6 +462,19 @@ do_run_specs() {
             printf 'FAIL signed-fixture generator did not finish (no FIXTURE DONE line)\n' | tee -a "$RUN_OUT"
             gen_fail=$((gen_fail + 1)); }
     fi
+    printf '# profiles: %s\n' "$(ssh_vm 'ls -l /etc/simple/container 2>&1 | tr "\n" " "')" >> "$RUN_OUT"
+    # Podman-live spec, header steps 1-3 on the fresh run overlay: env file from
+    # the shipped fixture, registry pull, then the template generator with the
+    # same run root the fresh-epoch profile was generated with. It must print `TEMPLATE OK <path>`.
+    install_podman_live_env
+    guest_podman_live_script | ssh_vm 'sudo sh -s' >> "$RUN_OUT" 2>&1 || run_error "podman-live pull failed"
+    gen=test/fixtures/container/podman_live_launch_template_gen.spl
+    if git -C "$ROOT_DIR" cat-file -e "${src_sha}:$gen" 2>/dev/null; then
+        tpl_out=$(ssh_vm "sudo sh -c 'cd /opt/simple/src && SIMPLE_PODMAN_LIVE_RUN_ROOT=$GUEST_RUN_ROOT timeout 600 bin/simple run $gen 2>&1'" || true)
+        printf '%s\n' "$tpl_out" | sed 's/^/# template-gen: /' >> "$RUN_OUT"
+        printf '%s\n' "$tpl_out" | grep -q '^TEMPLATE OK ' || printf '# template-gen: no TEMPLATE OK line; podman live spec will report BLOCKED\n' >> "$RUN_OUT"
+    fi
+    printf '# template: %s\n' "$(ssh_vm 'ls -l /etc/simple/podman-live-launch-template.sdn 2>&1')" >> "$RUN_OUT"
     # Export a path variable only when its fixture content exists (file present
     # or directory non-empty), so a spec whose signed fixture is not yet
     # authored reports BLOCKED (pending) instead of a misleading FAIL.

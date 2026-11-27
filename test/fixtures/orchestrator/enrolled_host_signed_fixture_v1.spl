@@ -25,6 +25,15 @@ use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{HostLin
 use app.orchestrator.host_identity_key_v1.host_identity_private_encode_v1
 use app.orchestrator.controller_authority_issue_v1.{controller_authority_key_leaf_v1, controller_linux_enrollment_issue_v3}
 use app.orchestrator.controller_gateway_v1.{ControllerGatewayRequestV1, controller_gateway_request_encode_v1}
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.{LinuxOciEnginePolicyV1, LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1,
+    linux_oci_engine_policy_encode_v1}
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.{LinuxOciInstalledPolicyV3, linux_oci_installed_policy_encode_v3}
+use std.common.contracts.container.machine_policy_v1.{MachineContainerPolicyV1, MachineContainerProviderPolicyV1,
+    machine_container_policy_bytes_v1}
+use std.common.contracts.container.linux_fresh_epoch_v1.{linux_fresh_epoch_profile_decode_v1, linux_fresh_epoch_provider_matches_v1}
+use std.common.build_manager.group_process_stream_profile_v3.{GroupProcessCpuQuotaV3, GroupProcessBrokerBudgetV3, GroupProcessStreamProfileV3}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamRequestV2, GroupProcessStreamLaunchV2,
+    group_process_child_argv_digest_v2, group_process_stream_template_encode_v3}
 
 # The five inputs the enrollment binding pins, in host_linux_provision_startup_v3_spec order.
 pub val ENROLLED_FIXTURE_PINNED_INPUTS_V1: [text] = ["host-config.sdn", "engine-policy.sdn", "broker-policy.sdn",
@@ -157,6 +166,186 @@ pub fn enrolled_fixture_dispatch_install_v1(root: text, inputs: EnrolledFixtureI
         return Err("fixture-dispatch-marker-mismatch")
     val config = enrolled_fixture_dispatch_config_v1(inputs, policy_bytes)?
     controller_dispatch_config_install_v1(root, inputs.controller_id, config, policy_bytes)
+
+# ---- Installed container profiles (todo 481) and the pinned binding inputs (todo 484) ----
+# Real installed-host facts the operator supplies (the guest wrapper passes the guest's own values). Every digest
+# below is computed here from these inputs through the canonical encoders; nothing is a placeholder.
+pub struct EnrolledFixtureHostProfileInputsV1:
+    authority_id: text
+    service_name: text
+    service_uid: i64
+    service_gid: i64
+    subid_start: i64
+    subid_count: i64
+    host_unit: text
+    provider_unit: text
+    provider_socket_unit: text
+    partition_cgroup: text
+    provider_executable: text
+    provider_executable_sha256: text
+    broker_executable: text
+    broker_executable_sha256: text
+    graph_root: text
+    run_root: text
+    partition_cpu_millis: i64
+    partition_memory_bytes: i64
+    outside_cpu_millis: i64
+    outside_memory_bytes: i64
+    workload_build_root_prefix: text
+    workload_terminal_mode: text
+
+pub struct EnrolledFixtureProfilesV1:
+    engine_policy: text
+    installed_policy: text
+    machine_policy: text
+    fresh_epoch_profile: text
+    supervisor_profile: text
+
+# The one provider engine policy: machine-policy providers[].policyBytes, engine-policy.sdn (binding pin),
+# the fresh-epoch providerPolicyDigest and the supervisor installed policy's cliPolicy are all these bytes.
+pub fn enrolled_fixture_engine_policy_v1(host: EnrolledFixtureHostProfileInputsV1) -> LinuxOciEnginePolicyV1:
+    LinuxOciEnginePolicyV1(mode: LINUX_OCI_ENGINE_MODE_TRUSTED_ADMIN_V1, executable_path: host.provider_executable,
+        expected_uid: host.service_uid, expected_graph_root: host.graph_root, expected_run_root: host.run_root,
+        expected_storage_driver: "vfs", storage_options: [])
+
+pub fn enrolled_fixture_delegated_cgroup_v1(host: EnrolledFixtureHostProfileInputsV1) -> text:
+    host.partition_cgroup + "/" + host.host_unit
+
+pub fn enrolled_fixture_machine_policy_v1(inputs: EnrolledFixtureInputsV1, host: EnrolledFixtureHostProfileInputsV1,
+        engine_bytes: text) -> MachineContainerPolicyV1:
+    MachineContainerPolicyV1(authority_id: host.authority_id, physical_host_id: inputs.physical_host_id,
+        native_machine_id: inputs.native_machine_id, mode: "standalone", managed_authority_id: "",
+        managed_authority_policy_digest: "", cpu_millis: inputs.physical_cpu_millis,
+        memory_bytes: inputs.physical_memory_bytes,
+        providers: [MachineContainerProviderPolicyV1(backend: "linux-podman",
+            identity_digest: inputs.provider_identity_digest, policy_bytes: engine_bytes)],
+        local_principals: ["linux:uid:" + str(host.service_uid)])
+
+pub fn enrolled_fixture_fresh_epoch_encode_v1(inputs: EnrolledFixtureInputsV1, host: EnrolledFixtureHostProfileInputsV1,
+        machine_bytes: text, engine_bytes: text) -> text:
+    val delegated = enrolled_fixture_delegated_cgroup_v1(host)
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-fresh-provider-epoch"), "version": SdnValue.Int(1),
+        "epochId": SdnValue.String("fixture-epoch-1"), "machinePolicyDigest": SdnValue.String(sha256_text(machine_bytes)),
+        "serviceName": SdnValue.String(host.service_name), "serviceUid": SdnValue.Int(host.service_uid),
+        "serviceGid": SdnValue.Int(host.service_gid), "subuidStart": SdnValue.Int(host.subid_start),
+        "subuidCount": SdnValue.Int(host.subid_count), "subgidStart": SdnValue.Int(host.subid_start),
+        "subgidCount": SdnValue.Int(host.subid_count), "hostUnit": SdnValue.String(host.host_unit),
+        "providerUnit": SdnValue.String(host.provider_unit), "providerSocketUnit": SdnValue.String(host.provider_socket_unit),
+        "partitionCgroup": SdnValue.String(host.partition_cgroup), "delegatedCgroup": SdnValue.String(delegated),
+        "supervisorCgroup": SdnValue.String(delegated + "/supervisor"),
+        "partitionCpuMillis": SdnValue.Int(host.partition_cpu_millis),
+        "partitionMemoryBytes": SdnValue.Int(host.partition_memory_bytes),
+        "reservedCpuMillis": SdnValue.Int(inputs.reserved_cpu_millis),
+        "reservedMemoryBytes": SdnValue.Int(inputs.reserved_memory_bytes),
+        "outsideCpuMillis": SdnValue.Int(host.outside_cpu_millis), "outsideMemoryBytes": SdnValue.Int(host.outside_memory_bytes),
+        "providerExecutable": SdnValue.String(host.provider_executable),
+        "providerExecutableSha256": SdnValue.String(host.provider_executable_sha256),
+        "providerPolicyDigest": SdnValue.String(sha256_text(engine_bytes)),
+        "graphRoot": SdnValue.String(host.graph_root), "runRoot": SdnValue.String(host.run_root),
+        "staticRoot": SdnValue.String(host.graph_root + "/libpod"), "endpointPath": SdnValue.String(host.run_root + "/podman.sock"),
+        "storageDriver": SdnValue.String("vfs"), "cgroupManager": SdnValue.String("cgroupfs"),
+        "brokerExecutable": SdnValue.String(host.broker_executable),
+        "brokerExecutableSha256": SdnValue.String(host.broker_executable_sha256),
+        "workloadBuildRootPrefix": SdnValue.String(host.workload_build_root_prefix),
+        "workloadTerminalMode": SdnValue.String(host.workload_terminal_mode)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn enrolled_fixture_supervisor_encode_v1(host: EnrolledFixtureHostProfileInputsV1, machine_bytes: text,
+        installed_policy: text) -> text:
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-installed-supervisor"), "version": SdnValue.Int(1),
+        "machinePolicyDigest": SdnValue.String(sha256_text(machine_bytes)), "serviceUid": SdnValue.Int(host.service_uid),
+        "supervisorUnit": SdnValue.String(host.host_unit), "providerUnit": SdnValue.String(host.provider_unit),
+        "activationUnits": SdnValue.Array([SdnValue.String(host.provider_socket_unit),
+            SdnValue.String("user@" + str(host.service_uid) + ".service")]),
+        "providerPolicy": SdnValue.String(installed_policy),
+        "closedActivationModel": SdnValue.String("dedicated-uid-system-units-no-login-user-manager-cron-v1"),
+        "closedProviderModel": SdnValue.String("single-rootless-uid-all-stores-pinned-v1")}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+# All three /etc/simple/container profiles plus the engine policy, each checked by its own encoder/validator.
+pub fn enrolled_fixture_profiles_v1(inputs: EnrolledFixtureInputsV1,
+        host: EnrolledFixtureHostProfileInputsV1) -> Result<EnrolledFixtureProfilesV1, text>:
+    val engine = enrolled_fixture_engine_policy_v1(host)
+    val engine_bytes = linux_oci_engine_policy_encode_v1(engine)?
+    val installed = linux_oci_installed_policy_encode_v3(LinuxOciInstalledPolicyV3(cli_policy: engine,
+        socket_path: host.run_root + "/podman.sock", expected_service_uid: host.service_uid, api_version: "5.2.5",
+        exec_terminal_mode: if host.workload_terminal_mode == "tty": "tty" else: "none"))?
+    val machine_bytes = machine_container_policy_bytes_v1(enrolled_fixture_machine_policy_v1(inputs, host, engine_bytes))?
+    val fresh = enrolled_fixture_fresh_epoch_encode_v1(inputs, host, machine_bytes, engine_bytes)
+    val profile = linux_fresh_epoch_profile_decode_v1(fresh)?
+    linux_fresh_epoch_provider_matches_v1(profile, engine_bytes)?
+    Ok(EnrolledFixtureProfilesV1(engine_policy: engine_bytes, installed_policy: installed, machine_policy: machine_bytes,
+        fresh_epoch_profile: fresh, supervisor_profile: enrolled_fixture_supervisor_encode_v1(host, machine_bytes, installed)))
+
+# Helper launch template inputs. Every value is a native measurement of the installed broker and helper
+# (cgroup device/inode/generation, producer and broker executable digests, snapshot and cache identity),
+# which the actual Root owner re-measures before activation; no producer of these measurements exists yet.
+pub struct EnrolledFixtureTemplateInputsV1:
+    root: text
+    worker_id: text
+    generation: i64
+    snapshot_digest: text
+    cache_identity: text
+    memory_limit_bytes: i64
+    program: text
+    producer_digest: text
+    directory: text
+    timeout_ms: i64
+    broker_program: text
+    broker_digest: text
+    delegated_cgroup: text
+    helper_cpu_millis: i64
+    helper_quota_us: i64
+    helper_period_us: i64
+    broker_cgroup: text
+    broker_device: i64
+    broker_inode: i64
+    broker_generation: i64
+    broker_policy_digest: text
+    broker_quota_us: i64
+    broker_period_us: i64
+    broker_memory_limit_bytes: i64
+
+fn enrolled_fixture_launch_template_v1(inputs: EnrolledFixtureInputsV1, t: EnrolledFixtureTemplateInputsV1,
+        args: [text]) -> Result<text, text>:
+    val request = GroupProcessStreamRequestV2(program: t.program, producer_digest: t.producer_digest, args: args,
+        environment: [], directory: t.directory, inputs: [], timeout_ms: t.timeout_ms, broker_program: t.broker_program,
+        broker_digest: t.broker_digest, child_argv_digest: group_process_child_argv_digest_v2(t.program, args),
+        launch_deadline_unix_ms: 0)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(t.helper_cpu_millis, t.helper_quota_us,
+            t.helper_period_us),
+        broker: GroupProcessBrokerBudgetV3(t.broker_cgroup, t.broker_device, t.broker_inode, t.broker_generation,
+            t.broker_policy_digest, t.broker_quota_us, t.broker_period_us, inputs.reserved_cpu_millis,
+            t.broker_memory_limit_bytes, inputs.reserved_memory_bytes),
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+    group_process_stream_template_encode_v3(GroupProcessStreamLaunchV2(root: t.root, worker_id: t.worker_id,
+        generation: t.generation, snapshot_digest: t.snapshot_digest, cache_identity: t.cache_identity,
+        memory_limit_bytes: t.memory_limit_bytes, request: request, delegated_cgroup_path: t.delegated_cgroup,
+        transport_generation: 0, profile_v3: Some(profile)))
+
+# The three-field wrapper the Host's loaders require (host_linux_service_records_v4): {version, kind, template}.
+fn enrolled_fixture_template_wrap_v1(version: i64, kind: text, template: text) -> text:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(version), "kind": SdnValue.String(kind),
+        "template": SdnValue.String(template)}
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+pub fn enrolled_fixture_broker_policy_v1(inputs: EnrolledFixtureInputsV1, t: EnrolledFixtureTemplateInputsV1,
+        args: [text]) -> Result<text, text>:
+    Ok(enrolled_fixture_template_wrap_v1(4, "linux-host-service-broker-policy",
+        enrolled_fixture_launch_template_v1(inputs, t, args)?))
+
+pub fn enrolled_fixture_agent_helper_template_v1(inputs: EnrolledFixtureInputsV1,
+        t: EnrolledFixtureTemplateInputsV1) -> Result<text, text>:
+    Ok(enrolled_fixture_template_wrap_v1(1, "linux-host-service-agent-helper-template",
+        enrolled_fixture_launch_template_v1(inputs, t, ["version"])?))
+
+pub fn enrolled_fixture_remote_build_template_v1(inputs: EnrolledFixtureInputsV1,
+        t: EnrolledFixtureTemplateInputsV1) -> Result<text, text>:
+    Ok(enrolled_fixture_template_wrap_v1(1, "linux-host-service-remote-build-helper-template",
+        enrolled_fixture_launch_template_v1(inputs, t, ["version"])?))
+
+# host-config.sdn has a decoder (decode_host_config) but no canonical encoder anywhere in src/.
+pub val ENROLLED_FIXTURE_HOST_CONFIG_BLOCKED_V1: text = "no canonical HostConfig encoder: std.common.contracts.orchestration.host_config_v1 has decode_host_config only (todo 484)"
 
 # sha256 pins of the five binding inputs read from `input_dir`; Err names the first missing input.
 pub fn enrolled_fixture_pins_v1(input_dir: text) -> Result<[text], text>:

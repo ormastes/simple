@@ -794,13 +794,19 @@ remote enrollment, operator key-policy enrollment, agent workspace close) has an
 - Producers: `test/fixtures/orchestrator/enrolled_host_signed_fixture_v1.spl` (lib) and
   `enrolled_host_signed_fixture_gen.spl` (guest entry, env `SIMPLE_ORCH_FIXTURE_*`, prints
   `FIXTURE OK|BLOCKED|ERROR <class>`). Spec: `test/03_system/app/orchestrator/feature/enrolled_host_signed_fixture_spec.spl`
-  (seed: executed=10 passed=7 blocked=3). The guest wrapper `--run-specs` runs the generator first (hook NOT_RUN;
+  (seed: executed=14 passed=9 blocked=5). The guest wrapper `--run-specs` runs the generator first (hook NOT_RUN;
   requires the final `FIXTURE DONE` line; keys are created exclusively after the dispatch install).
 - Trap: `host-linux-enrollment-issue` reads **OpenSSH** Ed25519 private files (`host_identity_private_encode_v1`) at
   `controller_authority_key_leaf_v1` names; openssl PKCS#8 PEM is refused.
-- Trap: `controller_dispatch_config_install_v1` creates files 0644 (`rt_file_create_excl`) then refuses them as
-  `dispatch-file-not-private` unless umask 077 (todo 483; `controller_dispatch_config_spec` fails 5/7 on the seed for this); the
-  generator pre-writes 0600.
+- Fixed 2026-11-27 (todo 483): `controller_dispatch_config_install_v1` used to create files 0666&~umask (`rt_file_create_excl`)
+  and then refuse them as `dispatch-file-not-private`. It now creates them 0600 itself: a 0600 stage (`file_atomic_write_mode`)
+  published by `file_hardlink` (exclusive, no-follow), never chmod-after. The seed has no `umask` extern, so the umask
+  case relies on the runner's inherited umask (run under `umask 022`). `controller_dispatch_config_spec` 9/9.
+- Profiles (todo 481): `enrolled_fixture_profiles_v1` builds all three from one engine policy; canonical SDN is ONE line
+  (`{a: 1, runRoot: /run/x}`, strings unquoted), so never `sed` a field out of a generated profile; pass the value instead.
+  The supervisor decoder is private: specs under `test/` may call it (`supervisor_profile_decode_v1`).
+- Pinned inputs (todo 484): only `host-config.sdn` lacks an encoder (`decode_host_config` only); the three template
+  wrappers use `group_process_stream_template_encode_v3` but need live broker measurements.
 - Trap: the machine-policy decoder needs `version: 2` and canonical bytes; hand-written SDN never decodes.
 - The pure codecs (ed25519, entropy, gateway, binding, authority policy, enrollment issuer) all run on the seed; the
   installed-profile/policy/native-identity openers fail on the seed with `unknown extern function: gettid`.
