@@ -103,7 +103,7 @@ describe "Metal Engine2D framebuffer readback":
             else:
                 expect(is_macos()).to_equal(false)
 
-        it "round-trips a GPU-only masked draw back to device readback":
+        it "round-trips a GPU-only masked draw with honest cpu_mirror provenance":
             if is_macos():
                 var b = MetalBackend.create()
                 expect(b.init(4, 4)).to_equal(true)
@@ -118,13 +118,16 @@ describe "Metal Engine2D framebuffer readback":
                 b.set_mask(mask, 4, 4)
                 # draw_rect_blend is a CPU-composited operation in GPU-only
                 # mode. It must retain the general mask rather than trying to
-                # re-snapshot the deliberately incomplete device frame.
+                # re-snapshot the deliberately incomplete device frame, and must
+                # never label CPU-composited readback as device_readback.
                 b.draw_rect_blend(0, 0, 4, 4, 0xffff0000u32)
                 b.clear_mask()
                 expect(b.gpu_frame_complete).to_equal(true)
                 val receipt = b.read_pixels_with_source()
-                expect(receipt.source).to_equal("device_readback")
-                expect(receipt.backend_handle).to_be_greater_than(0)
+                expect(receipt.source).to_equal("cpu_mirror")
+                expect(receipt.source == "device_readback").to_equal(false)
+                expect(receipt.backend_handle).to_equal(0)
+                expect(b.d_framebuffer).to_be_greater_than(0)
                 expect(receipt.pixels[0]).to_equal(0xff000000u32)
                 expect(receipt.pixels[3]).to_equal(0xffff0000u32)
                 b.shutdown()
@@ -141,7 +144,8 @@ describe "Metal Engine2D framebuffer readback":
                 b.draw_rect_blend(0, 0, 8, 8, 0xffff0000u32)
                 expect(b.gpu_frame_complete).to_equal(true)
                 val receipt = b.read_pixels_with_source()
-                expect(receipt.source).to_equal("device_readback")
+                expect(receipt.source).to_equal("cpu_mirror")
+                expect(receipt.source == "device_readback").to_equal(false)
                 expect(receipt.pixels[0]).to_equal(0xff000000u32)
                 expect(receipt.pixels[2 + (2 * 8)]).to_equal(0xffff0000u32)
                 expect(receipt.pixels[4 + (3 * 8)]).to_equal(0xffff0000u32)

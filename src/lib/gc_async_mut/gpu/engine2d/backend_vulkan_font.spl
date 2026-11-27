@@ -1314,6 +1314,10 @@ impl VulkanBackend:
         records on `last_text_path` / `last_text_fallback_reason` which lane
         actually ran — never claiming the atlas ran when it did not.
         """
+        if self.cpu_fallback_host_surface:
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = "cpu-fallback-host-surface-active"
+            return true
         val metrics = text_metrics(text_val, font_size)
         val pipeline = self.font_atlas_pipeline_evidence()
         val blocked = vulkan_bitmap_text_atlas_block_reason(
@@ -1383,6 +1387,10 @@ impl VulkanBackend:
     me _bitmap_text_bg_atlas_path(x: i32, y: i32, text_val: text, fg: u32, bg: u32,
                                   font_size: i32) -> bool:
         """Background band plus the glyph batch; true when the CPU path must still run."""
+        if self.cpu_fallback_host_surface:
+            self.last_text_path = VULKAN_TEXT_PATH_CPU_RASTER
+            self.last_text_fallback_reason = "cpu-fallback-host-surface-active"
+            return true
         val metrics = text_metrics(text_val, font_size)
         val pipeline = self.font_atlas_pipeline_evidence()
         val blocked = vulkan_bitmap_text_atlas_block_reason(
@@ -1415,8 +1423,24 @@ impl VulkanBackend:
         # renderer. Tests and evidence collectors opt in explicitly.
         self.font_oracle_mode = enabled
 
+    me _font_batch_guard_evidence(batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
+        val pipeline = self.font_atlas_pipeline_evidence()
+        if self.completion_unknown:
+            return _vulkan_font_evidence(
+                pipeline, "failed", "completion-unknown",
+                self.d_font_atlas, self.d_font_params, 0, 0,
+                batch.quads.len(), 0, false, false, self.d_framebuffer,
+                0, 0, 0, false)
+        _vulkan_font_evidence(
+            pipeline, "unavailable", "cpu-fallback-host-surface-active",
+            self.d_font_atlas, self.d_font_params, 0, 0,
+            batch.quads.len(), 0, false, false, self.d_framebuffer,
+            0, 0, 0, false)
+
     me composite_font_batch(origin_x: i32, origin_y: i32,
                             batch: FontRenderBatch) -> VulkanFontCompositeEvidence:
+        if self.completion_unknown or self.cpu_fallback_host_surface:
+            return self._font_batch_guard_evidence(batch)
         val clock = default_frame_clock()
         val started_ns = clock.now_micros() * 1000
         # Split a batch whose quads overlap into sub-batches that do not, and
@@ -1541,6 +1565,8 @@ impl VulkanBackend:
 
     me _composite_font_batch_impl(origin_x: i32, origin_y: i32,
                                   batch: FontRenderBatch, clock: FrameClock) -> VulkanFontCompositeEvidence:
+        if self.completion_unknown or self.cpu_fallback_host_surface:
+            return self._font_batch_guard_evidence(batch)
         # The host mirror is stale for the whole of this call and is revalidated
         # ONLY on a path that provably leaves it describing the atlas: a
         # successful upload, or a cache hit that proves the atlas did not move.
