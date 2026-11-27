@@ -2,8 +2,11 @@
 
 use app.compile.native.{
     native_c_object_compile_flags,
+    native_c_object_compile_flags_for_preset,
+    native_c_source_compile_flags,
     native_link_hardening_flags,
     native_stack_protector_flags,
+    native_stack_protector_flags_for_preset,
     should_strip_llvm_constructors_for_platform
 }
 use testing.{describe, it, expect}
@@ -41,3 +44,20 @@ describe "App native build hardening":
         expect(should_strip_llvm_constructors_for_platform("linux")).to_equal(true)
         expect(should_strip_llvm_constructors_for_platform("freebsd")).to_equal(true)
         expect(should_strip_llvm_constructors_for_platform("macos")).to_equal(false)
+
+    it "gates stack protector by preset so baremetal and embedded_with_heap can opt out":
+        expect(native_stack_protector_flags_for_preset("simpleos", "hosted")).to_equal("-fstack-protector-strong ")
+        expect(native_stack_protector_flags_for_preset("linux", "")).to_equal("-fstack-protector-strong ")
+        expect(native_stack_protector_flags_for_preset("simpleos", "baremetal")).to_equal("")
+        expect(native_stack_protector_flags_for_preset("simpleos", "embedded_with_heap")).to_equal("")
+        expect(native_c_object_compile_flags_for_preset("simpleos", false, "hosted")).to_equal("-fstack-protector-strong -c -fPIE")
+        expect(native_c_object_compile_flags_for_preset("simpleos", false, "baremetal")).to_equal("-c -fPIE")
+        expect(native_c_object_compile_flags_for_preset("simpleos", true, "embedded_with_heap")).to_equal("-fsanitize=address,leak -fno-omit-frame-pointer -g -c -fPIE")
+
+    it "builds standalone core-C source compile flags with platform SSP and preset policy":
+        val hosted_simpleos = native_c_source_compile_flags("simpleos", false, 2, true, "x86-64-v2", "hosted")
+        expect(hosted_simpleos).to_equal("-std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -O2 -flto=thin -march=x86-64-v2 -fstack-protector-strong ")
+        val baremetal_simpleos = native_c_source_compile_flags("simpleos", false, 2, false, "", "baremetal")
+        expect(baremetal_simpleos).to_equal("-std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -O2 ")
+        val macos_hosted = native_c_source_compile_flags("macos", true, 3, false, "", "hosted")
+        expect(macos_hosted).to_equal("-std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -O3 -fsanitize=address,leak -fno-omit-frame-pointer -g ")

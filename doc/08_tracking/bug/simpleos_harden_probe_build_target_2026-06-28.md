@@ -112,3 +112,14 @@ fabricate as a quick fix here. Leaving this OPEN honestly rather than
 claiming partial progress; no code changes were made to this doc's target
 artifacts in this pass.
 
+## W4-8 Update (2026-11-27) — `fix-implemented-verification-pending` (harden target contract + OVMF media ordering)
+
+- **Contract & fail-closed firmware ordering (`src/os/qemu_systest_contract.spl`):**
+  - Added canonical harden-probe target contract helpers aligned with `scripts/check/build-simpleos-nvfs-positioned-qemu.shs --harden-probe`: `harden_target_triple()`, `harden_entry_path()`, `harden_linker_script_path()`, `harden_builder_script()`, `harden_builder_args()`, `harden_payload_path()`, `harden_payload_manifest_path()`, and `harden_media_receipt_path(firmware_esp_path)`.
+  - Extracted `harden_media_receipt_format(...)` (used by `harden_media_receipt_error`).
+  - Added `run_harden_qemu_systest_with_firmware(...)` and updated `run_harden_qemu_systest_with_media(...)` so a missing `OVMF_CODE` firmware image fails closed with `"missing-media:" + firmware_code_path` instead of falling through to `"invalid-media-receipt:"`.
+- **Host unit & selector verification (no QEMU launched):**
+  - `test/01_unit/os/qemu_systest_contract_spec.spl`: `25 total, 25 passed, 0 failed` (`--mode=interpreter`).
+  - `sh scripts/check/check-simpleos-harden-probe-build-target.shs`: `simpleos_harden_probe_build_target_status=pass`.
+- **Status:** `fix-implemented-verification-pending` — `waiting-for:` QEMU OVMF boot and live AC-1/AC-2/AC-8/9/10 harden-probe kernel execution markers.
+

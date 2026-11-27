@@ -37,6 +37,12 @@ Tests all four classification outcomes:
 use std.spec.step
 
 use std.spec.*
+use std.nogc_sync_mut.io_runtime.{
+    dir_create_all,
+    dir_remove_all,
+    file_hash_sha256_or_empty,
+    file_write
+}
 use os.qemu_systest_contract.{
 
     classify_serial,
@@ -45,6 +51,29 @@ use os.qemu_systest_contract.{
     qemu_args_with_run_image,
     qemu_nonce_serial_marker,
     x86_64_qemu_args,
+    harden_target_triple,
+    harden_entry_path,
+    harden_linker_script_path,
+    harden_builder_script,
+    harden_builder_args,
+    harden_kernel_path,
+    harden_image_path,
+    harden_payload_path,
+    harden_payload_manifest_path,
+    harden_firmware_vars_path,
+    harden_firmware_esp_path,
+    harden_media_receipt_path,
+    harden_qemu_bin,
+    harden_qemu_args,
+    harden_qemu_args_with_media,
+    harden_qemu_args_with_firmware,
+    harden_media_receipt_format,
+    harden_media_receipt_error,
+    harden_media_first_missing_path,
+    run_harden_qemu_systest_with_firmware,
+    harden_cap_exec_markers,
+    harden_malloc_markers,
+    harden_pie_relro_markers,
     SYSTEST_PASS,
     SYSTEST_BOOT_FAIL_FALLBACK,
     riscv64_markers,
@@ -220,3 +249,106 @@ describe "classify_serial — edge cases":
         val markers = ["A", "B", "C"]
         val result = classify_serial("A\nB\n", markers)
         expect(result).to_equal("boot-fail:C")
+
+# ---------------------------------------------------------------------------
+# harden probe build target and OVMF media contract
+# ---------------------------------------------------------------------------
+
+describe "harden probe build target and firmware media contract":
+
+    it "pins canonical harden-probe build target paths and builder selector":
+        # @req REQ-SSPEC-UNIT
+        step("pins canonical harden-probe build target paths and builder selector")
+        expect(harden_target_triple()).to_equal("x86_64-unknown-none")
+        expect(harden_entry_path()).to_equal("examples/09_embedded/simple_os/arch/x86_64/harden_probe_entry.spl")
+        expect(harden_linker_script_path()).to_equal("examples/09_embedded/simple_os/arch/x86_64/linker.ld")
+        expect(harden_builder_script()).to_equal("scripts/check/build-simpleos-nvfs-positioned-qemu.shs")
+        expect(harden_builder_args()).to_equal(["--harden-probe"])
+        expect(harden_kernel_path()).to_equal("build/os/simpleos_x86_64_harden_probe.elf")
+        expect(harden_image_path()).to_equal("build/os/fat32-x86_64-harden.img")
+        expect(harden_payload_path()).to_equal("build/os/harden/fsexec_nonce_probe.elf")
+        expect(harden_payload_manifest_path()).to_equal("build/os/harden/fsexec_nonce_probe.manifest")
+        expect(harden_firmware_vars_path()).to_equal("build/os/harden/firmware/OVMF_VARS_4M.fd")
+        expect(harden_firmware_esp_path()).to_equal("build/os/harden/firmware/esp")
+        expect(harden_media_receipt_path(harden_firmware_esp_path())).to_equal("build/os/harden/firmware/esp/../harden-media-receipt.env")
+
+    it "builds OVMF real-firmware QEMU args without dev-harness shortcuts":
+        # @req REQ-SSPEC-UNIT
+        step("builds OVMF real-firmware QEMU args without dev-harness shortcuts")
+        expect(harden_qemu_bin()).to_equal("qemu-system-x86_64")
+        val default_args = harden_qemu_args()
+        expect(default_args.contains("-kernel")).to_equal(false)
+        expect(default_args.contains("isa-debug-exit,iobase=0xf4,iosize=0x04")).to_equal(false)
+        expect(default_args.contains("if=pflash,format=raw,snapshot=on,file=build/os/harden/firmware/OVMF_VARS_4M.fd")).to_equal(true)
+        val fw_args = harden_qemu_args_with_firmware("fixture.img", "/opt/ovmf/code.fd", "fixture-vars.fd", "fixture-esp")
+        expect(fw_args.contains("if=pflash,format=raw,readonly=on,file=/opt/ovmf/code.fd")).to_equal(true)
+        expect(fw_args.contains("file=fat:fixture-esp,format=raw,id=hardenesp,if=none")).to_equal(true)
+        expect(fw_args.contains("file=fixture.img,if=none,id=hardennsd,format=raw")).to_equal(true)
+
+    it "reports the first missing harden media path deterministically":
+        # @req REQ-SSPEC-UNIT
+        step("reports the first missing harden media path deterministically")
+        expect(harden_media_first_missing_path("k.elf", false, "d.img", true, "v.fd", true, "BOOTX64.EFI", true)).to_equal("missing-media:k.elf")
+        expect(harden_media_first_missing_path("k.elf", true, "d.img", false, "v.fd", true, "BOOTX64.EFI", true)).to_equal("missing-media:d.img")
+        expect(harden_media_first_missing_path("k.elf", true, "d.img", true, "v.fd", false, "BOOTX64.EFI", true)).to_equal("missing-media:v.fd")
+        expect(harden_media_first_missing_path("k.elf", true, "d.img", true, "v.fd", true, "BOOTX64.EFI", false)).to_equal("missing-media:BOOTX64.EFI")
+        expect(harden_media_first_missing_path("k.elf", true, "d.img", true, "v.fd", true, "BOOTX64.EFI", true)).to_equal("")
+
+    it "fails closed on missing firmware code or forged receipt before QEMU":
+        # @req REQ-SSPEC-UNIT
+        step("fails closed on missing firmware code or forged receipt before QEMU")
+        val root = "build/os/systest/harden-contract-unit"
+        dir_remove_all(root)
+        val kernel = root + "/kernel.elf"
+        val image = root + "/image.img"
+        val vars = root + "/vars.fd"
+        val code = root + "/code.fd"
+        val esp = root + "/esp"
+        val efi = esp + "/EFI/BOOT/BOOTX64.EFI"
+        val receipt = harden_media_receipt_path(esp)
+        expect(dir_create_all(esp + "/EFI/BOOT")).to_equal(true)
+        expect(file_write(kernel, "harden-kernel")).to_equal(true)
+        expect(file_write(image, "harden-image")).to_equal(true)
+        expect(file_write(vars, "harden-vars")).to_equal(true)
+        expect(file_write(efi, "harden-efi")).to_equal(true)
+
+        expect(run_harden_qemu_systest_with_firmware(
+            "harden_unit_missing_code", kernel, image, root + "/missing-code.fd",
+            vars, esp, harden_cap_exec_markers()
+        )).to_equal("missing-media:" + root + "/missing-code.fd")
+
+        expect(file_write(code, "harden-code")).to_equal(true)
+        expect(run_harden_qemu_systest_with_firmware(
+            "harden_unit_missing_receipt", kernel, image, code,
+            vars, esp, harden_cap_exec_markers()
+        )).to_equal("missing-media:" + receipt)
+
+        val valid_receipt = harden_media_receipt_format(
+            file_hash_sha256_or_empty(kernel),
+            file_hash_sha256_or_empty(efi),
+            code,
+            file_hash_sha256_or_empty(code))
+        expect(file_write(receipt, valid_receipt)).to_equal(true)
+        expect(harden_media_receipt_error(receipt, kernel, efi, code)).to_equal("")
+
+        expect(file_write(receipt, valid_receipt + "tamper=1\n")).to_equal(true)
+        expect(run_harden_qemu_systest_with_firmware(
+            "harden_unit_bad_receipt", kernel, image, code,
+            vars, esp, harden_cap_exec_markers()
+        )).to_equal("invalid-media-receipt:" + receipt)
+        dir_remove_all(root)
+
+    it "classifies all harden capability, malloc, and PIE/RELRO/SSP marker sets":
+        # @req REQ-SSPEC-UNIT
+        step("classifies all harden capability, malloc, and PIE/RELRO/SSP marker sets")
+        val cap_markers = harden_cap_exec_markers()
+        expect(classify_serial(cap_markers.join("\n") + "\n", cap_markers)).to_equal(SYSTEST_PASS)
+        expect(classify_serial("[exec] capability gate: ENFORCED\n", cap_markers)).to_equal("boot-fail:[exec] uncapable exec REJECTED")
+
+        val malloc_markers = harden_malloc_markers()
+        expect(classify_serial(malloc_markers.join("\n") + "\n", malloc_markers)).to_equal(SYSTEST_PASS)
+        expect(classify_serial("[hmalloc] guard-page trap OK\n", malloc_markers)).to_equal("boot-fail:[hmalloc] double-free TRAPPED")
+
+        val sec_markers = harden_pie_relro_markers()
+        expect(classify_serial(sec_markers.join("\n") + "\n", sec_markers)).to_equal(SYSTEST_PASS)
+        expect(classify_serial("[hardening] PIE=1\n[hardening] RELRO=1 BIND_NOW=1\n[hardening] NX=1 SMEP=1 SMAP=1\n", sec_markers)).to_equal("boot-fail:[hardening] STACK_CANARY=1")

@@ -16,9 +16,18 @@ use std.common.contracts.execution.simpleos_target_v1.{
     SIMPLEOS_TARGET_V1_AARCH64_TRIPLE,
     SIMPLEOS_TARGET_V1_RISCV64GC_TRIPLE
 }
+use os.port.guest_toolchain_artifact_build_receipt.{
+    GuestToolchainArtifactRoleV1,
+    GuestToolchainArtifactFormatV1,
+    GuestToolchainArtifactBuildReceiptV1,
+    guest_toolchain_artifact_build_command_sha256_v1,
+    guest_toolchain_artifact_build_receipt_payload_sha256_v1,
+    guest_toolchain_artifact_canonical_output_path_v1
+}
 use os.port.guest_toolchain_execution_gate.{
     GuestToolchainRole, GuestToolchainFilesystem,
     GuestToolchainExecutionReceiptError,
+    GuestToolchainExecutionWiringError,
     GuestToolchainRoleExecutionV1, GuestToolchainAliasBindingV1,
     GuestToolchainExecutionReceiptV1,
     guest_toolchain_role_canonical_path,
@@ -28,7 +37,11 @@ use os.port.guest_toolchain_execution_gate.{
     guest_toolchain_execution_receipt_v1_validate,
     guest_toolchain_execution_candidate_ready_for_evidence_admission,
     guest_toolchain_execution_receipt_gate_detail,
-    guest_toolchain_execution_gate_detail
+    guest_toolchain_execution_gate_detail,
+    guest_toolchain_artifact_role_to_execution_role,
+    guest_toolchain_execution_role_to_artifact_role,
+    guest_toolchain_execution_bind_build_receipts_v1,
+    guest_toolchain_real_payload_wiring_gate_detail
 }
 
 fn _role(
@@ -461,3 +474,119 @@ describe "target-native guest toolchain typed receipt":
         expect(detail).to_contain("authoritative target-native receipt producer")
         expect(detail).to_contain("loader-owned consume-once token")
         expect(detail.contains("READY")).to_be(false)
+
+fn _build_receipt_for_role(
+    role: GuestToolchainArtifactRoleV1,
+    target: text
+) -> GuestToolchainArtifactBuildReceiptV1:
+    val exec_role = guest_toolchain_artifact_role_to_execution_role(role)
+    val guest_path = guest_toolchain_role_canonical_path(exec_role)
+    val fmt = if role == GuestToolchainArtifactRoleV1.SimpleCompiler or
+                 role == GuestToolchainArtifactRoleV1.SimpleInterpreter or
+                 role == GuestToolchainArtifactRoleV1.SimpleLoader:
+        GuestToolchainArtifactFormatV1.Smf
+    else:
+        GuestToolchainArtifactFormatV1.Elf
+    val output_path = guest_toolchain_artifact_canonical_output_path_v1(target, role, fmt)
+    val output_sha = sha256_text("guest-tool-artifact:" + guest_path)
+    val builder_path = "bin/release/simple"
+    val argv = [builder_path, "--target", target, "--output", output_path]
+    var r = GuestToolchainArtifactBuildReceiptV1(
+        schema_version: 1,
+        receipt_id: "build-" + guest_path,
+        target_triple: target,
+        target_abi: simpleos_target_v1_abi_for_triple(target),
+        role: role,
+        artifact_format: fmt,
+        builder_path: builder_path,
+        builder_sha256: sha256_text("builder:" + builder_path),
+        builder_source_path: "src/os/port/deploy_toolchains.spl",
+        builder_source_sha256: sha256_text("src:deploy_toolchains"),
+        builder_provenance_sha256: sha256_text("prov:stage4"),
+        source_revision_sha256: sha256_text("rev:head"),
+        dependency_manifest_sha256: sha256_text("deps:lock"),
+        build_environment_sha256: sha256_text("env:clean"),
+        builder_argv: argv,
+        build_command_sha256: guest_toolchain_artifact_build_command_sha256_v1(argv),
+        output_path: output_path,
+        output_sha256: output_sha,
+        output_size: 4096,
+        rebuild_output_sha256: output_sha,
+        rebuild_output_size: 4096,
+        receipt_payload_sha256: sha256_text("placeholder-build-payload"),
+        used_path_lookup: false,
+        used_host_fallback: false
+    )
+    r.receipt_payload_sha256 = guest_toolchain_artifact_build_receipt_payload_sha256_v1(r)
+    r
+
+fn _all_build_receipts(target: text) -> [GuestToolchainArtifactBuildReceiptV1]:
+    [
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.SimpleCompiler, target),
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.SimpleInterpreter, target),
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.SimpleLoader, target),
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.Llvm, target),
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.Clang, target),
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.Clangxx, target),
+        _build_receipt_for_role(GuestToolchainArtifactRoleV1.Lld, target)
+    ]
+
+describe "build-to-guest real-payload execution wiring contract":
+    # @manual scenario evidence
+    it "binds all seven built toolchain artifacts to guest execution roles while staying fail-closed":
+        # @req REQ-SSPEC-OS
+        step("binds all seven built toolchain artifacts to guest execution roles while staying fail-closed")
+        val exec_receipt = _x86_fat32_receipt()
+        val build_receipts = _all_build_receipts(SIMPLEOS_TARGET_V1_X86_64_TRIPLE)
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, build_receipts).is_ok()).to_be(true)
+
+        expect(guest_toolchain_execution_role_to_artifact_role(GuestToolchainRole.Clang)).to_equal(
+            Some(GuestToolchainArtifactRoleV1.Clang))
+        expect(guest_toolchain_execution_role_to_artifact_role(GuestToolchainRole.SimpleCompileWorkflow)).to_equal(
+            Some(GuestToolchainArtifactRoleV1.SimpleCompiler))
+
+        val detail = guest_toolchain_real_payload_wiring_gate_detail(exec_receipt, build_receipts)
+        expect(detail).to_start_with("BLOCKED:")
+        expect(detail).to_contain("build-to-guest real-payload wiring verified")
+        expect(detail).to_contain("authoritative QEMU guest execution receipt")
+        expect(detail.contains("READY")).to_be(false)
+
+    it "rejects missing roles, digest drift, target mismatch, and forged build receipts":
+        # @req REQ-SSPEC-OS
+        step("rejects missing roles, digest drift, target mismatch, and forged build receipts")
+        val exec_receipt = _x86_fat32_receipt()
+        val empty_builds: [GuestToolchainArtifactBuildReceiptV1] = []
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, empty_builds).unwrap_err()).to_equal(
+            GuestToolchainExecutionWiringError.EmptyBuildReceipts)
+
+        val partial = _all_build_receipts(SIMPLEOS_TARGET_V1_X86_64_TRIPLE).slice(0, 6)
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, partial).unwrap_err()).to_equal(
+            GuestToolchainExecutionWiringError.MissingBuildRole)
+
+        var duplicate = _all_build_receipts(SIMPLEOS_TARGET_V1_X86_64_TRIPLE)
+        duplicate[6] = duplicate[0]
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, duplicate).unwrap_err()).to_equal(
+            GuestToolchainExecutionWiringError.DuplicateBuildRole)
+
+        var wrong_target = _all_build_receipts(SIMPLEOS_TARGET_V1_X86_64_TRIPLE)
+        wrong_target[4] = _build_receipt_for_role(GuestToolchainArtifactRoleV1.Clang, SIMPLEOS_TARGET_V1_AARCH64_TRIPLE)
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, wrong_target).unwrap_err()).to_equal(
+            GuestToolchainExecutionWiringError.TargetMismatch)
+
+        var forged_build = _all_build_receipts(SIMPLEOS_TARGET_V1_X86_64_TRIPLE)
+        var c_receipt = forged_build[4]
+        c_receipt.receipt_id = "forged-build-receipt"
+        forged_build[4] = c_receipt
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, forged_build).unwrap_err()).to_equal(
+            GuestToolchainExecutionWiringError.BuildReceiptDigestMismatch)
+
+        var drift_build = _all_build_receipts(SIMPLEOS_TARGET_V1_X86_64_TRIPLE)
+        var d_receipt = drift_build[4]
+        d_receipt.output_sha256 = sha256_text("different-clang-binary")
+        d_receipt.rebuild_output_sha256 = d_receipt.output_sha256
+        d_receipt.receipt_payload_sha256 = guest_toolchain_artifact_build_receipt_payload_sha256_v1(d_receipt)
+        drift_build[4] = d_receipt
+        expect(guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, drift_build).unwrap_err()).to_equal(
+            GuestToolchainExecutionWiringError.ToolArtifactDigestMismatch)
+        expect(guest_toolchain_real_payload_wiring_gate_detail(exec_receipt, drift_build)).to_equal(
+            "BLOCKED: build artifact receipts do not bind real guest execution payloads")

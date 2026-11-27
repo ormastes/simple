@@ -120,3 +120,11 @@ policy and QEMU guest evidence.
 - **CLI wrapper fix (`src/app/compile/native.spl`):** Extracted `native_c_object_compile_flags(platform: text, sanitize: bool) -> text` and updated `compile_c_to_object` to apply `native_stack_protector_flags(detect_platform())` (`-fstack-protector-strong` on `"linux"`, `"freebsd"`, `"simpleos"`), matching `compile_native_source`.
 - **Host spec:** Extended `test/01_unit/app/compile/native_hardening_spec.spl` with `native_c_object_compile_flags` matrix checks -> `5 total, 5 passed, 0 failed`.
 - **Remaining open slice (out of W2-4 scope):** `src/compiler/**` still lacks Cranelift-route SSP policy for baremetal/SimpleOS codegen, and QEMU system verification (`test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`) remains pending. Status kept `open`.
+
+## W4-8 Update (2026-11-27) — `fix-implemented-verification-pending` (preset-gated `native.spl` SSP & source compile contract)
+
+- **CLI native wrapper (`src/app/compile/native.spl`):**
+  - Added `native_stack_protector_flags_for_preset(platform, preset)` (`"baremetal"` and `"embedded_with_heap"` opt out cleanly; hosted/default delegates to `native_stack_protector_flags(platform)`).
+  - Extracted `native_c_object_compile_flags_for_preset(platform, sanitize, preset)` (kept `native_c_object_compile_flags` delegating with `"hosted"`) and `native_c_source_compile_flags(platform, sanitize, opt_level, use_lto, march_target, preset)` (used directly by `compile_native_source`) so core-C source flags are pure and unit-testable without shelling out.
+- **Host unit verification:** Extended `test/01_unit/app/compile/native_hardening_spec.spl` (`7 total, 7 passed, 0 failed`, `--mode=interpreter` on seed). Note: `test/01_unit/compiler/backend/simpleos_ssp_codegen_spec.spl` remains `1 passed, 4 failed` under the Windows seed interpreter (`MirToLlvm.create_explicit_target_with_hardening` returns `nil`; `src/compiler/**` out of W4-8 scope).
+- **Status:** `fix-implemented-verification-pending` — `waiting-for:` Cranelift SSP codegen under `src/compiler/**` and QEMU guest execution of `test/03_system/os/qemu/os/harden/pie_ssp_relro_preset_spec.spl`.
