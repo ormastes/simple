@@ -1,0 +1,52 @@
+# Regression for compiler_interpreter_integration_real_gaps_found_2026-09-06
+# gap 5 (circular-import detection, REQ-COMPINT-MOD-003): two modules that
+# `use` each other's top-level `val` create a circular VALUE dependency the
+# loader cannot honor — it must be a hard error, not a silent partial bind.
+# Type-level cycles keep the partial-exports path and are pinned separately in
+# test/02_integration/compiler/compiler_interpreter_integration_spec.spl.
+# Runs the real seed binary as a subprocess.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{write_file, file_exists, env_get}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{dir_create_all}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+describe "circular value import between two modules":
+    it "rejects two modules using each other's top-level val with exit 1":
+        step("Write moda/modb that use each other's val plus a main importing moda")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap5_cycle"
+        expect(dir_create_all(dir)).to_equal(true)
+        val _a = write_file(dir + "/moda.spl", "use modb." + "{" + "b_val" + "}" + "\nval a_val = 1\n")
+        val _b = write_file(dir + "/modb.spl", "use moda." + "{" + "a_val" + "}" + "\nval b_val = 2\n")
+        val _m = write_file(dir + "/main_circular.spl", "use moda." + "{" + "a_val" + "}" + "\nprint(a_val)\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["run", dir + "/main_circular.spl"], 300000)
+        expect(rc).to_equal(1)
+        expect(err.contains("circular import")).to_equal(true)
+
+    it "still runs an acyclic three-module import chain":
+        step("Positive control: main -> level2 -> level1 over exported fns")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap5_cycle"
+        expect(dir_create_all(dir)).to_equal(true)
+        val _1 = write_file(dir + "/level1.spl", "fn level1_val() -> i64:\n    100\nexport level1_val\n")
+        val _2 = write_file(dir + "/level2.spl", "use level1." + "{" + "level1_val" + "}" + "\nfn level2_val() -> i64:\n    level1_val() + 1\nexport level2_val\n")
+        val _m = write_file(dir + "/main_acyclic.spl", "use level2." + "{" + "level2_val" + "}" + "\nprint(level2_val())\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["run", dir + "/main_acyclic.spl"], 300000)
+        expect(rc).to_equal(0)
+        expect(out.contains("101")).to_equal(true)
+
+    it "keeps cyclic function imports working (call-time late binding)":
+        step("Two modules that use each other's pub fn must not be flagged: stdlib pattern")
+        val dir = get_temp_dir().replace("\\", "/") + "/p3_gap5_cycle"
+        expect(dir_create_all(dir)).to_equal(true)
+        val _a = write_file(dir + "/fna.spl", "use fnb." + "{" + "b_fn" + "}" + "\nfn a_fn() -> i64:\n    41\nexport a_fn\npub fn a_pub() -> i64:\n    a_fn()\n")
+        val _b = write_file(dir + "/fnb.spl", "use fna." + "{" + "a_pub" + "}" + "\nfn b_fn() -> i64:\n    a_pub() + 1\nexport b_fn\n")
+        val _m = write_file(dir + "/main_fn_cycle.spl", "use fna." + "{" + "a_fn" + "}" + "\nprint(a_fn())\n")
+        val (out, err, rc) = process_run_timeout(binary(), ["run", dir + "/main_fn_cycle.spl"], 300000)
+        expect(rc).to_equal(0)
+        expect(out.contains("41")).to_equal(true)

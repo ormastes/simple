@@ -849,9 +849,10 @@ fn fn_visibility_outcome(name: &str, owner: &Arc<str>, current: &str) -> FnVisib
     if !in_private && !in_friend {
         return FnVisibilityOutcome::Allowed;
     }
-    if clean_parent_dir(owner) == clean_parent_dir(current) {
-        return FnVisibilityOutcome::Allowed;
-    }
+    // NOTE: the same-directory sibling exemption is applied by the callers
+    // (`is_fn_visible_to`, `check_private_call_visibility`, and per-name in
+    // `check_private_use_names`, where `_`-prefixed names are exempted from
+    // the exemption). This evaluator is dir-agnostic on purpose.
     let owner_clean = clean_visibility_path(owner);
     if private_import_is_baselined(Path::new(&owner_clean), name) {
         return FnVisibilityOutcome::Allowed;
@@ -871,6 +872,12 @@ fn fn_visibility_outcome(name: &str, owner: &Arc<str>, current: &str) -> FnVisib
 }
 
 pub(crate) fn is_fn_visible_to(name: &str, owner: &Arc<str>, current: &Arc<str>) -> bool {
+    // Call rule: the same-directory sibling exemption applies to every name
+    // here (the import rule in `check_private_use_names` narrows it for
+    // `_`-prefixed names; calls intentionally keep the broader exemption).
+    if clean_parent_dir(owner) == clean_parent_dir(current) {
+        return true;
+    }
     matches!(fn_visibility_outcome(name, owner, current), FnVisibilityOutcome::Allowed)
 }
 
@@ -1034,8 +1041,10 @@ pub const FRIEND_SYMBOL_VISIBILITY_HINT: &str =
 /// a braced `use m.{name}` that names a private `fn` of `m` (not re-exported by
 /// an `export`) from a file outside `m`'s directory is a hard error unless the pair is frozen in
 /// `scripts/check/private_import_baseline.txt` (legacy: warn only). Same-directory
-/// siblings stay in compatibility mode (bare `fn` is private to its file; sibling
-/// access is the documented compatibility exception).
+/// siblings stay in compatibility mode for plain private names only; a
+/// `_`-prefixed top-level fn is module-internal by naming convention and is
+/// rejected even from a same-directory sibling (gap 4, export visibility;
+/// doc/08_tracking/bug/compiler_interpreter_integration_real_gaps_found_2026-09-06.md).
 /// Test importers are exempt (owner decision 2026-11-13: "test is special, can
 /// access"), using the same `is_test_caller` definition as
 /// `check_private_call_visibility` so the import and call rules agree.
@@ -1053,9 +1062,7 @@ fn check_private_use_names(
         return Ok(());
     }
     let dir_of = |p: &Path| p.parent().map(|d| std::fs::canonicalize(d).unwrap_or_else(|_| d.to_path_buf()));
-    if dir_of(importer) == dir_of(module_path) {
-        return Ok(());
-    }
+    let same_dir = dir_of(importer) == dir_of(module_path);
     let Some(requested) = requested_group_import_names(use_stmt) else {
         return Ok(());
     };
@@ -1063,7 +1070,12 @@ fn check_private_use_names(
     let has_policy = lookup_owner_policy(&owner_key).is_some();
     let importer_str = importer.to_string_lossy();
     for name in requested {
-        let outcome = if has_policy {
+        let outcome = if same_dir && !name.starts_with('_') {
+            // Directory siblings share a namespace, but only for plain private
+            // names; `_`-prefixed top-level fns stay module-internal even for
+            // a zero-length directory boundary (gap 4, export visibility).
+            FnVisibilityOutcome::Allowed
+        } else if has_policy {
             fn_visibility_outcome(&name, &owner_key, &importer_str)
         } else if provided.private_fns.contains(&name) {
             if private_import_is_baselined(module_path, &name) {
@@ -1155,6 +1167,35 @@ fn private_import_is_baselined(module_path: &Path, name: &str) -> bool {
 /// Message tail of every unprovided-use rejection; nested-load error arms key on it
 /// so the rejection propagates instead of degrading to an empty module dict.
 pub(crate) const UNPROVIDED_USE_MARKER: &str = "does not provide it (imported from";
+
+/// Message head of every circular-import rejection; nested-load error arms key
+/// on it so the rejection propagates instead of degrading to an empty dict.
+pub(crate) const CIRCULAR_IMPORT_MARKER: &str = "circular import: module";
+
+pub(crate) fn is_circular_import_error(e: &CompileError) -> bool {
+    e.to_string().contains(CIRCULAR_IMPORT_MARKER)
+}
+
+/// True when the (possibly in-flight) module's parsed AST binds `name` as a
+/// top-level value (`val`/`const`/`static`). Function names are deliberately
+/// excluded: cyclic fn imports resolve at call time once the owner finishes
+/// loading, so only value bindings are init-order hazards across a cycle.
+fn in_flight_module_defines_value_binding(module_path: &Path, name: &str) -> bool {
+    let super::module_cache::SharedSource::Parsed { ast: Ok(ast), .. } = super::module_cache::shared_source(module_path)
+    else {
+        return false;
+    };
+    ast.items.iter().any(|item| match item {
+        Node::Const(c) => c.name == name,
+        Node::Static(s) => s.name == name,
+        Node::Let(stmt) => {
+            let mut names = Vec::new();
+            pattern_bound_names(&stmt.pattern, &mut names);
+            names.iter().any(|n| n == name)
+        }
+        _ => false,
+    })
+}
 
 pub(crate) fn is_unprovided_use_error(e: &CompileError) -> bool {
     e.to_string().contains(UNPROVIDED_USE_MARKER)
@@ -1579,6 +1620,35 @@ pub fn load_and_merge_module(
     // even during circular imports.
     if is_module_loading(&module_path) {
         loader_trace!("circular", "{} (returning partial)", module_path.display());
+        // A braced import naming a top-level VALUE the in-flight module has not
+        // produced yet is a genuine circular VALUE dependency. Type names are
+        // published by `register_definitions` before any import runs, and
+        // functions stay resolvable through the call-time registry once the
+        // owner finishes loading (the stdlib deliberately uses cyclic fn
+        // imports, e.g. std.io_runtime <-> io.process_governor) — both keep
+        // working through the partial dict below. A `val`/`const`/`static`
+        // bound through a cycle is captured before it exists, and returning
+        // the partial dict here used to bind nothing so the program ran on
+        // silently (gap 5, circular-import detection;
+        // doc/08_tracking/bug/compiler_interpreter_integration_real_gaps_found_2026-09-06.md).
+        if let Some(requested) = requested_group_import_names(use_stmt) {
+            let partial = get_partial_module_exports(&module_path);
+            for name in requested {
+                let available = matches!(&partial, Some(Value::Dict(dict)) if module_dict_get(dict, &name).is_some());
+                if available || !in_flight_module_defines_value_binding(&module_path, &name) {
+                    continue;
+                }
+                decrement_load_depth();
+                let importer = current_file
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                return Err(CompileError::semantic(format!(
+                    "circular import: module `{module_label}` ({}) is still being loaded and cannot provide `{name}` (imported from {importer}); break the import cycle or move the shared value out of it",
+                    module_path.display(),
+                    module_label = parts.join("."),
+                )));
+            }
+        }
         // Try to get partial exports (type definitions from register_definitions)
         if let Some(partial_exports) = get_partial_module_exports(&module_path) {
             debug!(path = ?module_path, "Circular import detected, returning partial exports (type definitions)");
@@ -3427,6 +3497,12 @@ pub(crate) fn check_private_call_visibility(
     owner: &Arc<str>,
     current: &Arc<str>,
 ) -> Result<(), CompileError> {
+    // Call rule: the same-directory sibling exemption applies to every name
+    // here (see `is_fn_visible_to`; the import rule narrows it for
+    // `_`-prefixed names, calls intentionally do not).
+    if clean_parent_dir(owner) == clean_parent_dir(current) {
+        return Ok(());
+    }
     match fn_visibility_outcome(name, owner, current) {
         FnVisibilityOutcome::Allowed => Ok(()),
         FnVisibilityOutcome::FriendOnly => Err(CompileError::semantic(format!(

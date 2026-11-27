@@ -1,0 +1,191 @@
+# Simple DB server tier — request-port evidence authenticity binding
+#
+# Closes the authenticity gap recorded in
+# doc/08_tracking/bug/db_request_port_evidence_authenticity_2026-08-25:
+# the generic external-receipt admission path admits a
+# db-server-request-port bundle on a reviewer's signature plus
+# producer-authored acceptance counters. Nothing in that path binds the
+# claims to the process that actually owned the listener socket or to the
+# bytes that actually crossed the wire, so a coordinated fake server/client
+# pair can own a listener while fabricating query/result files without ever
+# transferring those bytes over TCP.
+#
+# This module is the fail-closed authenticity primitive the v2 contract
+# binds to. A request-port evidence record is authentic ONLY when an
+# independent kernel-level observation binds every claimed counter to:
+#   (a) ONE OWNER — the server PID that owned the listening socket, and
+#   (b) ONE SECRET — the exact wire bytes exchanged (digest + byte length),
+#       which only the genuine server/client pair can possess.
+# Producer counters alone are inadmissible. This is a pure function of the
+# evidence record — no I/O, no store access — so it is trivially testable
+# and cannot be raced.
+#
+# It does NOT select the gate's canonical entry, protocol, or producer: per
+# the bug record, that selection belongs to the database/server owner. This
+# validator is the binding those artifacts must satisfy to be admissible.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+# ============================================================================
+# Wire bytes — the secret only a genuine exchange can possess
+# ============================================================================
+
+struct DbWireBytes:
+    """The exact bytes the server received as the query and sent as the
+    result. Authenticity treats them as an unforgeable shared secret: a
+    fabricated file that never crossed the wire cannot simultaneously
+    satisfy the digest binding and the kernel-observed byte counts."""
+    query: [u8]
+    result: [u8]
+
+# ============================================================================
+# DbKernelIoObservation — the independent owner binding
+# ============================================================================
+
+struct DbKernelIoObservation:
+    """Kernel-observed accept/read/write for one request-port session,
+    bound to the server PID that owned the listening socket. Every flag is
+    an OBSERVATION, never a producer-reported counter: the v1 gap was
+    exactly producer binaries self-authoring these claims."""
+    server_pid: i64
+    listener_owner_pid: i64
+    accept_observed: bool
+    read_observed: bool
+    write_observed: bool
+    read_bytes: i64
+    write_bytes: i64
+
+# ============================================================================
+# DbRequestPortLifecycle — monotonic, stop-only timing
+# ============================================================================
+
+struct DbRequestPortLifecycle:
+    """Monotonic timestamps (milliseconds) for the session lifecycle.
+    Stop is the only open-ended interval and it is bounded by
+    `stop_budget_ms`."""
+    ready_ms: i64
+    accept_ms: i64
+    read_ms: i64
+    write_ms: i64
+    stop_start_ms: i64
+    stop_done_ms: i64
+    stop_budget_ms: i64
+
+# ============================================================================
+# DbRequestPortEvidence — one verifiable request-port evidence record
+# ============================================================================
+
+struct DbRequestPortEvidence:
+    """The claim under verification. `session_*_digest` is what the session
+    record asserts; `trace_*_digest` is what the kernel-trace record asserts.
+    Both must equal the digest of the actual wire bytes, and `kernel` /
+    `lifecycle` must carry the independent observations (nil = unbound)."""
+    run_id: text
+    server_pid: i64
+    listener_owner_pid: i64
+    wire: DbWireBytes
+    session_query_digest: text
+    session_result_digest: text
+    trace_query_digest: text
+    trace_result_digest: text
+    kernel: DbKernelIoObservation?
+    lifecycle: DbRequestPortLifecycle?
+
+# ============================================================================
+# DbRequestPortAuthenticity — the fail-closed verdict
+# ============================================================================
+
+enum DbRequestPortAuthenticity:
+    """`Authentic` only when every binding holds. Every other variant names
+    the first unbound claim; details are diagnostics and must never carry
+    secret material (wire bytes or credentials)."""
+    Authentic
+    UnboundKernelObservation(detail: text)
+    UnboundLifecycle(detail: text)
+    OwnerBindingMismatch(detail: text)
+    KernelIoUnobserved(detail: text)
+    WireLengthMismatch(detail: text)
+    WireDigestMismatch(detail: text)
+    UnorderedLifecycle(detail: text)
+    StopOverBudget(detail: text)
+
+impl DbRequestPortAuthenticity:
+    fn is_authentic() -> bool:
+        match self:
+            DbRequestPortAuthenticity.Authentic:
+                true
+            _:
+                false
+
+# ============================================================================
+# verify_request_port_authenticity — the single authoritative check
+# ============================================================================
+
+fn verify_request_port_authenticity(evidence: DbRequestPortEvidence) -> DbRequestPortAuthenticity:
+    # 1. The independent bindings must EXIST. A record that only asserts
+    #    counters (the v1 shape) is inadmissible — fail closed.
+    val kernel = match evidence.kernel:
+        Some(observation):
+            observation
+        nil:
+            return DbRequestPortAuthenticity.UnboundKernelObservation(
+                "no kernel-observed accept/read/write binding; producer counters alone are not evidence")
+    val lifecycle = match evidence.lifecycle:
+        Some(timing):
+            timing
+        nil:
+            return DbRequestPortAuthenticity.UnboundLifecycle(
+                "no monotonic lifecycle timing bound to the record")
+
+    # 2. ONE OWNER: the claimed server PID, the claimed listener owner, and
+    #    the kernel-observed socket owner must be the same live identity.
+    if evidence.server_pid <= 0 or evidence.listener_owner_pid != evidence.server_pid:
+        return DbRequestPortAuthenticity.OwnerBindingMismatch(
+            "claimed listener owner is not the claimed server pid")
+    if kernel.server_pid != evidence.server_pid or kernel.listener_owner_pid != evidence.server_pid:
+        return DbRequestPortAuthenticity.OwnerBindingMismatch(
+            "kernel observation is not bound to the claimed server-owned socket")
+
+    # 3. The kernel must have OBSERVED the full I/O triple — a trace that
+    #    merely repeats producer claims is the gap itself.
+    if not (kernel.accept_observed and kernel.read_observed and kernel.write_observed):
+        return DbRequestPortAuthenticity.KernelIoUnobserved(
+            "accept, read, and write must each be kernel-observed")
+
+    # 4. The wire bytes must be non-empty and the observed byte counts must
+    #    equal their exact lengths — fabricated files cannot match both.
+    if evidence.wire.query.len() == 0u64 or evidence.wire.result.len() == 0u64:
+        return DbRequestPortAuthenticity.WireLengthMismatch(
+            "wire query and result must both be non-empty")
+    if kernel.read_bytes < 0 or evidence.wire.query.len() as i64 != kernel.read_bytes:
+        return DbRequestPortAuthenticity.WireLengthMismatch(
+            "kernel-observed read bytes do not equal the wire query length")
+    if kernel.write_bytes < 0 or evidence.wire.result.len() as i64 != kernel.write_bytes:
+        return DbRequestPortAuthenticity.WireLengthMismatch(
+            "kernel-observed write bytes do not equal the wire result length")
+
+    # 5. THE SECRET BINDING: the session claim, the trace claim, and the
+    #    digest of the actual wire bytes must all agree. A coordinated fake
+    #    pair that fabricated query/result files without transferring them
+    #    over TCP fails here — it cannot produce matching kernel-observed
+    #    byte counts (step 4) AND matching digests of the real exchange.
+    val query_digest = sha256_u8_hex(evidence.wire.query)
+    val result_digest = sha256_u8_hex(evidence.wire.result)
+    if evidence.session_query_digest != query_digest or evidence.trace_query_digest != query_digest:
+        return DbRequestPortAuthenticity.WireDigestMismatch(
+            "query digest unbound: session/trace claims differ from the wire bytes")
+    if evidence.session_result_digest != result_digest or evidence.trace_result_digest != result_digest:
+        return DbRequestPortAuthenticity.WireDigestMismatch(
+            "result digest unbound: session/trace claims differ from the wire bytes")
+
+    # 6. Monotonic, stop-only timing with a bounded stop.
+    if not (lifecycle.ready_ms <= lifecycle.accept_ms and lifecycle.accept_ms <= lifecycle.read_ms
+            and lifecycle.read_ms <= lifecycle.write_ms and lifecycle.write_ms <= lifecycle.stop_start_ms
+            and lifecycle.stop_start_ms <= lifecycle.stop_done_ms):
+        return DbRequestPortAuthenticity.UnorderedLifecycle(
+            "ready/accept/read/write/stop must be monotonically ordered")
+    if lifecycle.stop_done_ms - lifecycle.stop_start_ms > lifecycle.stop_budget_ms:
+        return DbRequestPortAuthenticity.StopOverBudget(
+            "stop interval exceeds the declared budget")
+
+    DbRequestPortAuthenticity.Authentic
