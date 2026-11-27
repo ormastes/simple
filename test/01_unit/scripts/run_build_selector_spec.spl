@@ -28,6 +28,14 @@ fn run_sh(body: text) -> (text, text, i64):
     val (sh_bin, sh_args) = resolve_shell_argv(setup_cmd() + body + "; rc=$?; cd /; rm -rf \"$d\"; exit $rc")
     process_run(sh_bin, sh_args)
 
+# The owner's ARG: lines in order, joined with "|" (exact argv, no extras).
+fn arg_block(out: text) -> text:
+    var parts: [text] = []
+    for l in out.split("\n"):
+        if l.starts_with("ARG:"):
+            parts.push(l)
+    parts.join("|")
+
 fn run_build(options: text) -> (text, text, i64):
     run_sh("sh '" + script() + "' " + options)
 
@@ -35,12 +43,12 @@ describe "run-build.shs selector":
     it "lets buildrunner own the run command with exact argv":
         val (out, err, code) = run_build("--program=\"$P\" --executor=buildrunner -- --manifest 'manifest with spaces' --state state --source-root source")
         expect(code).to_equal(0)
-        expect(out.contains("ARG:run\nARG:--manifest\nARG:manifest with spaces\nARG:--state\nARG:state\nARG:--source-root\nARG:source\n")).to_equal(true)
+        expect(arg_block(out)).to_equal("ARG:run|ARG:--manifest|ARG:manifest with spaces|ARG:--state|ARG:state|ARG:--source-root|ARG:source")
     it "defaults to direct native-build, exec'ing the owner in the same cwd":
         val body = "sh -c 'echo $$ > \"$d/pid\"; exec sh \"$0\" --program=\"$P\" -- --source \"source with spaces\" --backend llvm --output \"out;\$(x)\"' '" + script() + "'; echo \"OUTER:$(cat \"$d/pid\")\"; echo \"WANT_CWD:$(pwd)\""
         val (out, err, code) = run_sh(body)
         expect(code).to_equal(0)
-        expect(out.contains("ARG:native-build\nARG:--source\nARG:source with spaces\nARG:--backend\nARG:llvm\nARG:--output\nARG:out;$(x)\n")).to_equal(true)
+        expect(arg_block(out)).to_equal("ARG:native-build|ARG:--source|ARG:source with spaces|ARG:--backend|ARG:llvm|ARG:--output|ARG:out;$(x)")
         val lines = out.split("\n")
         var owner_pid = ""
         var outer_pid = ""
@@ -61,10 +69,10 @@ describe "run-build.shs selector":
     it "takes the env default and lets --executor override it":
         val (out1, err1, code1) = run_sh("SIMPLE_BUILD_EXECUTOR=buildrunner sh '" + script() + "' --program=\"$P\" -- --manifest m")
         expect(code1).to_equal(0)
-        expect(out1.contains("ARG:run\nARG:--manifest\nARG:m\n")).to_equal(true)
+        expect(arg_block(out1)).to_equal("ARG:run|ARG:--manifest|ARG:m")
         val (out2, err2, code2) = run_sh("SIMPLE_BUILD_EXECUTOR=invalid sh '" + script() + "' --program=\"$P\" --executor=direct -- input.spl")
         expect(code2).to_equal(0)
-        expect(out2.contains("ARG:native-build\nARG:input.spl\n")).to_equal(true)
+        expect(arg_block(out2)).to_equal("ARG:native-build|ARG:input.spl")
     it "propagates the owner's exact exit status":
         val (o1, e1, c1) = run_sh("TEST_EXIT=37 sh '" + script() + "' --program=\"$P\" --executor=direct -- input")
         expect(c1).to_equal(37)

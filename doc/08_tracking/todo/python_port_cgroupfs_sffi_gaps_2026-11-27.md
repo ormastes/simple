@@ -15,8 +15,7 @@ and `O_DIRECTORY` walks), `read`, `pread`, `write`, `close`, `fsync`, `statx`, `
 1. `setuid` / `setgid` / `setgroups` / `initgroups` and `getpwnam` (uid/gid/home lookup) for the privilege drop.
 2. A pre-exec hook or privilege-drop spawn: the child must write its pid into the supervisor `cgroup.procs`
    and drop uid between fork and exec; `process_run*` only offers argv/env spawn.
-3. `fchown` / `fchmod` (or `fchownat`/`fchmodat`), `mkdirat`-style create and `unlinkat`/`rmdir` for the
-   fresh private hierarchy; `fstatat` with `AT_SYMLINK_NOFOLLOW` for the root-controlled checks.
+3. `os.chown`/`os.chmod` by path (no fchown/fchmod needed), `Path.mkdir`/`rmdir` equivalents (the helper uses path-based mkdir/rmdir, not mkdirat/unlinkat), and `fstatat(dir_fd, AT_SYMLINK_NOFOLLOW)` for the root-controlled checks (`statx` exists; confirm it covers dir-fd-relative lstat).
 4. Signal handlers that raise inside provisioning (SIGTERM/SIGINT/SIGHUP) and `SIG_IGN` during cleanup.
 5. Own session / pid-wait with raw wait status (`start_new_session`, `child.wait`).
 
