@@ -122,3 +122,18 @@ either way until the hazard above is cleared. Status stays OPEN.
 ## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
 
 **PARTIAL/BLOCKED (confirmed)** — Issue #1 fixed in source: tier-explicit import fix 7f923ed08d39 verified ancestor first-hand; nogc_sync_mut engine copy guards all four body natives. Runtime verification of both issues BLOCKED on the P1 seed hazard `seed_enum_variant_bare_name_last_registration_wins_2026_10_19` (routed to seed lane by ne3/lib3); issue #2 unverifiable until then.
+
+
+## Addendum 2026-11-27 — W6-1: both Issue #1 and Issue #2 FIXED and verified
+
+Verified on `work/w6-1-browser-session-fetch-dom-20261127` with `wa3_shared_bin/simple.exe test <spec> --mode=interpreter`:
+
+1. **Issue #1 (disturbed body — single-sourced & parity restored):**
+   - Extracted shared constants (`JS_RESPONSE_HOST_KEY`, `JS_RESPONSE_CONSUMED_KEY`, `JS_RESPONSE_BODY_USED_KEY`, `JS_RESPONSE_BODY_UNUSABLE_ERROR`, `JS_RESPONSE_DEFAULT_BLOB_TYPE`), `JsResponseBodyFlag`, and pure helpers (`js_response_consume_body_text`, `js_response_content_type_from_headers`, `js_response_blob_media_type`, `js_response_wasm_content_type_essence`) into `src/lib/common/js/engine/response_body.spl`, exported `NATIVE_RESPONSE_ARRAY_BUFFER = -86` from `src/lib/common/js/engine/runtime.spl`, and routed `gc_async_mut`, `nogc_async_mut`, and `nogc_sync_mut` JS engine copies (`interpreter_object.spl`, `interpreter_async.spl`, `interpreter_native.spl`) through the shared helper.
+   - Restored rebase-truncated assertions/helpers in `test/01_unit/lib/common/web/browser_session_async_spec.spl`.
+   - Measured: `test/01_unit/lib/common/web/browser_session_async_spec.spl` -> **25 total, 25 passed, 0 failed (`outcome=OK`)**.
+
+2. **Issue #2 (history helper wiring & timer rollback — root-caused, fixed, verified):**
+   - **History helper placement:** Moved `_update_history`, `_current_history_entry_is_committed`, `_refresh_current_history`, and `_snapshot_current_history_for_departure` from `browser_session_loading.spl` into `src/lib/gc_async_mut/web/browser_session.spl` so `BrowserSession` callers resolve them without manually importing the loading partial.
+   - **Timer rollback aliasing:** Added deep `.clone()` methods across `Environment`, `EnvironmentStack`, `CallFrame` (`src/lib/nogc_sync_mut/js/engine/interpreter_types.spl`), `ObjectStore` (`vm_object_store.spl`), `JsInterpreter` (`interpreter.spl`), `JsRuntime` (`runtime.spl`), and `BrowserRuntimeState` (`browser_session.spl`), and updated `eval_script`, `advance_time`, and `_flush_runtime_side_effects_and_pump_history` to snapshot `state.clone()` alongside `cookies`, `script_cookie_write_overflow`, `current_title`, and `current_body_html` before mutating runtime state. Previously `val previous_runtime_state = self.runtime_state` aliased mutable class instances, causing failed-publication rollbacks to leak JS mutations and lose pre-failure cookies/DOM state.
+   - Measured: `test/01_unit/lib/common/web/browser_session_dom_generation_runtime_spec.spl` -> **1 total, 1 passed, 0 failed (`outcome=OK`)**.
