@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+Purpose: Pin the curved edges of grayscale glyphs (above the 48 device px LCD
+cutoff, i.e. all 16px body text at device scale 4) against Chrome 159. Chrome
+fills a gray glyph's path with Skia's analytic AA scan converter
+(`SkScalerContext::GenerateImageFromPath`, A8: translate by the mask origin,
+`SkScan::AntiFillPath` -> `SkScan_AAAPath`), the same walker its LCD glyphs
+take without the 4x horizontal scale and the FIR. This engine accumulated
+exact signed area over chords cut by the LCD route's flatness rule in
+unscaled pixels: a 64 px bowl got a quarter of Skia's chords, so every outer
+arc lost ink (chords inside the curve) and every counter gained ink. Straight
+stems matched; round shoulders were up to 0x3b levels off.
+Measured 2026-11-27 on `o e a s c g 8 S O R m n H` at 16px k=4: this engine
+454 mismatching px (> 8 levels) against Chrome, libskia's AAA fill of this
+engine's own gray outline at the same quarter phase 0 of 13 glyphs.
+Audience: web renderer text raster maintainers (sfnt_glyf gray raster,
+font_renderer gray cells).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4
+--window-size=400,300`), black 16px Liberation Sans on white, text
+`oeScO g8` at CSS x 10. Values are the red channel of the listed device
+columns (255 = paper, 0 = full ink).
+
+| row | columns = Chrome red | what |
+|-----|----------------------|------|
+| 31 | 203=47 204=154 217=128 218=16 | `c` top arc, both shoulders |
+| 36 | 51=115 52=52 64=135 87=92 99=113 165=100 | `o`, `e`, `S` outer shoulders |
+| 36 | 272=93 273=178 | `O` counter top (Chrome lighter) |
+| 65 | 53=117 225=78 267=150 268=204 | lower arcs of `o`, `c`, `O` |
+| 65 | 311=159 | `g` counter (Chrome lighter) |
+
+Base (9e1a3ae9d4d) reads row 36 as 51=168 52=85 64=189 87=141 99=161 165=150
+272=33 273=141. Tolerance: 8 per channel, the catalog's mismatch threshold.
+"""
+
+"""
+Traceability: REQ-WEB-GRAY-GLYPH-AAA-001 — a grayscale glyph (above the LCD size cutoff) is Skia's analytic-AA fill of its outline, so curved edges carry Chrome's coverage.
+"""
+# @tag: unit, browser_engine, text, device_scale, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 200
+val CSS_H: i32 = 100
+
+val PAGE_ROUND: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} p{{margin:0 0 0 10px}}</style></head><body><p>oeScO g8</p></body></html>"
+
+fn _red(px: [u32], w: i32, x: i32, y: i32) -> i32:
+    ((px[y * w + x] >> 16u32) & 0xFFu32) as i32
+
+# "col=red" for each listed column: Chrome's value when within 8, else ours.
+fn _row_text(px: [u32], w: i32, y: i32, cols: [i32], chrome: [i32]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        val got = _red(px, w, cols[i], y)
+        val d = got - chrome[i]
+        val shown = if d <= 8 and d >= -8: chrome[i] else: got
+        s = s + "{cols[i]}={shown} "
+        i = i + 1
+    s
+
+fn _want_text(cols: [i32], chrome: [i32]) -> text:
+    var s = ""
+    var i = 0
+    while i < cols.len():
+        s = s + "{cols[i]}={chrome[i]} "
+        i = i + 1
+    s
+
+describe "Grayscale glyph curves take Skia's analytic AA coverage (Chrome 159)":
+    it "AC-1: outer shoulders of `o`, `e`, `S` and the `c` top arc at 16px k=4 are as dark as Chrome's":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_ROUND, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(px.len()).to_equal((CSS_W * 4 * CSS_H * 4) as i64)
+        val c31: [i32] = [203, 204, 217, 218]
+        val v31: [i32] = [47, 154, 128, 16]
+        val c36: [i32] = [51, 52, 64, 87, 99, 165]
+        val v36: [i32] = [115, 52, 135, 92, 113, 100]
+        expect(_row_text(px, CSS_W * 4, 31, c31, v31)).to_equal(_want_text(c31, v31))
+        expect(_row_text(px, CSS_W * 4, 36, c36, v36)).to_equal(_want_text(c36, v36))
+
+    it "AC-2: counters of `O` and `g` at 16px k=4 are as light as Chrome's":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_ROUND, CSS_W, CSS_H, 4, "cpu_simd")
+        val c36: [i32] = [272, 273]
+        val v36: [i32] = [93, 178]
+        val c65: [i32] = [311]
+        val v65: [i32] = [159]
+        expect(_row_text(px, CSS_W * 4, 36, c36, v36)).to_equal(_want_text(c36, v36))
+        expect(_row_text(px, CSS_W * 4, 65, c65, v65)).to_equal(_want_text(c65, v65))
+
+    it "AC-3: lower arcs of `o`, `c`, `O` at 16px k=4 have Chrome's coverage":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_ROUND, CSS_W, CSS_H, 4, "cpu_simd")
+        val c65: [i32] = [53, 225, 267, 268]
+        val v65: [i32] = [117, 78, 150, 204]
+        expect(_row_text(px, CSS_W * 4, 65, c65, v65)).to_equal(_want_text(c65, v65))
