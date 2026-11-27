@@ -786,9 +786,13 @@ pub(crate) fn raw_ptr_len_text(args: &[Value], index: usize, name: &str) -> Resu
         Some(value) => value.as_int()?,
         None => return Err(CompileError::runtime(format!("{name} requires (ptr, len) arguments"))),
     };
-    if len < 0 || (ptr == 0 && len != 0) {
+    // Paths and env names only: bound the slice so a forged length cannot
+    // walk arbitrary memory. Callers are `@unsafe(capabilities: [ffi])`
+    // sffi_minimal wrappers; the (ptr, len) liveness is their contract.
+    const RAW_PTR_LEN_TEXT_MAX: i64 = 64 * 1024;
+    if len < 0 || len > RAW_PTR_LEN_TEXT_MAX || (ptr == 0 && len != 0) {
         return Err(CompileError::runtime(format!(
-            "{name} requires a nonnull pointer and nonnegative length"
+            "{name} requires a nonnull pointer and a length in 0..={RAW_PTR_LEN_TEXT_MAX}"
         )));
     }
     if len == 0 {
