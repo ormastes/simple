@@ -1,0 +1,100 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{read_file_text}
+use compiler.common.config.{Logger}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_function}
+
+val P1_DIR = "test/fixtures/compiler/primitive_trait_identity"
+
+fn _lower_fixture_hirs(paths: [text]) -> ([HirModule], text):
+    val log = Logger(level: 0)
+    var modules: Dict<text, Module> = {}
+    var sources: [SourceFile] = []
+    var asts: [Module] = []
+    var names: [text] = []
+    var i = 0
+    while i < paths.len():
+        val name = module_logical_name_from_path(paths[i])
+        val src = read_file_text(paths[i]) ?? ""
+        val ast = parse_full_frontend(src, paths[i], name, log)
+        modules[name] = ast
+        asts.push(ast)
+        names.push(name)
+        sources.push(SourceFile(path: paths[i], content: src, module_name: name))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hirs: [HirModule] = []
+    var errs: [text] = []
+    i = 0
+    while i < names.len():
+        var hl = hirlowering_for_module(paths[i], surfaces)
+        val hm = hl.lower_module(asts[i])
+        for e in hl.errors:
+            errs.push("HIR:" + names[i] + ":" + e.message)
+        hirs.push(hm)
+        i = i + 1
+    (hirs, errs.join(" | "))
+
+fn _lower_mir_of(target_idx: i64, hirs: [HirModule]) -> (text, [text]):
+    val th = hirs[target_idx]
+    var deps: [HirModule] = []
+    var i = 0
+    while i < hirs.len():
+        if i != target_idx:
+            deps.push(hirs[i])
+        i = i + 1
+    var mir_lowering = MirLowering.new(th.symbols)
+    mir_lowering.trait_impl_closure_complete = true
+    var prescan: Dict<text, HirModule> = {}
+    i = 0
+    while i < deps.len():
+        prescan["dep_{i}"] = deps[i]
+        mir_lowering.prescan_module_struct_names(prescan, "dep_{i}")
+        i = i + 1
+    prescan["target"] = th
+    mir_lowering.prescan_module_struct_names(prescan, "target")
+    val mir = mir_lowering.lower_module(th, deps)
+    var errs: [text] = []
+    for e in mir_lowering.errors:
+        if e.fatal:
+            errs.push("MIR_FATAL:" + e.message)
+        else:
+            errs.push("MIR_WARN:" + e.message)
+    var bodies: [text] = []
+    for f in mir.functions.values():
+        bodies.push(f.name + "::" + serialize_mir_function(f))
+    (errs.join(" | "), bodies)
+
+describe "primitive_trait_identity MIR lowering parity":
+    it "lowers provider.spl and main.spl cleanly preserving distinct primitive targets":
+        val (hirs, hir_errs) = _lower_fixture_hirs(
+            ["{P1_DIR}/provider.spl", "{P1_DIR}/main.spl"]
+        )
+        expect(hir_errs).to_equal("")
+        val (prov_errs, prov_bodies) = _lower_mir_of(0, hirs)
+        expect("prov:" + prov_errs).to_equal("prov:")
+        val (main_errs, main_bodies) = _lower_mir_of(1, hirs)
+        expect("main:" + main_errs).to_equal("main:")
+        val joined_prov = prov_bodies.join("\n")
+        val joined_main = main_bodies.join("\n")
+        expect(joined_main).to_contain("\"I32\"")
+        expect(joined_main).to_contain("\"I64\"")
+        expect(joined_prov).to_contain("I16")
+
+    it "rejects generic_rejected.spl scalar trait instantiation":
+        val (hirs, hir_errs) = _lower_fixture_hirs(
+            ["{P1_DIR}/generic_rejected.spl"]
+        )
+        expect(hir_errs).to_equal("")
+        val (mir_errs, _) = _lower_mir_of(0, hirs)
+        expect(mir_errs).to_contain("scalar trait method")

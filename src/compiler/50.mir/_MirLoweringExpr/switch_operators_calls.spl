@@ -62,6 +62,22 @@ use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity_raw, mir_provider_callable_identity}
 
+fn mir_scalar_suffix_type_kind_v1(name: text) -> HirTypeKind?:
+    match name:
+        case "float": Some(HirTypeKind.Float(64))
+        case "i8": Some(HirTypeKind.Int(8, true))
+        case "i16": Some(HirTypeKind.Int(16, true))
+        case "i32": Some(HirTypeKind.Int(32, true))
+        case "i64": Some(HirTypeKind.Int(64, true))
+        case "int": Some(HirTypeKind.Int(64, true))
+        case "u8": Some(HirTypeKind.Int(8, false))
+        case "u16": Some(HirTypeKind.Int(16, false))
+        case "u32": Some(HirTypeKind.Int(32, false))
+        case "u64": Some(HirTypeKind.Int(64, false))
+        case "f32": Some(HirTypeKind.Float(32))
+        case "f64": Some(HirTypeKind.Float(64))
+        case _: None
+
 fn layout_key_bare_name(layout_key: text) -> text:
     """`mod.path::Acc` -> `Acc`; a bare name is returned unchanged."""
     val parts = layout_key.split("::")
@@ -3100,6 +3116,45 @@ impl MirLowering:
                         case _: ()
             case _: ()
         weak_explicit
+
+    me scalar_trait_receiver_type_v1(expr: HirExpr) -> HirType?:
+        """Recover scalar receiver types (including untyped literals, casts, and
+        conversions) for primitive trait/inherent dispatch."""
+        if val resolved = self.enum_match_expr_type(expr):
+            return Some(resolved)
+        match expr.kind:
+            case HirExprKind.StringLit(_, _):
+                return Some(HirType(kind: HirTypeKind.Str, span: expr.span))
+            case HirExprKind.BoolLit(_):
+                return Some(HirType(kind: HirTypeKind.Bool, span: expr.span))
+            case HirExprKind.CharLit(_):
+                return Some(HirType(kind: HirTypeKind.Char, span: expr.span))
+            case HirExprKind.IntLit(_, suffix):
+                if val s = suffix:
+                    if val prim = mir_scalar_suffix_type_kind_v1(s):
+                        return Some(HirType(kind: prim, span: expr.span))
+                    return None
+                return Some(HirType(kind: HirTypeKind.Int(64, true), span: expr.span))
+            case HirExprKind.FloatLit(_, suffix) | HirExprKind.FloatLexeme(_, suffix):
+                if val s = suffix:
+                    if val prim = mir_scalar_suffix_type_kind_v1(s):
+                        return Some(HirType(kind: prim, span: expr.span))
+                    return None
+                return Some(HirType(kind: HirTypeKind.Float(64), span: expr.span))
+            case HirExprKind.Cast(_, target) | HirExprKind.ConvertCall(_, target):
+                if mir_scalar_trait_owner_key_v1(target.kind) != "":
+                    return Some(target)
+            case HirExprKind.Unary(un_op, un_operand):
+                match un_op:
+                    case HirUnaryOp.Neg | HirUnaryOp.BitNot:
+                        if val inner = self.scalar_trait_receiver_type_v1(un_operand):
+                            match inner.kind:
+                                case HirTypeKind.Int(_, _) | HirTypeKind.Float(_):
+                                    return Some(inner)
+                                case _: ()
+                    case _: ()
+            case _: ()
+        None
 
     me method_call_receiver_declared_type_v1(receiver: HirExpr) -> HirType?:
         """Declared receiver type for method calls, including indexed container reads."""
