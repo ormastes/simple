@@ -5680,3 +5680,35 @@ pins the border-box form, the default-UA gap is unfiled.
     review item. The product page `p.html` stays byte-identical. A recursive
     reader survey of `src/` found no other stored-template parser besides
     `gpu_web/layout/adapter.spl`.
+
+## 2026-11-27 — line-end space follow-ups (empty inline boxes, sub-px margins, nowrap)
+
+- **Spaces collapse across ANY empty inline, whatever its padding, border or
+  margin** (CSS Text 3 §4.1.1). The tracker is the `after_space` flag, not a
+  pen-x match, because a margin or border moves the pen.
+  - `empty_inline_box` is transparent to the collapse.
+  - The 1px box is zeroed for an empty inline with no padding and no border
+    (`empty_unpadded_inline`).
+  - Only `empty_plain_inline` (no margin either) is transparent to the hang.
+  - Chrome 159: `ib<span margin-left:5px></span>ib` puts the second box at 105;
+    `ib <span border-left:1px></span> ib` at 105.
+- **Pen-error carry:**
+  - an empty inline's box is exactly its padding + border, so
+    `inline_item_width_err_milli` returns 0 for it;
+  - margins add `margin_[lr]_err_milli` into the carry (`margin-right:0.7px`
+    then ` z `: 110).
+- **Open gap: the `margin-right:0.6px` tie.** Chrome gives 110 because it
+  accumulates the space as 285/64 = 4.453 (100.59375 + 8.906 = 109.5). Simple
+  carries 4.445 and gives 109. Closing it needs LayoutUnit text advances.
+- **`inline-size` after `width`** now sets `width_milli` and `width_parsed_v`
+  from the inline-size (`decl_apply.spl`). Before, `width_milli` stayed stale
+  or became -1, and the exact-width carry was lost.
+- **nowrap collapses and hangs** (Chrome 159: nowrap centred `ib ` at 150;
+  `ib <span></span> ib` at 104).
+  - Only `white_space_spaces_kept` (pre, pre-wrap, break-spaces) blocks the
+    collapse and the hang.
+  - A nowrap whitespace-only run measures its space into its box, so after a
+    space it gets `out_bw = 0`.
+- **k = 4 oracle.** The spec's `_last_red_k4` helper reads the last red device
+  column on a 420x40 CSS page at scale 4. Chrome is screenshotted with
+  `--force-device-scale-factor=4` and row 40 is scanned.
