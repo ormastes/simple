@@ -104,6 +104,14 @@ val PROBE_SOURCE: text =
     "        case Pair.Mk(a, _): a\n\n" +
     "fn pick_second<K, V>(k: K, v: V?) -> V?:\n" +
     "    v\n\n" +
+    "fn id_opt<T>(v: T?) -> T?:\n" +
+    "    v\n\n" +
+    "fn call_opt<T>(f: fn() -> T?) -> T?:\n" +
+    "    f()\n\n" +
+    "fn res_passthrough<T, E>(r: Result<T, E>) -> Result<T, E>:\n" +
+    "    r\n\n" +
+    "fn id_wrap<T>(w: Wrap<T>) -> Wrap<T>:\n" +
+    "    w\n\n" +
     "fn call_req_unwrap_int() -> i64:\n" +
     "    req_unwrap<i64>(Some(42))\n\n" +
     "fn call_req_if_int() -> i64:\n" +
@@ -207,7 +215,24 @@ val PROBE_SOURCE: text =
     "    r.x\n\n" +
     "fn call_multi_tp_kv_text_rec() -> i64:\n" +
     "    val r: ProbeRec = pick_second<text, ProbeRec>(\"k\", Some(ProbeRec(x: 2, y: 3))) ?? ProbeRec(x: 0, y: 0)\n" +
-    "    r.x\n"
+    "    r.x\n\n" +
+    "fn call_res_passthrough_int() -> i64:\n" +
+    "    match res_passthrough<i64, text>(Ok(77)):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -1\n\n" +
+    "fn call_res_passthrough_flt() -> f64:\n" +
+    "    match res_passthrough<f64, text>(Ok(3.5)):\n" +
+    "        case Ok(x): x\n" +
+    "        case Err(_): -1.0\n\n" +
+    "fn call_id_wrap_int() -> i64:\n" +
+    "    match id_wrap<i64>(Wrap.Val(77)):\n" +
+    "        case Wrap.Val(x): x\n\n" +
+    "fn call_id_opt_inferred_int() -> i64:\n" +
+    "    id_opt(Some(77)) ?? -1\n\n" +
+    "fn call_pick_second_inferred_int() -> i64:\n" +
+    "    pick_second(\"k\", Some(77)) ?? -1\n\n" +
+    "fn call_opt_lambda_inferred_int() -> i64:\n" +
+    "    call_opt(\\: Some(42)) ?? -1\n"
 
 fn _extract_mir_calls(function: MirFunction) -> text:
     var calls: [text] = []
@@ -392,3 +417,20 @@ describe "erased generic -> T tail unwrap/if-val/match for scalars and records":
         expect(fns["call_node_pair_bool_lit"] ?? "missing").to_contain("rt_tuple_get")
         expect(fns["call_get_or_int"] ?? "missing").to_contain("rt_value_as_int_wide")
         expect(fns["call_get_or_named_int"] ?? "missing").to_contain("rt_value_as_int_wide")
+
+    it "never decodes explicit-turbofish Result/Wrap passthrough and decodes inferred -> T? calls":
+        val fns = lower_probe().fns
+        val r_int = fns["call_res_passthrough_int"] ?? "missing"
+        expect(r_int.contains("rt_value_as_int_wide")).to_equal(false)
+        expect(r_int.contains("rt_value_int_wide")).to_equal(false)
+        val r_flt = fns["call_res_passthrough_flt"] ?? "missing"
+        expect(r_flt.contains("rt_value_as_float")).to_equal(false)
+        expect(r_flt.contains("rt_value_float")).to_equal(false)
+        val w_int = fns["call_id_wrap_int"] ?? "missing"
+        expect(w_int.contains("rt_value_as_int_wide")).to_equal(false)
+        expect(w_int.contains("rt_value_int_wide")).to_equal(false)
+        for name in ["call_id_opt_inferred_int", "call_pick_second_inferred_int"]:
+            val m = fns[name] ?? "missing"
+            expect(m).to_contain("rt_value_int_wide")
+            expect(m).to_contain("rt_value_as_int_wide")
+        expect(fns["call_opt_lambda_inferred_int"] ?? "missing").to_contain("rt_value_as_int_wide")
