@@ -479,18 +479,22 @@ var _wm_scene_pixel_cache_pixels: [[u32]] = []
 fn _wm_scene_element_is_text(kind: text) -> bool:
     kind == "text_label" or kind == "command_clock" or kind == "label"
 
+fn _wm_scene_cache_field(s: text) -> text:
+    "{s.byte_len()}:{s}"
+
 fn _wm_scene_pixel_cache_key(scene: WmSceneSpec, route_tag: text) -> text:
     val theme = wm_chrome_theme()
+    val theme_id = active_wm_theme_id()
     var parts: [text] = [
-        route_tag,
-        scene.name,
+        _wm_scene_cache_field(route_tag),
+        _wm_scene_cache_field(scene.name),
         "{scene.width}x{scene.height}",
-        active_wm_theme_id(),
+        _wm_scene_cache_field(theme_id),
         if active_wm_theme_snapshot_present(): "1" else: "0",
         "{theme.compositor_bg}:{theme.command_lane}:{theme.text_primary}:{theme.taskbar}:{theme.window_body}:{theme.title_unfocused}"
     ]
     for elem in scene.elements:
-        parts.push("{elem.kind},{elem.x},{elem.y},{elem.w},{elem.h},{elem.color},{elem.text}")
+        parts.push("{_wm_scene_cache_field(elem.kind)},{elem.x},{elem.y},{elem.w},{elem.h},{elem.color},{_wm_scene_cache_field(elem.text)}")
     parts.join("|")
 
 fn _wm_scene_pixel_copy(src: [u32]) -> [u32]:
@@ -502,37 +506,56 @@ fn _wm_scene_pixel_copy(src: [u32]) -> [u32]:
     out
 
 fn _wm_scene_pixel_cache_get(key: text, total: i32) -> [u32]:
-    var i = _wm_scene_pixel_cache_keys.len() - 1
+    val n = _wm_scene_pixel_cache_keys.len()
+    var i = n - 1
     while i >= 0:
         if _wm_scene_pixel_cache_keys[i] == key:
             val hit = _wm_scene_pixel_cache_pixels[i]
-            if hit.len() == total:
-                return _wm_scene_pixel_copy(hit)
-            return []
+            if hit.len() != total:
+                return []
+            val last = n - 1
+            if i < last:
+                var j = i
+                while j < last:
+                    _wm_scene_pixel_cache_keys[j] = _wm_scene_pixel_cache_keys[j + 1]
+                    _wm_scene_pixel_cache_pixels[j] = _wm_scene_pixel_cache_pixels[j + 1]
+                    j = j + 1
+                _wm_scene_pixel_cache_keys[last] = key
+                _wm_scene_pixel_cache_pixels[last] = hit
+            return _wm_scene_pixel_copy(hit)
         i = i - 1
     []
 
 fn _wm_scene_pixel_cache_put(key: text, pixels: [u32]):
     if pixels.len() == 0:
         return
+    val copy = _wm_scene_pixel_copy(pixels)
+    val n = _wm_scene_pixel_cache_keys.len()
     var i = 0
-    while i < _wm_scene_pixel_cache_keys.len():
+    while i < n:
         if _wm_scene_pixel_cache_keys[i] == key:
-            _wm_scene_pixel_cache_pixels[i] = _wm_scene_pixel_copy(pixels)
+            val last = n - 1
+            var j = i
+            while j < last:
+                _wm_scene_pixel_cache_keys[j] = _wm_scene_pixel_cache_keys[j + 1]
+                _wm_scene_pixel_cache_pixels[j] = _wm_scene_pixel_cache_pixels[j + 1]
+                j = j + 1
+            _wm_scene_pixel_cache_keys[last] = key
+            _wm_scene_pixel_cache_pixels[last] = copy
             return
         i = i + 1
-    if _wm_scene_pixel_cache_keys.len() >= _WM_SCENE_PIXEL_CACHE_MAX:
+    if n >= _WM_SCENE_PIXEL_CACHE_MAX:
         var next_keys: [text] = []
         var next_pixels: [[u32]] = []
         var j = 1
-        while j < _wm_scene_pixel_cache_keys.len():
+        while j < n:
             next_keys.push(_wm_scene_pixel_cache_keys[j])
             next_pixels.push(_wm_scene_pixel_cache_pixels[j])
             j = j + 1
         _wm_scene_pixel_cache_keys = next_keys
         _wm_scene_pixel_cache_pixels = next_pixels
     _wm_scene_pixel_cache_keys.push(key)
-    _wm_scene_pixel_cache_pixels.push(_wm_scene_pixel_copy(pixels))
+    _wm_scene_pixel_cache_pixels.push(copy)
 
 fn render_scene_to_backend(scene: WmSceneSpec, backend) -> [u32]:
     if backend != nil:
@@ -697,7 +720,7 @@ fn _wm_scene_row_span_bounds(elem_x: i32, elem_y: i32, elem_w: i32, elem_h: i32,
         cx1 = cx1 - 1
     (cx0, cx1)
 
-fn _wm_scene_fill_row_span(pixels: [u32], row: i32, cx0: i32, cx1: i32, color: u32, span_buf: [u32]):
+fn _wm_scene_fill_row_span(mut pixels: [u32], row: i32, cx0: i32, cx1: i32, color: u32, span_buf: [u32]):
     val count = cx1 - cx0
     if count <= 0:
         return

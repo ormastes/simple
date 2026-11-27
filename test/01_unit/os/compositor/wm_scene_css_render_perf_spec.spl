@@ -279,3 +279,46 @@ describe "wm_scene render perf and exactness":
         expect((t1 - t0) < 10000000).to_equal(true)
         expect((t2 - t1) < 500000).to_equal(true)
         expect((t4 - t3) < 10000000).to_equal(true)
+
+    it "writes sub-16px opaque and translucent spans directly into caller pixels and avoids delimited cache key collisions":
+        val narrow = WmSceneSpec(
+            name: "narrow_spans",
+            width: 120,
+            height: 88,
+            elements: [
+                SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 120, h: 88, color: 0xFF101418u32, text: ""),
+                SceneElement(kind: "decoration", x: 10, y: 10, w: 7, h: 5, color: 0xFFFF0000u32, text: ""),
+                SceneElement(kind: "decoration", x: 30, y: 12, w: 15, h: 4, color: 0x8000FF00u32, text: "")
+            ]
+        )
+        val np = wm_scene_direct_rect_pixels(narrow)
+        val np_ref = _scalar_direct_oracle(narrow)
+        expect(_count_pixel_diffs(np, np_ref)).to_equal(0)
+        expect(np[12 * 120 + 13]).to_equal(0xFFFF0000u32)
+        expect(np[12 * 120 + 17]).to_equal(0xFF101418u32)
+        expect(np[13 * 120 + 35] != 0xFF101418u32).to_equal(true)
+
+        val col_a = WmSceneSpec(
+            name: "collide",
+            width: 120,
+            height: 88,
+            elements: [
+                SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 120, h: 88, color: 0xFF101418u32, text: ""),
+                SceneElement(kind: "panel", x: 0, y: 0, w: 20, h: 20, color: 0xFFFF0000u32, text: "A|panel,20,0,20,20,4278255360,B")
+            ]
+        )
+        val col_b = WmSceneSpec(
+            name: "collide",
+            width: 120,
+            height: 88,
+            elements: [
+                SceneElement(kind: "desktop_chrome", x: 0, y: 0, w: 120, h: 88, color: 0xFF101418u32, text: ""),
+                SceneElement(kind: "panel", x: 0, y: 0, w: 20, h: 20, color: 0xFFFF0000u32, text: "A"),
+                SceneElement(kind: "panel", x: 20, y: 0, w: 20, h: 20, color: 0xFF00FF00u32, text: "B")
+            ]
+        )
+        val pa = render_scene_to_backend(col_a, nil)
+        val pb = render_scene_to_backend(col_b, nil)
+        expect(_count_pixel_diffs(pa, pb) > 0).to_equal(true)
+        expect(pa[10 * 120 + 30]).to_equal(0xFF101418u32)
+        expect(pb[10 * 120 + 30]).to_equal(0xFF00FF00u32)

@@ -338,6 +338,14 @@ fn _baremetal_source_stamp(path: text, extra: text) -> text:
     val content = file_read(path) ?? ""
     "{hash_text(content + ":" + extra)}"
 
+fn _baremetal_commit_cache_object(tmp_path: text, cached_path: text, arch: text, kind: text) -> Result<text, text>:
+    if file_rename(tmp_path, cached_path):
+        return Ok(cached_path)
+    val _rm = file_delete(tmp_path)
+    if file_exists(cached_path):
+        return Ok(cached_path)
+    Err("baremetal link ({arch}): cannot publish cached {kind} object {cached_path}")
+
 fn _baremetal_prepare_crt0(plan: BaremetalFreestandingPlan) -> Result<text, text>:
     val override_crt0 = env_get("SIMPLE_BAREMETAL_CRT0_OBJ") ?? ""
     if override_crt0 != "":
@@ -370,12 +378,7 @@ fn _baremetal_prepare_crt0(plan: BaremetalFreestandingPlan) -> Result<text, text
     if code != 0 or not file_exists(tmp_obj):
         val _rm = file_delete(tmp_obj)
         return Err("baremetal link ({plan.arch}): crt0 assembly failed ({clang}): {err}")
-    if not file_rename(tmp_obj, cached):
-        if file_exists(cached):
-            val _rm = file_delete(tmp_obj)
-            return Ok(cached)
-        return Ok(tmp_obj)
-    Ok(cached)
+    _baremetal_commit_cache_object(tmp_obj, cached, plan.arch, "crt0")
 
 fn _baremetal_prepare_rt_object(plan: BaremetalFreestandingPlan) -> Result<text, text>:
     val override_rt = env_get("SIMPLE_BAREMETAL_RUNTIME_OBJ") ?? ""
@@ -428,12 +431,7 @@ fn _baremetal_prepare_rt_object(plan: BaremetalFreestandingPlan) -> Result<text,
     if oc_code != 0 or not file_exists(abi_tmp):
         val _rm_abi = file_delete(abi_tmp)
         return Err("baremetal link ({plan.arch}): runtime symbol redefine failed ({objcopy}): {oc_err}")
-    if not file_rename(abi_tmp, cached):
-        if file_exists(cached):
-            val _rm_abi = file_delete(abi_tmp)
-            return Ok(cached)
-        return Ok(abi_tmp)
-    Ok(cached)
+    _baremetal_commit_cache_object(abi_tmp, cached, plan.arch, "runtime")
 
 pub fn baremetal_resolve_runtime_inputs_v1(arch: text, objects: [text],
         linker_flags: [text]) -> Result<BaremetalRuntimeInputs, text>:
@@ -473,11 +471,13 @@ pub fn baremetal_link_with_runtime_inputs_argv_v1(inputs: BaremetalRuntimeInputs
     for flag in linker_flags:
         if flag.starts_with("-Wl,"):
             for piece in flag.substring(4).split(","):
-                if piece == "-T": has_script = true
+                if piece == "":
+                    continue
+                if piece.starts_with("-T") or piece.starts_with("--script"): has_script = true
                 if piece != "-nostdlib" and piece != "-nostartfiles":
                     flags.push(piece)
         else:
-            if flag.starts_with("-T"): has_script = true
+            if flag.starts_with("-T") or flag.starts_with("--script"): has_script = true
             if flag != "-nostdlib" and flag != "-nostartfiles":
                 flags.push(flag)
     var argv: [text] = []
