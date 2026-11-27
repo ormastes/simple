@@ -46,6 +46,7 @@ impl Lowerer {
         self.check_unit_binary(op, left, right, ctx)?;
         let left_hir = Box::new(self.lower_expr(left, ctx)?);
         let right_hir = Box::new(self.lower_expr(right, ctx)?);
+        self.reject_uninferred_operands(op, &left_hir, &right_hir, ctx)?;
 
         // Arithmetic / bitwise / ordered comparison on an UNNARROWED optional
         // scalar is rejected statically. There is no flow-sensitive narrowing

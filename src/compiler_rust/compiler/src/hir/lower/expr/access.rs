@@ -1120,6 +1120,7 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let lowered_receiver = self.lower_expr(receiver, ctx)?;
+        self.reject_uninferred(&lowered_receiver, "a tuple index", ctx)?;
         // `.0`/`.1` on a `(A, B)?` local read after a nil check: the value may
         // be the boxed `Some` enum, so project the payload first (same as the
         // FieldAccess path); raw payloads pass through unchanged.
@@ -1213,6 +1214,7 @@ impl Lowerer {
         }
 
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+        self.reject_uninferred(&recv_hir, "an index expression", ctx)?;
         let idx_hir = Box::new(self.lower_expr(index, ctx)?);
         self.require_integer_index_operand(recv_hir.ty, idx_hir.ty)?;
         let elem_ty = self.get_index_element_type(recv_hir.ty).map_err(|err| match err {

@@ -67,3 +67,4 @@ mod same_named_type_self_tests;
 mod callable_assert_tests;
 mod trait_field_receiver_tests;
 mod unit_value_field_tests;
+mod implicit_generic_tests;

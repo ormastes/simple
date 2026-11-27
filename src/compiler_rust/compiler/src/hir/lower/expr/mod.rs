@@ -757,10 +757,12 @@ impl Lowerer {
         callee: &Expr,
         resolved_symbol: Option<&str>,
     ) -> Option<crate::hir::lower::lowerer::GenericIdentityParamSpec> {
+        // A resolved symbol names the exact function called; the bare callee
+        // name may belong to a same-named function of another module.
         if let Some(sym) = resolved_symbol {
-            if let Some(spec) = self.generic_identity_param.get(sym) {
-                return Some(spec.clone());
-            }
+            return (self.generic_identity_param.get(sym))
+                .or_else(|| self.resolve_function_alias(sym).and_then(|orig| self.generic_identity_param.get(orig)))
+                .cloned();
         }
         match callee {
             Expr::Identifier(name) => {
@@ -794,23 +796,40 @@ impl Lowerer {
         ret: TypeId,
         ctx: &FunctionContext,
     ) -> TypeId {
-        if ret != TypeId::ANY {
+        if !matches!(ret, TypeId::ANY | TypeId::VOID) {
             return ret;
         }
         let (base_callee, explicit_type_args) = match callee {
             Expr::GenericInst { expr, type_args } => (expr.as_ref(), Some(type_args.as_slice())),
             other => (other, None),
         };
+        // A local of that name shadows the function.
+        if matches!(base_callee, Expr::Identifier(name) if ctx.local_map.contains_key(name)) {
+            return ret;
+        }
         let Some(spec) = self.lookup_generic_identity_param_spec(base_callee, resolved_symbol) else {
             return ret;
         };
-        let arg = args
-            .iter()
-            .find(|a| a.name.as_deref() == Some(spec.name.as_str()))
-            .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(spec.index));
-        if let Some(arg) = arg {
+        // `()` is what a call to an unannotated function declared further down
+        // is typed before its body is lowered; only that implicit shape counts.
+        if ret == TypeId::VOID && spec.generic_param_pos.is_some() {
+            return ret;
+        }
+        let arg_of = |index: usize, name: &str| {
+            args.iter()
+                .find(|a| a.name.as_deref() == Some(name))
+                .or_else(|| args.iter().filter(|a| a.name.is_none() && a.label.is_none()).nth(index))
+        };
+        if let Some(arg) = arg_of(spec.index, &spec.name) {
             if let Ok(ty) = self.infer_type(&arg.value, ctx) {
-                if matches!(self.module.types.get(ty), Some(HirType::Struct { .. })) {
+                // One type variable, one type: `max(0, x)` with `x: f64` does
+                // not instantiate `T` to the first argument's `i64`.
+                let agree = spec.same_type_params.iter().all(|(index, name)| {
+                    arg_of(*index, name)
+                        .and_then(|other| self.infer_type(&other.value, ctx).ok())
+                        .is_some_and(|other| other == ty || self.module.types.get(other) == self.module.types.get(ty))
+                });
+                if agree && self.is_instantiable_type(ty) {
                     return ty;
                 }
             }
@@ -823,6 +842,11 @@ impl Lowerer {
                     }
                 }
             }
+        }
+        // Not instantiated: the erased identity still returns its argument as
+        // a tagged word, never `()`.
+        if ret == TypeId::VOID {
+            return TypeId::ANY;
         }
         ret
     }
@@ -2201,6 +2225,46 @@ impl Lowerer {
                     }
                     receiver.ty = specialized_array_ty;
                 }
+            }
+        }
+
+        // `f64?.unwrap_or(d)` on a local with a pure f64 default is the typed
+        // coalesce `if rt_is_some(c): <exact payload> else: d`. The dynamic
+        // method returns the raw payload word as an erased value, which
+        // decodes an explicit `Some(0.1)` as 0.09999999999999998; the typed
+        // form reads the exact bits and, for an inline `f64?` local, calls no
+        // runtime function and boxes nothing. `d` is a literal or a local, so
+        // evaluating it only on the None branch is unobservable.
+        // seed_jit_f64_option_unwrap_or_expect_try_readers_lossy_2026-11-27
+        if method == "unwrap_or"
+            && !crate::mir::float_option_inline::disabled()
+            && args.len() == 1
+            && self.module.types.optional_inner(receiver.ty) == Some(TypeId::F64)
+            && matches!(receiver.kind, HirExprKind::Local(_))
+            && matches!(args[0].value, ast::Expr::Float(_) | ast::Expr::Identifier(_))
+        {
+            let default = self.lower_expr(&args[0].value, ctx)?;
+            if default.ty == TypeId::F64 && matches!(default.kind, HirExprKind::Float(_) | HirExprKind::Local(_)) {
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::If {
+                        condition: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_is_some".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::BOOL,
+                        }),
+                        then_branch: Box::new(HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_unwrap_or_self".to_string(),
+                                args: vec![receiver.clone()],
+                            },
+                            ty: TypeId::F64,
+                        }),
+                        else_branch: Some(Box::new(default)),
+                    },
+                    ty: TypeId::F64,
+                }));
             }
         }
 

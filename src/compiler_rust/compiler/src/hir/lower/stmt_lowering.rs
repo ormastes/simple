@@ -820,6 +820,9 @@ impl Lowerer {
                 };
                 ctx.bind_local_unit_facts(&name, unit_kind, type_name, lambda_sig);
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let_stmt.ty.is_none() && pattern_type.is_none() {
+                    self.bind_uninferred_local(local_index, value.as_ref(), ctx);
+                }
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
                     let fn_ty = self.module.types.register(HirType::Function {
@@ -2104,6 +2107,7 @@ impl Lowerer {
     ) -> LowerResult<Vec<HirStmt>> {
         // Lower the subject expression once
         let subject_hir = self.lower_subject_for_patterns(&match_stmt.subject, match_stmt.arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value

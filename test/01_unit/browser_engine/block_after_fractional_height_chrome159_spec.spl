@@ -1,0 +1,119 @@
+"""
+## Purpose and audience
+Purpose: Pin that a block following a sibling with an authored fractional
+`height` (10.25 / 10.5 / 10.75 px) starts where that sibling really ends,
+against Chrome 159. The block cursor advanced by the whole-px height only and
+dropped the fraction, so the next block, its line and an inline `<svg>` on that
+line sat 1 / 2 / 3 device rows high at k=4 (and one CSS px high at k=1 from
+.5 up). The svg is not special: a text-only block moves the same way.
+Audience: web renderer block layout (block cursor residual).
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400 CSS px wide, Liberation Sans 16px/1.5. Each case is its own 50px block.
+Rows are the device rows whose pixel on one column is exactly the colour.
+
+| case (block top) | what | Chrome k=4 | base k=4 | Chrome k=1 | base k=1 |
+|------|------|-----------|----------|-----------|----------|
+| 10.25px spacer, text (0) | block bg | 41..136 | 40..135 | 10..33 | 10..33 |
+| 10.25px spacer, `ab <svg 40x20>` (200 / 50) | block bg | 241..346 | 240..345 | 60..86 | 60..86 |
+| | svg rect | 241..320 | 240..319 | 60..79 | 60..79 |
+| 10.5px spacer (400 / 100) | block bg | 442..547 | 440..545 | 111..137 | 110..136 |
+| | svg rect | 442..521 | 440..519 | 111..130 | 110..129 |
+| 10.75px spacer (600 / 150) | block bg | 643..748 | 640..745 | 161..187 | 160..186 |
+| | svg rect | 643..722 | 640..719 | 161..180 | 160..179 |
+
+The fractional siblings carry a background from the second block on. Their own
+rows in Chrome: 10.25px 200..240 (k=4) and 50..59 (k=1); 10.5px 400..441 and
+100..110; 10.75px 600..642 and 150..160. At k=1 the box takes the snapped px
+(11 rows for 10.5px), so no seam row opens above the next block.
+
+A fifth block has `height:10.75px; max-height:10px` and a 5px sibling: Chrome
+clamps to 10px, rows 800..839 then 840..859 at k=4 and 200..209 then 210..214
+at k=1 (an unguarded fraction gave 800..842 / 843 and 200..210 / 211).
+"""
+
+"""
+Traceability: REQ-WEB-BLOCK-CURSOR-FRACTION-001 — the block cursor keeps the sub-pixel part of an authored height.
+"""
+# @tag: unit, browser_engine, device_scale, layout, svg, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 250
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:50px}}</style></head><body><div class=\"b\"><div style=\"height:10.25px\"></div><div style=\"background:#ffe0e0\">ab</div></div><div class=\"b\"><div style=\"height:10.25px;background:#c00000\"></div><div style=\"background:#e0e0ff\">ab <svg width=\"40\" height=\"20\"><rect width=\"40\" height=\"20\" fill=\"#0000ff\"></rect></svg></div></div><div class=\"b\"><div style=\"height:10.5px;background:#00c000\"></div><div style=\"background:#ffe0ff\">ab <svg width=\"40\" height=\"20\"><rect width=\"40\" height=\"20\" fill=\"#ff00ff\"></rect></svg></div></div><div class=\"b\"><div style=\"height:10.75px;background:#0000c0\"></div><div style=\"background:#e0ffff\">ab <svg width=\"40\" height=\"20\"><rect width=\"40\" height=\"20\" fill=\"#00c0c0\"></rect></svg></div></div><div class=\"b\"><div style=\"height:10.75px;max-height:10px;background:#777700\"></div><div style=\"height:5px;background:#888800\"></div></div></body></html>"
+
+var g_px4: [u32] = []
+var g_px1: [u32] = []
+
+fn _px(k: i32) -> [u32]:
+    if k == 4:
+        if g_px4.len() == 0:
+            g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+        return g_px4
+    if g_px1.len() == 0:
+        g_px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 1, "cpu_simd")
+    g_px1
+
+# "first..last" device rows on column x whose pixel is exactly rgb.
+fn _rows(k: i32, x: i32, rgb: u32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    val h = CSS_H * k
+    var first = -1
+    var last = -1
+    var y = 0
+    while y < h:
+        if (px[y * w + x] & 0xFFFFFFu32) == rgb:
+            if first < 0:
+                first = y
+            last = y
+        y = y + 1
+    "{first}..{last}"
+
+describe "A block after an authored fractional height starts on Chrome's row (Chrome 159)":
+    it "AC-1: k=4, a text block after a 10.25px sibling starts on device row 41":
+        expect(_px(4).len()).to_equal((CSS_W * 4 * CSS_H * 4) as i64)
+        expect(_rows(4, 1000, 0xFFE0E0u32)).to_equal("41..136")
+
+    it "AC-2: k=4, the svg line after a 10.25px sibling starts on device row 241":
+        expect(_rows(4, 1000, 0xE0E0FFu32)).to_equal("241..346")
+        expect(_rows(4, 150, 0x0000FFu32)).to_equal("241..320")
+
+    it "AC-3: k=4, the svg line after a 10.5px sibling starts on device row 442":
+        expect(_rows(4, 1000, 0xFFE0FFu32)).to_equal("442..547")
+        expect(_rows(4, 150, 0xFF00FFu32)).to_equal("442..521")
+
+    it "AC-4: k=4, the svg line after a 10.75px sibling starts on device row 643, not 640":
+        expect(_rows(4, 1000, 0xE0FFFFu32)).to_equal("643..748")
+        expect(_rows(4, 150, 0x00C0C0u32)).to_equal("643..722")
+
+    it "AC-5: k=1, a 10.25px sibling leaves the next block on row 10":
+        expect(_rows(1, 300, 0xFFE0E0u32)).to_equal("10..33")
+        expect(_rows(1, 300, 0xE0E0FFu32)).to_equal("60..86")
+        expect(_rows(1, 30, 0x0000FFu32)).to_equal("60..79")
+
+    it "AC-6: k=1, a 10.5px and a 10.75px sibling push the next block one row down":
+        expect(_rows(1, 300, 0xFFE0FFu32)).to_equal("111..137")
+        expect(_rows(1, 30, 0xFF00FFu32)).to_equal("111..130")
+        expect(_rows(1, 300, 0xE0FFFFu32)).to_equal("161..187")
+        expect(_rows(1, 30, 0x00C0C0u32)).to_equal("161..180")
+
+    it "AC-7: the fractional sibling's own box ends on the row before the next block, at k=4 and k=1":
+        expect(_rows(4, 1000, 0xC00000u32)).to_equal("200..240")
+        expect(_rows(4, 1000, 0x00C000u32)).to_equal("400..441")
+        expect(_rows(4, 1000, 0x0000C0u32)).to_equal("600..642")
+        expect(_rows(1, 300, 0xC00000u32)).to_equal("50..59")
+        expect(_rows(1, 300, 0x00C000u32)).to_equal("100..110")
+        expect(_rows(1, 300, 0x0000C0u32)).to_equal("150..160")
+
+    it "AC-8: max-height at or below the whole px clamps the fraction away (10.75px, max 10px)":
+        expect(_rows(4, 1000, 0x777700u32)).to_equal("800..839")
+        expect(_rows(4, 1000, 0x888800u32)).to_equal("840..859")
+        expect(_rows(1, 300, 0x777700u32)).to_equal("200..209")
+        expect(_rows(1, 300, 0x888800u32)).to_equal("210..214")

@@ -1,0 +1,164 @@
+"""
+## Purpose and audience
+Purpose: Pin the device rows of a text `<input>` value at device scale k > 1,
+against Chrome 159.
+
+Chrome lays the value out on the control font's `normal` line at the DEVICE
+size and centres that line in the DEVICE content box, the half px rounding
+down the page; the text hangs from the device strut baseline. Simple centred
+the line in CSS px (then x k) and hung the text from the painter's ascent at
+the rounded device size, with no device correction:
+- 13.333px DejaVu Sans Mono at k=4: device line 63, baseline 50, painter
+  ascent 49 -> the value sat one device row high (330 vs Chrome 331). The same
+  for a 16px Liberation Sans input (614 vs 615).
+- `height:40px` at k=4: CSS centring gives 4 x 13 = 52, device centring
+  (160 - 61 + 1) / 2 = 50 -> two rows low (383 vs 381).
+- k=3, 13.333px Liberation Sans: device strut baseline 35 against the
+  painter's 36 -> one row low.
+The catalog forms-media `Name` input (13.333px Liberation Sans, auto height)
+already matched at k=4: there both terms are 48.
+
+Only the UA control font (13.333px) is moved. The page also holds a 16px and
+a 20px monospace input; their boxes are not Chrome's height yet (16px
+Liberation Sans: 19 CSS px here, 18 in Chrome), so the rule is not applied to
+them. AC-8 guards that: the 16px value stays on rows 460..492 at k=3 and
+307..328 at k=2, where it already was and where Chrome has it (the rule on
+Simple's 19 px line would give 461 and 308).
+At k=3 Simple's 40 px DejaVu Sans Mono `E` is one row taller at the top than
+Chrome's (rasterizer); that cell is pinned by its last row, the baseline.
+
+Audience: web renderer form-control paint (paint_draw_ir input value command)
+and layout_foundation device line metric maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=k
+--window-size=400,300 --screenshot`). Rows holding a pixel with red < 128,
+device px. ABS page, left column (x 12..80 CSS): catalog-styled input,
+monospace, 16px, default UA input (its inset top border, then the value);
+right column (x 200..270): no padding/border, height:40px, height:41px, 20px
+monospace.
+- k=4 left 87..123 331..369 615..658 880..887 903..939; right 51..87 381..417
+  663..699 896..953.
+- k=3 left 64..91 247..275 460..492 660..665 676..703; right 37..64 285..312
+  496..523 671..714.
+- k=2 left 44..61 164..183 307..328 440..443 452..469; right 26..43 191..208
+  332..349 447..475.
+- k=1 left 22..30 82..91 152..163 220..221 226..234; right 13..21 96..104
+  166..174 225..238.
+FLOW page (inputs on `<label>` lines, the catalog's control style; label text
+white so only the values ink), x 40..200 CSS, first two lines (catalog
+style, monospace): k=4 79..115 244..282.
+CTL page (the same command also paints button-type values, placeholders and
+fallback-font values). Left column: UA submit (value rows inside its border,
+x 18..44, y 14..27 CSS), `type=button` and `type=reset` + height:40px with no
+border/padding, a placeholder (#757575, read by its last row: the baseline);
+right column: an Arabic value (DejaVu Sans fallback), a placeholder in a 40px
+field, a monospace UA submit (x 208..232, y 224..237).
+- k=4: submit 63..99, button 331..367, reset 661..697, placeholder last row
+  927, 40px placeholder last row 697, monospace submit 903..941.
+- k=3: submit 46..73, button 247..274, reset 495..522, placeholder last row
+  694, 40px placeholder last row 522, monospace submit last row 704, Arabic
+  value 246..284 (247..284 when the fallback face's own device offset was
+  dropped by a second `device-y-offset` prop).
+The Arabic value at k=2 / k=4 and a CJK value are not on Chrome's rows for
+other reasons (glyph extents; open) and are not pinned.
+"""
+
+"""
+Traceability: REQ-WEB-INPUT-DEVICE-LINE-001 — at device scale k a text input's value sits on Chrome's device `normal` line, centred in the device content box.
+"""
+# @tag: unit, browser_engine, paint, form_control, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_draw_ir.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val ABS: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}}body{{margin:0;background:#fff;color:#000}}input{{position:absolute;color:#000;background:#fff}}</style></head><body><input value=\"EEE\" style=\"left:10px;top:10px;padding:8px;border:1px solid #94a3b8;border-radius:5px\"><input value=\"EEE\" style=\"left:200px;top:10px;padding:0;border:0\"><input value=\"EEE\" style=\"left:10px;top:80px;padding:0;border:0;font-family:monospace\"><input value=\"EEE\" style=\"left:200px;top:80px;padding:0;border:0;height:40px\"><input value=\"EEE\" style=\"left:10px;top:150px;padding:0;border:0;font-size:16px\"><input value=\"EEE\" style=\"left:200px;top:150px;padding:0;border:0;height:41px\"><input value=\"EEE\" style=\"left:10px;top:220px\"><input value=\"EEE\" style=\"left:200px;top:220px;padding:0;border:0;font-size:20px;font-family:monospace\"></body></html>"
+val CTL: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}}body{{margin:0;background:#fff;color:#000}}input{{position:absolute;color:#000;background:#fff}}</style></head><body><input type=\"submit\" value=\"EEE\" style=\"left:10px;top:10px\"><input type=\"button\" value=\"EEE\" style=\"left:10px;top:80px;border:0;padding:0\"><input type=\"reset\" value=\"EEE\" style=\"left:10px;top:150px;border:0;padding:0;height:40px\"><input placeholder=\"EEE\" style=\"left:10px;top:220px;border:0;padding:0\"><input value=\"漢字\" style=\"left:200px;top:10px;padding:0;border:0\"><input value=\"سلام\" style=\"left:200px;top:80px;padding:0;border:0\"><input placeholder=\"EEE\" style=\"left:200px;top:150px;border:0;padding:0;height:40px\"><input type=\"submit\" value=\"EEE\" style=\"left:200px;top:220px;font-family:monospace\"></body></html>"
+val FLOW: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}}body{{margin:0;font:16px/1.5 sans-serif;background:#fff;color:#fff}}label{{display:block;margin:8px 0}}input{{color:#000;background:#fff;padding:8px;border:1px solid #94a3b8;border-radius:5px}}</style></head><body><label>Name <input value=\"EEE\"></label><label>Name <input value=\"EEE\" style=\"font-family:monospace\"></label><label>Name <input value=\"EEE\" style=\"font-size:16px\"></label><label>Name <input value=\"EEE\" style=\"height:40px\"></label><label>Name <input value=\"EEE\" style=\"font-size:20px;font-family:monospace\"></label><label>Name <input value=\"EEE\" style=\"padding:0;border:0;height:30px;font-family:monospace\"></label></body></html>"
+
+fn _red(px: u32) -> i32:
+    ((px >> 16u32) & 0xFFu32) as i32
+
+# "a..b " runs of rows holding ink (red < 128) in columns x0..x1, rows y0..y1.
+fn _ink_rows(px: [u32], k: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> text:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return "bad frame"
+    var out = ""
+    var start = -1
+    var y = y0
+    while y <= y1 + 1:
+        var ink = false
+        if y <= y1:
+            var x = x0
+            while x <= x1 and not ink:
+                if _red(px[y * w + x]) < 128:
+                    ink = true
+                x = x + 1
+        if ink and start < 0:
+            start = y
+        elif not ink and start >= 0:
+            out = out + "{start}..{y - 1} "
+            start = -1
+        y = y + 1
+    out
+
+# The UA-font inputs of the ABS page at device scale k: left column
+# (catalog-styled, monospace, default up to above its bottom border), then
+# right column (no padding/border, height:40px, height:41px).
+fn _abs_rows(k: i32) -> text:
+    val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ABS, CSS_W, CSS_H, k, "cpu_simd")
+    (_ink_rows(px, k, 12 * k, 80 * k, 8 * k, 146 * k) + _ink_rows(px, k, 12 * k, 80 * k, 218 * k, 237 * k) + "| " +
+        _ink_rows(px, k, 200 * k, 270 * k, 8 * k, 216 * k))
+
+# Last ink row of columns x0..x1 in rows y0..y1 (device px), -1 for none.
+fn _last_ink_row(px: [u32], k: i32, x0: i32, x1: i32, y0: i32, y1: i32) -> i32:
+    val w = CSS_W * k
+    if px.len() != (w * CSS_H * k) as i64:
+        return -2
+    var y = y1
+    while y >= y0:
+        var x = x0
+        while x <= x1:
+            if _red(px[y * w + x]) < 128:
+                return y
+            x = x + 1
+        y = y - 1
+    -1
+
+describe "A text input value sits on Chrome's device line at device scale k (Chrome 159)":
+    it "AC-1: at 4x the monospace and height:40px values are on rows 331 and 381":
+        expect(_abs_rows(4)).to_equal("87..123 331..369 880..887 903..939 | 51..87 381..417 663..699 ")
+    it "AC-2: at 4x in-flow inputs on label lines have value rows 79..115 244..282":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(FLOW, CSS_W, CSS_H, 4, "cpu_simd")
+        expect(_ink_rows(px, 4, 160, 800, 0, 350)).to_equal("79..115 244..282 ")
+    it "AC-3: at 3x the values are on Chrome's rows (the monospace one by its last row, 275)":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ABS, CSS_W, CSS_H, 3, "cpu_simd")
+        val sans = (_ink_rows(px, 3, 36, 240, 24, 228) + _ink_rows(px, 3, 36, 240, 654, 711) + "| " +
+            _ink_rows(px, 3, 600, 810, 24, 648))
+        expect(sans + "| {_last_ink_row(px, 3, 36, 240, 234, 438)}").to_equal("64..91 660..665 676..703 | 37..64 285..312 496..523 | 275")
+    it "AC-4: at 2x the values are on Chrome's rows":
+        expect(_abs_rows(2)).to_equal("44..61 164..183 440..443 452..469 | 26..43 191..208 332..349 ")
+    it "AC-5: at 1x the rows stay where Chrome has them":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ABS, CSS_W, CSS_H, 1, "cpu_simd")
+        expect(_ink_rows(px, 1, 12, 80, 8, 237) + "| " + _ink_rows(px, 1, 200, 270, 8, 290)).to_equal("22..30 82..91 152..163 220..221 226..234 | 13..21 96..104 166..174 225..238 ")
+    it "AC-6: button-type values and placeholders are on Chrome's rows at 4x and 3x":
+        val p4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(CTL, CSS_W, CSS_H, 4, "cpu_simd")
+        val got4 = (_ink_rows(p4, 4, 72, 176, 56, 108) + _ink_rows(p4, 4, 40, 240, 312, 864) + _ink_rows(p4, 4, 832, 928, 896, 948) +
+            "| {_last_ink_row(p4, 4, 40, 240, 872, 1160)} {_last_ink_row(p4, 4, 800, 1040, 592, 864)}")
+        expect(got4).to_equal("63..99 331..367 661..697 903..941 | 927 697")
+        val p3 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(CTL, CSS_W, CSS_H, 3, "cpu_simd")
+        val got3 = (_ink_rows(p3, 3, 54, 132, 42, 81) + _ink_rows(p3, 3, 30, 180, 234, 648) +
+            "| {_last_ink_row(p3, 3, 30, 180, 654, 870)} {_last_ink_row(p3, 3, 600, 780, 444, 648)} {_last_ink_row(p3, 3, 624, 696, 672, 711)}")
+        expect(got3).to_equal("46..73 247..274 495..522 | 694 522 704")
+    it "AC-7: at 3x a fallback-font (Arabic) value keeps its face offset: rows 246..284":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(CTL, CSS_W, CSS_H, 3, "cpu_simd")
+        expect(_ink_rows(px, 3, 600, 780, 234, 438)).to_equal("246..284 ")
+    it "AC-8: a 16px author-font input value is not moved: rows 460..492 at 3x, 307..328 at 2x":
+        val p3 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ABS, CSS_W, CSS_H, 3, "cpu_simd")
+        val p2 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(ABS, CSS_W, CSS_H, 2, "cpu_simd")
+        expect(_ink_rows(p3, 3, 36, 240, 444, 648) + "| " + _ink_rows(p2, 2, 24, 160, 296, 432)).to_equal("460..492 | 307..328 ")

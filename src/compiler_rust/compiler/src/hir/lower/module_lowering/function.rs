@@ -254,6 +254,20 @@ impl Lowerer {
                         return true;
                     }
                 }
+                // `T?` is pointer-form while `Some(x)` of a typed array/dict is an
+                // `Option` enum with payload `T`: same optional, admit either way.
+                if let (HirType::Pointer { inner, .. }, HirType::Enum { name, .. })
+                | (HirType::Enum { name, .. }, HirType::Pointer { inner, .. }) = (expected_ty, found_ty)
+                {
+                    if name == "Option" {
+                        let option_ty = if matches!(expected_ty, HirType::Enum { .. }) { expected } else { found };
+                        if let Some(payload) = self.option_enum_payload(option_ty) {
+                            if self.type_ids_compatible(*inner, payload) {
+                                return true;
+                            }
+                        }
+                    }
+                }
                 // An array literal `[a, b, c]` coerces to a declared
                 // 3-tuple when the elements pairwise match (the self-hosted
                 // compiler and the interpreter both accept this spelling).
@@ -1467,6 +1481,10 @@ impl Lowerer {
                 param.inject,
             );
             self.record_optional_trait_payload(param.ty.as_ref(), param_index, &mut ctx);
+            if param.ty.is_none() && ty == TypeId::ANY {
+                let origin = format!("unannotated parameter `{}` of `{}`", param.name, f.name);
+                ctx.uninferred_locals.insert(param_index, (origin, None));
+            }
             if let Some(n) = param.ty.as_ref().and_then(Self::simple_type_name) {
                 match self.unit_kind_of_type_name(&n) {
                     Some(kind) => {
@@ -1539,6 +1557,9 @@ impl Lowerer {
         };
         ctx.return_type = return_type;
         self.method_return_types.insert(func_name.clone(), return_type);
+        if let Some(verdict) = self.unannotated_return_fns.get_mut(&func_name) {
+            *verdict = Some(return_type != TypeId::VOID && !Self::body_ends_in_unit(&body));
+        }
 
         // Implicit-return counterpart of the `Node::Return` bool coercion in
         // stmt_lowering: a function declared `-> bool` whose trailing
