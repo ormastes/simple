@@ -88,6 +88,14 @@ impl<'a> MirLowerer<'a> {
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Array { .. })))
     }
 
+    fn receiver_is_tuple(&self, receiver: &HirExpr, recovered_ty: Option<TypeId>) -> bool {
+        let Some(registry) = self.type_registry else {
+            return false;
+        };
+        let is_tuple = |ty| matches!(registry.get(ty), Some(HirType::Tuple(_) | HirType::LabeledTuple(_)));
+        is_tuple(receiver.ty) || recovered_ty.is_some_and(is_tuple)
+    }
+
     /// Same shape as `receiver_is_array`, for `Dict<K, V>` receivers. Used to
     /// route `d.get(k)` through `lower_index_expr` — see the call site below
     /// (task: dict_value_read_returns_tag_boxed_word).
@@ -1854,6 +1862,22 @@ impl<'a> MirLowerer<'a> {
                 block.instructions.push(MirInst::Call {
                     dest: Some(dest),
                     target: crate::mir::effects::CallTarget::from_name("rt_array_len"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
+        // A tuple `.len()` otherwise lowers to the undefined `Tuple.len`, which
+        // the JIT answered with -1 (a u64 loop bounded by it never ended).
+        // Bug: seed_jit_len_bound_proof_accepts_non_array_receiver_2026-11-27
+        if method == "len" && args.is_empty() && self.receiver_is_tuple(receiver, receiver_local_ty) {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_tuple_len"),
                     args: vec![receiver_reg],
                 });
                 dest

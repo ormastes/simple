@@ -2539,6 +2539,28 @@ impl Lowerer {
             }));
         }
 
+        // A tuple `.len()` is its arity (rt_tuple_len, raw i64). Left untyped it
+        // landed in an `any` slot undecoded and read as nil / a wrong count.
+        // Bug: seed_jit_len_bound_proof_accepts_non_array_receiver_2026-11-27
+        if method == "len"
+            && hir_args.is_empty()
+            && matches!(
+                self.module.types.get(receiver.ty),
+                Some(HirType::Tuple(_) | HirType::LabeledTuple(_))
+            )
+        {
+            return Ok(Some(HirExpr {
+                kind: HirExprKind::MethodCall {
+                    receiver: Box::new(receiver.clone()),
+                    method: method.to_string(),
+                    args: hir_args,
+                    dispatch: DispatchMode::Static,
+                    generic_args: Vec::new(),
+                },
+                ty: TypeId::I64,
+            }));
+        }
+
         // String methods
         if is_string {
             let result_ty = match method {

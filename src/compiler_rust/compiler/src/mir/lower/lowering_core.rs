@@ -595,15 +595,26 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    pub(super) fn array_local_for_len_expr(expr: &HirExpr) -> Option<usize> {
+    /// The array local whose `.len()` this expression is. Only an array
+    /// receiver qualifies: the loop preheader hoists `rt_array_data_ptr` from
+    /// it, which a tuple or text local does not have.
+    /// Bug: seed_jit_len_bound_proof_accepts_non_array_receiver_2026-11-27
+    pub(super) fn array_local_for_len_expr(&self, expr: &HirExpr) -> Option<usize> {
         match &expr.kind {
             HirExprKind::MethodCall {
                 receiver, method, args, ..
-            } if args.is_empty() && method == "len" => Self::local_index_for_expr(receiver),
+            } if args.is_empty()
+                && method == "len"
+                && self
+                    .type_registry
+                    .is_some_and(|tr| matches!(tr.get(receiver.ty), Some(crate::hir::HirType::Array { .. }))) =>
+            {
+                Self::local_index_for_expr(receiver)
+            }
             HirExprKind::MethodCall {
                 receiver, method, args, ..
             } if args.is_empty() && matches!(method.as_str(), "to_u64" | "to_i64" | "to_usize") => {
-                Self::array_local_for_len_expr(receiver)
+                self.array_local_for_len_expr(receiver)
             }
             _ => None,
         }
@@ -631,7 +642,7 @@ impl<'a> MirLowerer<'a> {
     pub(super) fn record_len_local_source(&mut self, local_index: usize, value: Option<&HirExpr>) {
         self.len_local_sources.remove(&local_index);
         self.len_local_sources.retain(|_, array_idx| *array_idx != local_index);
-        if let Some(array_local_index) = value.and_then(Self::array_local_for_len_expr) {
+        if let Some(array_local_index) = value.and_then(|v| self.array_local_for_len_expr(v)) {
             self.len_local_sources.insert(local_index, array_local_index);
         }
     }
