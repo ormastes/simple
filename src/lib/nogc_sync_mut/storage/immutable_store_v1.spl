@@ -16,7 +16,7 @@ use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1
 use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_publish_noreplace_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes,
     file_write_bytes, secure_temp_dir_raw, dir_create_all, dir_list, dir_remove_all, is_dir,
-    file_delete, dir_list_optional, rename_path, file_sync, file_modified_time}
+    dir_create_new, file_delete, dir_list_optional, rename_path, file_sync, file_modified_time}
 
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
@@ -821,23 +821,41 @@ fn _isv1_pin_args_error(root: text, pin_id: text, owner: text) -> text:
 # in-place merge path. POSIX rename(2) replaces an EMPTY destination dir, so the
 # destination is checked first; a staged pin is never empty (it holds `owner`),
 # so two racing creators cannot replace each other. Residual: an empty
-# `pins/<id>` appearing between the check and the rename. Also residual: the
-# in-place path (`_isv1_pin_add_in_place`) recreates `pins/<id>/refs` if a
-# release renamed the pin away after the `is_dir` check, which can leave an
-# ownerless dir (the adder then fails `pin-write-failed`).
+# `pins/<id>` appearing between the check and the rename.
+# The in-place merge never creates `pin_dir`: a release that renamed the pin
+# away after the caller's `is_dir` check makes it return "pin-vanished" and the
+# caller goes back to the staged create (bounded), so no ownerless
+# `pins/<id>` is recreated.
 fn _isv1_pin_add(root: text, pin_id: text, owner: text, keys: [text]) -> text:
     if keys.len() > _ISV1_MAX_REFS:
         return "pin-refs-too-many"
     val target = _isv1_pin_path(root, pin_id)
-    if is_dir(target):
-        return _isv1_pin_add_in_place(root, target, owner, keys)
+    var attempt = 0
+    while attempt < 3:
+        attempt = attempt + 1
+        var reason = ""
+        if is_dir(target):
+            reason = _isv1_pin_add_in_place(root, target, owner, keys)
+        else:
+            reason = _isv1_pin_add_staged(root, target, owner, keys)
+        if reason != "pin-vanished":
+            return reason
+    "pin-contended"
+
+# Build the pin in `staging/pincreate-*/pin`, then rename it into `target`.
+# A lost rename (or a pin that appeared meanwhile) merges into the winner.
+fn _isv1_pin_add_staged(root: text, target: text, owner: text, keys: [text]) -> text:
     val staging_root = _isv1_join(root, "staging")
     if not dir_create_all(staging_root) and not is_dir(staging_root):
         return "staging-dir-failed"
     val stage = secure_temp_dir_raw(staging_root, "pincreate-")
     if stage.len() <= 0:
         return "staging-create-failed"
-    val reason = _isv1_pin_add_in_place(root, stage + "/pin", owner, keys)
+    val built = stage + "/pin"
+    if not dir_create_all(built + "/refs") and not is_dir(built + "/refs"):
+        dir_remove_all(stage)
+        return "pins-dir-failed"
+    val reason = _isv1_pin_add_in_place(root, built, owner, keys)
     if reason != "":
         dir_remove_all(stage)
         return reason
@@ -845,7 +863,7 @@ fn _isv1_pin_add(root: text, pin_id: text, owner: text, keys: [text]) -> text:
     if not dir_create_all(pins_root) and not is_dir(pins_root):
         dir_remove_all(stage)
         return "pins-dir-failed"
-    if is_dir(target) or not rename_path(stage + "/pin", target):
+    if is_dir(target) or not rename_path(built, target):
         dir_remove_all(stage)
         if is_dir(target):
             return _isv1_pin_add_in_place(root, target, owner, keys)
@@ -855,8 +873,13 @@ fn _isv1_pin_add(root: text, pin_id: text, owner: text, keys: [text]) -> text:
 
 fn _isv1_pin_add_in_place(root: text, pin_dir: text, owner: text, keys: [text]) -> text:
     val refs_dir = pin_dir + "/refs"
-    if not dir_create_all(refs_dir) and not is_dir(refs_dir):
-        return "pins-dir-failed"
+    if not is_dir(refs_dir):
+        # Exclusive single-component create: needs `pin_dir` to exist.
+        val made = dir_create_new(refs_dir)
+        if made == "failed" and not is_dir(pin_dir):
+            return "pin-vanished"
+        if made == "failed" and not is_dir(refs_dir):
+            return "pins-dir-failed"
     val owner_path = pin_dir + "/owner"
     val claimed = _isv1_publish_text_noreplace(root, "owner", owner, owner_path)
     if claimed == 0:
