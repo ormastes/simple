@@ -1165,6 +1165,61 @@ pub unsafe extern "C" fn rt_dir_sync(path_ptr: *const u8, path_len: u64) -> bool
     }
 }
 
+/// Read `rel` under the trusted `root`, refusing a reparse point/symlink at
+/// every component at open time (see `under_root`). Returns a `[u8]` value, or
+/// NIL with the arm recorded for `rt_file_read_regular_no_follow_last_failure`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_under_root_bytes(
+    root_ptr: *const u8,
+    root_len: u64,
+    rel_ptr: *const u8,
+    rel_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if root_ptr.is_null() || rel_ptr.is_null() {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
+    }
+    let root = std::str::from_utf8(std::slice::from_raw_parts(root_ptr, root_len as usize));
+    let rel = std::str::from_utf8(std::slice::from_raw_parts(rel_ptr, rel_len as usize));
+    let (Ok(root), Ok(rel)) = (root, rel) else {
+        return read_no_follow_fail(READ_NF_BAD_UTF8_PATH);
+    };
+    match super::under_root::read_under_root(root, rel, max_bytes) {
+        Ok(raw) => {
+            let value = bytes_to_runtime_array(&raw);
+            READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
+            value
+        }
+        Err(code) => read_no_follow_fail(code),
+    }
+}
+
+/// Write `data` to `rel` under the trusted `root` through a verified directory
+/// chain (todo 479); atomic temp-and-rename inside the held parent.
+#[no_mangle]
+pub extern "C" fn rt_file_write_under_root_bytes(root: RuntimeValue, rel: RuntimeValue, data: RuntimeValue) -> bool {
+    if !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID) {
+        return false;
+    }
+    let (root_ptr, root_len) = (rt_string_data(root), rt_string_len(root));
+    let (rel_ptr, rel_len) = (rt_string_data(rel), rt_string_len(rel));
+    if root_ptr.is_null() || root_len <= 0 || rel_ptr.is_null() || rel_len <= 0 {
+        return false;
+    }
+    let Some(bytes) = crate::value::collections::byte_array_bytes(data) else {
+        return false;
+    };
+    let root = std::str::from_utf8(unsafe { std::slice::from_raw_parts(root_ptr, root_len as usize) });
+    let rel = std::str::from_utf8(unsafe { std::slice::from_raw_parts(rel_ptr, rel_len as usize) });
+    match (root, rel) {
+        (Ok(root), Ok(rel)) => super::under_root::write_under_root(root, rel, &bytes),
+        _ => false,
+    }
+}
+
 /// Synchronize the cached write-at handle when it matches `path`.
 ///
 /// Falls back to `rt_file_fsync` when the current thread has no matching

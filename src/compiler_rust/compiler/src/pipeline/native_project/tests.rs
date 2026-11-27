@@ -3020,6 +3020,8 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
     assert!(core_c_symbols.contains("rt_dir_sync"));
+    assert!(core_c_symbols.contains("rt_file_read_under_root_bytes"));
+    assert!(core_c_symbols.contains("rt_file_write_under_root_bytes"));
     for symbol in [
         "rt_file_view_open_beneath_no_follow_v1",
         "rt_file_view_pread_exact_v1",

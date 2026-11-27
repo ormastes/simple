@@ -1216,6 +1216,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_fsync_cached",
     "rt_file_sync",
     "rt_dir_sync",
+    "rt_file_read_under_root_bytes",
+    "rt_file_write_under_root_bytes",
     "rt_file_create_excl",
     "rt_file_view_open_beneath_no_follow_v1",
     "rt_file_view_mapping_supported_v1",

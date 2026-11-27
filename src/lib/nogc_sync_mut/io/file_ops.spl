@@ -16,7 +16,7 @@ use std.io_runtime.{read_file_text, read_file_text_result, file_delete, file_cop
 # (doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md).
 use std.io_runtime.{file_read}
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_canonical}
-use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native, file_atomic_write_bytes_tagged_native}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native, file_atomic_write_bytes_tagged_native, file_write_under_root_bytes_tagged_native}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 # Cycle-170 split crossing (parent slot, prefix slot, make) is a SOSIX
 # operation; see std.nogc_sync_mut.sosix.secure_temp_dir.
@@ -172,6 +172,46 @@ fn file_write_bytes(path: text, data: [u8]) -> bool:
 
 fn file_atomic_write_bytes(path: text, data: [u8]) -> bool:
     file_atomic_write_bytes_tagged_native(host_path_native(path), data)
+
+# Open-time confinement (todo 479): the runtime walks `rel` below the trusted
+# `root`, refusing a reparse point/symlink at EVERY component at open time and
+# holding each directory open until the final read, so a junction swapped in
+# after a path-policy walk cannot redirect it.
+@unsafe(reason: "walks a root-relative path with a no-follow open per component and returns at most the caller-owned bound as raw bytes", capabilities: [ffi])
+extern fn rt_file_read_under_root_bytes(root: text, rel: text, max_bytes: i64) -> [u8]?
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in file_read_under_root_bytes", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+# @allow(primitive_api) reason: byte bound and failure text of a raw runtime ABI call, consumed by the storage view through sosix fs_v1
+pub fn file_read_under_root_bytes(root: text, rel: text, max_bytes: i64) -> Result<[u8], text>:
+    if max_bytes < 0:
+        return Err("bounded file read requires a non-negative limit")
+    var content: [u8]? = None
+    unsafe(capabilities: [ffi]):
+        content = rt_file_read_under_root_bytes(host_path_native(root), rel, max_bytes)
+    # Stable prefixes, never user text: callers classify by `under-root-link` (arm 8).
+    if content.?:
+        val value = content.unwrap()
+        if value.len() < 0:
+            val code = _read_no_follow_failure_code()
+            if code == 100:
+                return Ok([])
+            if code == 8:
+                return Err("under-root-link")
+            return Err("under-root-failed: {_read_no_follow_failure_name()}")
+        Ok(value)
+    else:
+        val code = _read_no_follow_failure_code()
+        if code == 100:
+            return Ok([])
+        if code == 8:
+            return Err("under-root-link")
+        Err("under-root-failed: {_read_no_follow_failure_name()}")
+
+# Write counterpart: directory chain verified and held open, temp file created
+# in the held parent and renamed into place.
+# @allow(primitive_api) reason: bool success result of a raw runtime ABI call, consumed by the storage view through sosix fs_v1
+pub fn file_write_bytes_under_root(root: text, rel: text, data: [u8]) -> bool:
+    file_write_under_root_bytes_tagged_native(host_path_native(root), rel, data)
 
 # reason positional io file_ops API
 pub fn file_atomic_write(path: text, content: text) -> bool:

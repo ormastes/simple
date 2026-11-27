@@ -3571,6 +3571,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // same (ptr, len) x2 shape, see runtime/src/value/sffi/file_io/file_ops.rs
         // and the pure-Simple twin table text_extern_abi.spl.
         | "rt_file_copy_create_excl_no_follow"
+        | "rt_file_read_under_root_bytes"
         | "rt_file_link_create_excl_no_follow" => Some(&[0, 1]),
         // Stage-3 memory-evidence sink (runtime.c rt_mem_snapshot_*): the C
         // ABI is (path_ptr, path_len) / (fd, seq, event_ptr, event_len,
@@ -3699,7 +3700,7 @@ pub fn boxed_text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         "rt_pty_write" => Some(&[1]),
         // Both atomic runtime owners consume tagged path/content values;
         // mode remains a scalar argument at index 2.
-        "rt_file_atomic_write" | "rt_file_atomic_write_mode" => Some(&[0, 1]),
+        "rt_file_atomic_write" | "rt_file_atomic_write_mode" | "rt_file_write_under_root_bytes" => Some(&[0, 1]),
         "rt_path_normalize" => Some(&[0]),
         _ => None,
     }
