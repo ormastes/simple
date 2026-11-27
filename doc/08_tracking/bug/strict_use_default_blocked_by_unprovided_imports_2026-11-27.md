@@ -56,3 +56,12 @@ For each site, import from the defining module, or add an explicit `export` when
 **Batch 3 follow-up (pre-existing failures, not a regression):** `test/01_unit/lib/hardware/fpga_linux/synthesis_wrapper_vexriscv_spec.spl` gives 11 pass / 5 fail. The 5 failures are AC-3 TCL assertions: `add_files` for `.v`, the VexRiscv filename, `.v` extension, `S_AXI_HP0` enable, `PSU__USE__S_AXI_GP`/HP config. The base commit before batch 3 gives the identical verdict without strict. The `describe` titles name `SynthesisProject add_verilog_sources` / `enable_axi_hp_port`, which exist nowhere. Either implement those generator features or rewrite the spec against `generate_vivado_tcl_rv64`.
 
 **Batch 4 follow-up:** unmasked pre-existing failures are filed in `strict_census_batch4_unmasked_failures_2026-11-27.md`.
+
+## Batch 5 triage (2026-11-28): all 7 rows stay open
+Re-checked at `origin/release/1.0.0` (`32285585673`); no strict-use fix landed since batch 4. The only importers of each missing name are specs, and each spec asserts a feature that does not exist, so neither a minimal provider nor an import removal is honest:
+- `DescriptorTable`: `object_vm_descriptor_spec` is the superseded class-based spec; `gpu_mmu_spec` (test/03_system) also uses it. Deleting it drops 3 unported claims (handle resolve, miss coalescing, forged-handle fault). Port those claims to `descriptor_table_spec`, then delete the old spec.
+- `GpuCasStore`: `gpu_mmu_store_recovery_spec` (11 uses) and `gpu_mmu_spec` target an API that differs from `CasStore`; needs the spec rewritten against `CasStore` (owner decision on the intended surface).
+- `NVFS_STREAM_INGEST_PROVIDER_V1`: three specs (`nvfs_streaming_ingest_adapter_{source_,}spec`, `nvfs_staged_tree_materializer_v1_contract_spec`) need the whole streaming-ingest adapter.
+- `PropertyTrees`: the whole `std.cc` module is absent (also used by `viz/feature/aggregator_compose.spl`, `cc/property_tree_spec`); see `doc/08_tracking/todo/cc_compositor_backend_incomplete_2026-08-09.md`.
+- `TextBlitCache`, `build_gcm_explicit_nonce_hex`, `generate_k26_soc_top_vexriscv`: each a whole missing feature with a single spec caller.
+The default stays non-strict; the census is not empty, so it was not re-run.
