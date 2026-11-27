@@ -36,13 +36,13 @@ mod elif_inline_assign {
     }
 
     #[test]
-    fn inline_elif_field_index_and_compound_assign() {
+    fn inline_elif_index_and_compound_assign() {
         let src = "fn h(c: bool, d: bool, a: [i64]):\n\
                    \x20   var x = 0\n\
                    \x20   if c: a[0] = 1\n\
                    \x20   elif d: self_x = 2\n\
                    \x20   elif x == 0: x += 3\n";
-        assert!(parses(src), "inline elif with index/compound assignment must parse");
+        assert!(parses(src), "inline elif with index, plain and compound assignment must parse");
     }
 
     #[test]
@@ -53,7 +53,7 @@ mod elif_inline_assign {
                    \x20       if c: x = 5\n\
                    \x20   elif d: x = i\n\
                    \x20   x\n";
-        assert!(parses(src), "inline elif after a nested inline if must bind to the outer if");
+        assert!(parses(src), "inline elif after a nested inline if must parse (binding is pinned by the .spl runtime witness)");
     }
 
     #[test]

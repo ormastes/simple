@@ -28,8 +28,8 @@ same-line `if c: x = 1 elif d: x = 2`, a class method, and module level.
 
 | Parser | Binary / source | Result |
 |---|---|---|
-| Seed | `C:/dev/wt/bound3x-target/release/simple.exe` (2026-11-26 03:55) | accepts; correct values |
-| Seed | `C:/dev/simple/bin/simple.exe` (2026-11-19 19:22) | accepts; correct values |
+| Seed | `C:/dev/wt/bound3x-target/release/simple.exe` (2026-11-26 03:55, sha256 `9c509c621f2cc69f…`) | accepts; correct values |
+| Seed | `C:/dev/simple/bin/simple.exe` (2026-11-19 19:22, sha256 `d1e16e3da724b4d9…`) | accepts; correct values |
 | Pure-Simple | `parser_stmts.spl` if/elif collector, driven by `parse_statement` | accepts; each elif arm is an `STMT_ASSIGN` |
 
 The syntax quick reference treats inline `if`/`elif`/`else` arms as legal, so
@@ -49,4 +49,4 @@ an `elif` issue and is not triaged here.
 - Simple: `test/01_unit/compiler/parser/elif_inline_assign_spec.spl`. Runtime
   witnesses pin the executing (seed) parser. Structural checks pin the pure-Simple
   parser, plus a non-vacuity probe that a plain `if` reports no elif arm. Result:
-  6/6 pass on the seed.
+  6/6 pass on the seed (`9c509c621f2cc69f…`), source base `d15302e5bf9`.
