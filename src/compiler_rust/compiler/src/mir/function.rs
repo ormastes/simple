@@ -180,7 +180,6 @@ impl MirFunction {
     /// Compute live-in set for each block using standard backward liveness.
     pub fn compute_live_ins(&self) -> HashMap<BlockId, HashSet<VReg>> {
         let mut live_in: HashMap<BlockId, HashSet<VReg>> = HashMap::new();
-        let mut live_out: HashMap<BlockId, HashSet<VReg>> = HashMap::new();
 
         // Precompute use/def per block
         let mut block_uses: HashMap<BlockId, HashSet<VReg>> = HashMap::new();
@@ -210,41 +209,90 @@ impl MirFunction {
         // Initialize sets
         for b in &self.blocks {
             live_in.insert(b.id, HashSet::new());
-            live_out.insert(b.id, HashSet::new());
         }
 
-        // Backward problem: visit blocks last-to-first so a value live across
-        // a long straight-line chain converges in one pass, not one pass per
-        // block (the fixed point is the same in any order).
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for b in self.blocks.iter().rev() {
-                let succs = b.terminator.successors();
-                let out_set = live_out.get_mut(&b.id).unwrap();
-                out_set.clear();
-                for s in succs {
-                    if let Some(s_in) = live_in.get(&s) {
-                        out_set.extend(s_in.iter().copied());
+        // Backward problem solved with a predecessor-driven worklist: a block
+        // is revisited only when a successor's live-in grew. A round-robin
+        // sweep re-walks every block once per propagation hop, which is
+        // quadratic (or worse, with large live sets) on a long nested
+        // if/else chain such as a 1000+ arm `match`.
+        let mut preds: HashMap<BlockId, Vec<usize>> = HashMap::new();
+        for (i, b) in self.blocks.iter().enumerate() {
+            for s in b.terminator.successors() {
+                preds.entry(s).or_default().push(i);
+            }
+        }
+        let mut queued = vec![true; self.blocks.len()];
+        // Seed the worklist in DFS post-order (successors before
+        // predecessors; popped from the back) so an acyclic region converges in
+        // a single visit per block regardless of how the block vector is laid
+        // out. The graph is walked iteratively: chains can be thousands deep.
+        let mut worklist: Vec<usize> = Vec::with_capacity(self.blocks.len());
+        {
+            let index_of: HashMap<BlockId, usize> =
+                self.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+            let mut seen = vec![false; self.blocks.len()];
+            let mut post: Vec<usize> = Vec::with_capacity(self.blocks.len());
+            let roots = std::iter::once(index_of.get(&self.entry_block).copied())
+                .flatten()
+                .chain(0..self.blocks.len());
+            for root in roots {
+                if seen[root] {
+                    continue;
+                }
+                seen[root] = true;
+                let mut stack: Vec<(usize, Vec<usize>)> = vec![(root, self.succ_indices(root, &index_of))];
+                while let Some((node, pending)) = stack.last_mut() {
+                    if let Some(next) = pending.pop() {
+                        if !seen[next] {
+                            seen[next] = true;
+                            let succs = self.succ_indices(next, &index_of);
+                            stack.push((next, succs));
+                        }
+                    } else {
+                        post.push(*node);
+                        stack.pop();
                     }
                 }
-
-                let mut new_in = block_uses[&b.id].clone();
-                for reg in &live_out[&b.id] {
-                    if !block_defs[&b.id].contains(reg) {
-                        new_in.insert(*reg);
+            }
+            worklist.extend(post.into_iter().rev());
+        }
+        while let Some(i) = worklist.pop() {
+            queued[i] = false;
+            let b = &self.blocks[i];
+            let mut new_in = block_uses[&b.id].clone();
+            for s in b.terminator.successors() {
+                if let Some(s_in) = live_in.get(&s) {
+                    for reg in s_in {
+                        if !block_defs[&b.id].contains(reg) {
+                            new_in.insert(*reg);
+                        }
                     }
                 }
-
-                let current_in = live_in.get_mut(&b.id).unwrap();
-                if *current_in != new_in {
-                    *current_in = new_in;
-                    changed = true;
+            }
+            if live_in[&b.id] != new_in {
+                live_in.insert(b.id, new_in);
+                if let Some(ps) = preds.get(&b.id) {
+                    for &p in ps {
+                        if !queued[p] {
+                            queued[p] = true;
+                            worklist.push(p);
+                        }
+                    }
                 }
             }
         }
 
         live_in
+    }
+
+    fn succ_indices(&self, i: usize, index_of: &HashMap<BlockId, usize>) -> Vec<usize> {
+        self.blocks[i]
+            .terminator
+            .successors()
+            .into_iter()
+            .filter_map(|s| index_of.get(&s).copied())
+            .collect()
     }
 
     pub fn new_vreg(&mut self) -> VReg {
@@ -483,5 +531,36 @@ mod tests {
         entry.terminator = Terminator::Return(Some(r2));
 
         assert_eq!(entry.instructions.len(), 3);
+    }
+
+    /// A value defined in the entry block and used only in the last block of a
+    /// very long chain whose blocks are stored in REVERSE flow order (what a
+    /// 1500-arm `match` lowers to: merge blocks are created before the nested
+    /// else-chain blocks). The old round-robin liveness solver needed one full
+    /// sweep per block here and stalled for minutes; the worklist solver is
+    /// linear in the chain length.
+    #[test]
+    fn test_compute_live_ins_long_reverse_ordered_chain() {
+        const N: usize = 5000;
+        let mut func = MirFunction::new("chain".to_string(), TypeId::I64, Visibility::Private);
+        let x = func.new_vreg();
+        let y = func.new_vreg();
+        let ids: Vec<BlockId> = (0..N).map(|_| func.new_block()).collect();
+        // Flow: entry -> ids[N-1] -> ids[N-2] -> ... -> ids[0] (uses x, returns).
+        func.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::ConstInt { dest: x, value: 7 });
+        func.block_mut(BlockId(0)).unwrap().terminator = Terminator::Jump(ids[N - 1]);
+        for i in 1..N {
+            func.block_mut(ids[i]).unwrap().terminator = Terminator::Jump(ids[i - 1]);
+        }
+        let last = func.block_mut(ids[0]).unwrap();
+        last.instructions.push(MirInst::Copy { dest: y, src: x });
+        last.terminator = Terminator::Return(Some(y));
+
+        let live_in = func.compute_live_ins();
+        assert!(live_in[&BlockId(0)].is_empty(), "x is defined in the entry block");
+        for id in &ids {
+            assert!(live_in[id].contains(&x), "x must be live into {:?}", id);
+            assert!(!live_in[id].contains(&y));
+        }
     }
 }
