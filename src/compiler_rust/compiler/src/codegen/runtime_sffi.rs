@@ -3247,7 +3247,9 @@ mod tests {
     /// `not process_is_running(pid)` read false for an exited child
     /// (doc/08_tracking/bug/seed_native_inline_if_else_or_chain_false_2026-11-27.md).
     /// Every `bool` prototype in runtime.h with a spec must use I8 unless it is
-    /// a named exception below.
+    /// a named exception below. Parser limit: only single-line prototypes that
+    /// START with `bool` are seen (no `extern`/`static inline`/macro prefix, no
+    /// split declarations) -- runtime.h has none of those forms today.
     #[test]
     fn runtime_h_bool_returns_use_i8_abi() {
         // Rust provider returns a tagged RuntimeValue while the C runtime
@@ -3295,15 +3297,18 @@ mod tests {
 
     #[test]
     fn process_bool_sffi_specs_use_i8_return_abi() {
-        for name in [
-            "rt_process_is_running",
-            "rt_process_kill",
-            "rt_process_exists",
-            "rt_driver_cancel",
-            "rt_driver_supports_sendfile",
-            "rt_driver_supports_zero_copy",
+        let one: &[types::Type] = &[I64];
+        let two: &[types::Type] = &[I64, I64];
+        for (name, params) in [
+            ("rt_process_is_running", one),
+            ("rt_process_kill", one),
+            ("rt_process_exists", one),
+            ("rt_driver_cancel", two),
+            ("rt_driver_supports_sendfile", one),
+            ("rt_driver_supports_zero_copy", one),
         ] {
             let spec = spec_for(name).unwrap_or_else(|| panic!("missing bool-returning spec: {name}"));
+            assert_eq!(spec.params, params, "{name} params");
             assert_eq!(spec.returns, [I8], "{name} must use I8 to match extern \"C\" fn -> bool");
         }
     }

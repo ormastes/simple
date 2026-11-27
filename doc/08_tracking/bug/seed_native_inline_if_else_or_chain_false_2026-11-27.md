@@ -1,6 +1,6 @@
 # Seed native codegen: inline `if/else` whose else arm is an `or`/`and` chain evaluates false
 
-- **Status:** verification-pending (import ABI fix: f63e2e35906d + work/seed-native-ifelse-or-20261127). Workaround in `src/app/cli/shard_worker_reap_v1.spl`
+- **Status:** verification-pending (import ABI fix: f63e2e35906d + PR 12278). Workaround in `src/app/cli/shard_worker_reap_v1.spl`
   (`shard_worker_reaped_stopped_v1`) — verification-pending.
 - **Found by:** phase-ladder run 45916738302 (`9f757ab0a88`, linux-x86_64, fresh, rung 2).
 
