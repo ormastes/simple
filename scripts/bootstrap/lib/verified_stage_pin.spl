@@ -9,7 +9,8 @@
 # no pin, unreadable pin, malformed digest, not admitted, mismatch, or an
 # unhashable running image — fails closed. Shared by the Hello matrix twin and
 # the perf-runner twin; keep one implementation.
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_hash_sha256_or_empty, env_get, host_os}
+use std.nogc_sync_mut.io.windows_image_owner.{windows_image_path}
 
 val VERIFIED_STAGE_PIN_ENV = "SIMPLE_VERIFIED_STAGE_PIN"
 
@@ -54,12 +55,17 @@ pub fn verified_stage_pin_decide(pin_content: text, running_sha256: text) -> Res
         return Err("verified stage pin: running stage binary " + running_sha256 + " differs from pinned " + pinned)
     Ok(pinned)
 
-# Digest of the running image. Linux hashes /proc/self/exe (the image the
-# kernel actually mapped, independent of any caller-supplied path); other hosts
-# hash the stage binary path the wrapper resolved and launched.
+# Digest of the running image, never a caller-supplied path: Linux hashes
+# /proc/self/exe; Windows hashes GetModuleFileNameW(NULL) through the typed
+# windows_image_owner wrapper. Other hosts (macOS) have no image query here
+# and hash the stage binary path the wrapper resolved and launched.
 pub fn verified_stage_running_sha256(stage_binary: text, linux: bool) -> text:
-    if linux and file_exists("/proc/self/exe"):
-        return file_hash_sha256_or_empty("/proc/self/exe")
+    if linux:
+        return if file_exists("/proc/self/exe"): file_hash_sha256_or_empty("/proc/self/exe") else: ""
+    if host_os() == "windows":
+        match windows_image_path():
+            case Ok(image): return file_hash_sha256_or_empty(image)
+            case Err(_): return ""
     if stage_binary == "" or not file_exists(stage_binary):
         return ""
     file_hash_sha256_or_empty(stage_binary)
