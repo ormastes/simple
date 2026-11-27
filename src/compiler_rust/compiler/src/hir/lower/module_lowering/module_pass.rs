@@ -1618,6 +1618,12 @@ impl Lowerer {
         if is_static {
             self.static_method_names.insert(key.clone());
         }
+        let array_row = self.numeric_array_param_row(user_params);
+        let array_row = match self.method_param_array_elems.get(&key) {
+            Some(existing) if *existing != array_row => Vec::new(),
+            _ => array_row,
+        };
+        self.method_param_array_elems.insert(key.clone(), array_row);
         let row = match self.method_param_type_names.get(&key) {
             Some(existing) if *existing != row => Vec::new(),
             _ => row,
@@ -1643,6 +1649,8 @@ impl Lowerer {
                 // including the empty-for-variadic rule — a variadic call
                 // keeps the runtime contract on both lanes); consumed by
                 // `lower_call`'s static bool-argument admission.
+                let array_row = self.numeric_array_param_row(&f.params);
+                self.fn_param_array_elems.insert(symbol.clone(), array_row);
                 self.fn_param_type_names.insert(
                     symbol.clone(),
                     if f.params.iter().any(|p| p.variadic) {

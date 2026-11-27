@@ -2,7 +2,7 @@
 
 use app.io.mod (file_exists, file_read, file_size)
 use std.nogc_sync_mut.io.file_ops.{file_read_bytes}
-use std.scv.store.{scv_content_id_for_bytes, scv_write_text, scv_hash_text}
+use std.scv.store.{scv_content_id_for_u8, scv_write_text, scv_hash_text}
 use std.scv.store.{scv_mark_current_state}
 use std.scv.core.{scv_parser_index_path, scv_object_path, scv_rel_path}
 use std.scv.core.{scv_state_parsed_error, scv_state_parsed_ok}
@@ -44,9 +44,9 @@ fn scv_language_for_text(root: text, path: text, content: text) -> text:
 fn scv_is_binary_text(content: text) -> bool:
     content.contains("\u0000")
 
-fn scv_is_binary_bytes(bytes: [i64]) -> bool:
+fn scv_is_binary_bytes(bytes: [u8]) -> bool:
     for b in bytes:
-        if (b & 0xFF) == 0:
+        if b == 0u8:
             return true
     false
 
@@ -148,19 +148,19 @@ fn scv_write_syntax_node(root: text, payload: text) -> text:
 fn scv_binary_chunk_size() -> i64:
     8192
 
-fn scv_binary_chunk_node(root: text, offset: i64, bytes: [i64]) -> text:
-    val raw_hash = scv_content_id_for_bytes(bytes)
+fn scv_binary_chunk_node(root: text, offset: i64, bytes: [u8]) -> text:
+    val raw_hash = scv_content_id_for_u8(bytes)
     val syntax_hash = scv_hash_text("syntax", "chunk:{offset}:{raw_hash}:{bytes.len()}")
     val payload = "grammar: fallback-binary\nversion: builtin\nexecution: fallback-binary\nkind: chunk\nfield:\nchildren:\noffset: {offset}\nbyte_len: {bytes.len()}\nraw: {raw_hash}\nsyntax: {syntax_hash}\nsemantic: {syntax_hash}\nparse_status: ok\n"
     scv_write_syntax_node(root, payload)
 
-fn scv_binary_node_ids(root: text, bytes: [i64]) -> [text]:
+fn scv_binary_node_ids(root: text, bytes: [u8]) -> [text]:
     var children: [text] = []
-    var part: [i64] = []
+    var part: [u8] = []
     var offset = 0
     var i = 0
     while i < bytes.len():
-        part.push(bytes[i] & 0xFF)
+        part.push(bytes[i])
         if part.len() >= scv_binary_chunk_size() or i == bytes.len() - 1:
             children.push(scv_binary_chunk_node(root, offset, part))
             offset = i + 1
@@ -170,7 +170,7 @@ fn scv_binary_node_ids(root: text, bytes: [i64]) -> [text]:
         children.push(scv_binary_chunk_node(root, 0, []))
     children
 
-fn scv_binary_chunk_count(bytes: [i64]) -> i64:
+fn scv_binary_chunk_count(bytes: [u8]) -> i64:
     if bytes.len() == 0:
         return 1
     var count = 0
@@ -180,10 +180,10 @@ fn scv_binary_chunk_count(bytes: [i64]) -> i64:
         i = i + scv_binary_chunk_size()
     count
 
-fn scv_binary_syntax_hash(bytes: [i64]) -> text:
-    scv_hash_text("syntax", "binary:{scv_content_id_for_bytes(bytes)}:{bytes.len()}:{scv_binary_chunk_count(bytes)}")
+fn scv_binary_syntax_hash(bytes: [u8]) -> text:
+    scv_hash_text("syntax", "binary:{scv_content_id_for_u8(bytes)}:{bytes.len()}:{scv_binary_chunk_count(bytes)}")
 
-fn scv_fallback_binary_root(root: text, path: text, bytes: [i64], language: text, raw: text, syntax_hash: text) -> text:
+fn scv_fallback_binary_root(root: text, path: text, bytes: [u8], language: text, raw: text, syntax_hash: text) -> text:
     val child_ids = scv_join_node_ids(scv_binary_node_ids(root, bytes))
     val rel = scv_rel_path(root, path)
     val payload = "grammar: fallback-binary\nversion: builtin\nexecution: fallback-binary\nkind: binary\nfield: root\nchildren: {child_ids}\npath: {rel}\nlanguage: {language}\nbyte_len: {bytes.len()}\nraw: {raw}\nsyntax: {syntax_hash}\nsemantic: {syntax_hash}\nparse_status: ok\n"
@@ -255,7 +255,7 @@ fn scv_parse_file(root: text, path: text) -> text:
     if langmap_error != "":
         return "{langmap_error}\n"
     val bytes = file_read_bytes(path) ?? []
-    val raw = scv_content_id_for_bytes(bytes)
+    val raw = scv_content_id_for_u8(bytes)
     var language = scv_language_for_path(root, path)
     var kind = "fallback-line"
     var metric = ""
@@ -301,7 +301,7 @@ fn scv_parse_index_line(root: text, path: text) -> text:
     if langmap_error != "":
         return langmap_error
     val bytes = file_read_bytes(path) ?? []
-    val raw = scv_content_id_for_bytes(bytes)
+    val raw = scv_content_id_for_u8(bytes)
     var language = scv_language_for_path(root, path)
     var kind = "fallback-line"
     var metric = ""
@@ -346,7 +346,7 @@ fn scv_existing_parse_index_line(root: text, rel: text) -> text:
 
 fn scv_current_parse_identity(root: text, path: text) -> (text, text, text):
     val bytes = file_read_bytes(path) ?? []
-    val raw = scv_content_id_for_bytes(bytes)
+    val raw = scv_content_id_for_u8(bytes)
     if scv_is_binary_bytes(bytes):
         return (raw, scv_language_for_path(root, path), "fallback-binary@builtin")
     val content = file_read(path)
