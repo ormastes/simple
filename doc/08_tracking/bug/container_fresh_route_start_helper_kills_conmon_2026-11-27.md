@@ -1,7 +1,8 @@
 # Container fresh route: retiring the start helper kills the workload's conmon
 
-- **Status:** OPEN. Design decided 2026-11-27 (section "Decision"); **not implemented**. Found from source
-  plus a host emulation with real podman. Not observed in the guest: no installed custody on this host.
+- **Status:** BUILT IN SOURCE 2026-11-27 (section "Built"), the whole chain in one commit. Proven by unit
+  specs, a C selfcheck on real cgroup v2 groups and a host emulation with real podman. **Not run in the
+  guest**: no installed custody on this host, and the installed broker has to be rebuilt first.
 - **Component:** Linux Podman fresh install route, helper containment
   (`src/runtime/runtime_linux_group_owner_impl.h`, `rt_lg_poll`), engine command line
   (`src/lib/nogc_sync_mut/io/linux_fresh_workload_launch_v2.spl`).
@@ -144,7 +145,7 @@ The pin and both records must be updated in the same change that turns the move 
 
 ## Implementation order (one chain, closed at both ends)
 
-Nothing below is built. The retirement side comes first and the line that requests the move for Start
+Built as listed; see "Built". The retirement side comes first and the line that requests the move for Start
 comes last, so no commit can leave a group nobody kills.
 
 1. Owner side: an engine-group holder next to the subjects in `linux_fresh_workload_native_v2.spl` (open by
@@ -162,24 +163,111 @@ comes last, so no commit can leave a group nobody kills.
 4. Last: the Start action requests the move and captures the group; update the residue pin and the two
    records.
 
+## Built (2026-11-27)
+
+In the order above, one commit.
+
+1. **Owner side.**
+   - Order reducer `machine_fresh_workload_engine_group_v3.spl`: nothing to retire for an owner that never
+     asked; refuses `machine-fresh-workload-engine-group-helper-active` while a helper is live and
+     `machine-fresh-workload-engine-group-store-live` until the owner's own Stop, Remove and Absence all
+     completed; `machine-fresh-workload-engine-group-retained` gates all three settle preparations
+     (subject, exited start, probe), `close_native_v2` and `closed_v2`, so the charge is kept while a group
+     is recorded. The finite probe lane never stops its payload; there, and only there, the owner's own
+     completed `probe-wait` stands in for Stop.
+   - Holder `linux_fresh_engine_group_v3.spl`, called from `workload_engine_group_v3` in
+     `linux_fresh_workload_native_v2.spl` under the retained delegated descriptor (handle 1, the one the
+     subjects use): open by fixed name, cgroup2 and directory check, recorded-identity check
+     (`fresh-workload-engine-group-replaced`), `cgroup.kill`, up to 200 `cgroup.events` reads 5 ms apart
+     (`fresh-workload-engine-group-still-populated` at the bound, retryable), `rmdir`, absence read back.
+     An absent group is retired by that observation. This is the route's only owner-side kill.
+   - Record fields on the lifecycle state: `engine_groups` (launch identities, at most four) and
+     `engine_group_objects` (the statx identity custody reported for each). Set in `capture_v2` from the
+     launch that was actually captured, so they exist before any outcome of the helper is known.
+   - Four sites, each before the settle or the census: the `destroy` action
+     (`fresh_epoch_workload_v2.spl`, after Absence, before either settle; `settle_v2` and the pinned
+     `machine_fresh_workload_settle_cpu_v3` are byte-unchanged and refuse through the gate),
+     `machine_fresh_workload_settle_exited_start_v3` (before `observe_probe_absence_v3`), the transfer
+     `close_v2` (before `close_native_v2`), and a fourth the decision did not list:
+     `machine_fresh_probe_settle_v3`. A probe-lane owner starts its container through the same Start
+     projection and settles on the same cohort census, so without it a pause process left in the engine
+     group would refuse that census on every retry. The spec pins that these two are the only callers of
+     the census.
+2. **Runtime.** `rt_lg_move_residue_v3` in `runtime_linux_group_owner_impl.h`, called once from
+   `rt_lg_poll` immediately before the pinned kill, only for `exit_code == 0` with no timeout, cancel or
+   pending kill. Freeze, wait for `frozen 1` (200 reads, 5 ms apart), `mkdirat` the engine group under
+   `rt_lg_delegation.root_fd` (an existing directory is never adopted), write every line of the frozen
+   group's `cgroup.procs` to the engine group, require the helper group's `cgroup.procs` to read empty. Any
+   failure kills the engine group it made and removes it. No `rt_*` symbol was added.
+3. **Protocol.** `GroupProcessStreamProfileV3.leader_residue_mode`, `""` or `move-to-engine-group-v1`. It
+   is one more wire field and a thirteenth runtime word, both present only when set, so every other launch,
+   its digest and its twelve words are byte-identical. `rt_lg_profile_parse_v3` takes twelve words, or
+   thirteen whose last is 1. An installed broker built before this refuses a sixteen-field profile
+   (`trailing wire fields`), so an old broker cannot silently skip the move.
+4. **Request.** `linux_fresh_workload_project_launch_v2` sets the mode for `Start` and clears it for every
+   other action, whatever the base carried. The residue pin gained link 2a; Edge 3 of the settlement
+   record and the HOME record are updated.
+
+### Changes to the decision, made while building
+
+- **No descriptor is held between calls** (item 4 said one is held on the workload record). The owner
+  holds the name and the recorded device and inode instead, and re-opens under the retained delegated
+  descriptor on each call. A replaced directory is detected the same way; a descriptor on a record that
+  is copied by value has no single closer.
+- **The second order (epoch teardown kills regardless) is not built** (item 6). Nothing in the route closes
+  an unsettled workload today: `close_native_v2` refuses with `machine-fresh-workload-charge-retained`, and
+  no owner code kills `libpod-<id>` either. An engine group whose owner is latched is therefore **retained
+  and refused**, exactly like its workload: no settle, no close, and a new epoch's census refuses while its
+  processes live. Clearing both is the operator's teardown of the delegated subtree, as before.
+- **Limits: none of its own.** The engine group inherits the delegated root. Measured after `stop` and `rm`
+  of one container: `memory.peak` 11.2 to 11.9 MB and `pids.peak` 13 to 18, which is the engine's own
+  `container cleanup` run by conmon at exit, on a 20-CPU host. A limit set too low kills the monitor of a
+  container the store calls running, which is the poisoning this change exists to prevent; the group's
+  use is bounded by the partition's own limits like every other child of the delegated root. It is not a
+  sub-charge of the workload record.
+- **Helper environment.** Helpers now also get `XDG_RUNTIME_DIR=<run root>` and `PATH=/usr/bin:/bin`. See
+  the HOME record: without a pause process to join and without `PATH` every helper exits 125.
+
+### Host measurements (podman 4.9.3 rootless, uid 1000, busybox:1.36, 2026-11-27)
+
+A `Delegate=yes` user scope with `deleg/` and `helpers/hN`, private `--root`/`--runroot`/`--tmpdir`, vfs,
+the route's flags, helper environment `HOME`, `XDG_RUNTIME_DIR`, `PATH` only, user bus made unreachable
+(`DBUS_SESSION_BUS_ADDRESS` pointing nowhere; without that podman moved its pause process into a systemd
+scope outside the emulation). Everything created was removed.
+
+| Question | Result |
+|---|---|
+| Does a long-running workload survive `start`, and do later commands work? | Yes. Two containers (`sleep 300`): start helper A left `catatonit conmon`, B left `conmon`; both moved, helper groups `populated 0` before their kill; `inspect` (running), `logs`, `stop`, `rm` exit 0; absence exits 125. |
+| Is the kill gate per container enough when the pause process sits in A's group? | Yes. After A's Stop, Remove and Absence, A's group (holding the pause process) was killed while B ran: B's `inspect`, `stop`, `rm` exit 0. Each later helper made a new pause process in its own group. |
+| Does anything remain after settle? | No. Both engine groups killed, `populated 0`, removed; `deleg/` and `helpers/` had no child and no process. |
+| Crash between freeze and move (one of two members moved, then nothing) | The frozen helper group is emptied by `cgroup.kill` and removed. The partial engine group is found by name alone, killed and removed. The store is then poisoned for that container (`invalid internal status`), so its owner cannot run Stop: retained and refused, as above. |
+| Same with `XDG_RUNTIME_DIR` unset | `pause.pid` is `/run/user/1000/libpod/tmp/pause.pid`; helpers joined a pause process that was already there, outside every group of the emulation. |
+
+The runtime move itself is proven by `src/runtime/test/runtime_linux_group_residue_move_selfcheck.c`
+(`sh scripts/check/check-linux-group-residue-move.shs`, six cases on real groups: moved and thawed; leader
+failed; not asked; cancelled; name already taken; frozen group still killable).
+
 ## Open
 
-- Not implemented (above). The route still breaks every workload that outlives `start`.
-- Cost not in the measurements: the owner cannot kill a cgroup today. Containment is capture, observe and
-  close (`linux_container_containment_v1.spl`); the only kill is the broker's, for its own helper group.
-  Step 1 of the build order therefore adds an owner-side kill and remove, which the held-group option
-  would not need.
-- Environment of the measurements: every candidate ran with `PATH`, `HOME` and `XDG_RUNTIME_DIR` set. The
-  route's helpers had none of them (now `HOME` only, see the HOME record). Held start, inspect, stop and
-  rm were repeated with an empty environment and with `HOME` only and behaved the same; freeze-and-move,
-  the wrapper, attach and the forced kill were not repeated that way.
-- The engine group has no limits of its own in the measurements. Decide whether it gets a small
-  `memory.max`/`pids.max` and which charge it belongs to; its use was not measured.
-- A failed Stop leaves a store that says running. Ordinary destroy then refuses (item 6) and only teardown
-  can clear it; whether the route should repair the store instead is undecided.
-- Guest: nothing here was run in the guest. The helper `HOME` and the unit's environment are in
-  `container_fresh_route_helper_home_2026-11-27.md`.
+- **Guest.** Nothing here was run in the guest. It needs the broker and runtime rebuilt and installed
+  (the wire field is refused by an older broker), then `podman_shared_api_live_spec.spl`.
+- **The owner-side Simple code is not executed by any spec.** The seed cannot run the stateful owners
+  (their first step is a native process-origin check, `unknown extern function: gettid`). The reducers and
+  the protocol are executed; the lifecycle, effects, custody and holder are loaded and source-pinned only.
+- **Workspace workloads are not covered.** `linux_fresh_workspace_project_launch_v3` is a separate
+  projection and does not ask for the move, so a workspace container that outlives its start helper still
+  loses its monitor.
+- **A failed Stop** leaves a store that says running. Destroy then refuses
+  (`machine-fresh-workload-engine-group-store-live` is never reached; the Stop refusal comes first) and
+  the group is retained with the workload. Whether the route should repair the store is undecided.
+- **Permission of the move in the guest.** The broker writes into `<delegatedCgroup>/simple-engine-*`
+  from its own scope; that needs the same write access to the delegated root's `cgroup.procs` that the
+  engine's placement of `libpod-<id>` needs. True in the emulation, not checked in the guest.
 - A newer engine may place conmon itself; not checked beyond 4.9.3.
+- `src/runtime/test/runtime_linux_group_start_ownership_selfcheck.c` does not compile at the base commit
+  (`owned_adapter_fill_reserved_values` undeclared in its stub harness). Found here, not changed.
+- `src/lib/source_inventory.lock` does not list the two new modules. It already lacks the modules added
+  earlier the same day, and its checker could not run on this host (`interpreter rc=127`). Not changed.
 
 ## Options as first listed
 
