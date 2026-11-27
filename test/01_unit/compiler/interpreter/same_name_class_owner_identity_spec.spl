@@ -1,0 +1,69 @@
+# Purpose and audience: compiler engineers who own class identity across
+# flattened modules (interpreter and JIT lanes).
+# @req REQ-SSPEC-UNIT
+# Tracks: interpreter_same_name_class_method_dispatch_collision_2026_11_26
+"""
+# Same-named classes are identified by their owner module
+
+Two modules each declare `class Thing` with the same field layout but
+different statics and methods. Owner decision 2026-11-27: a class is
+identified by its OWNER module, not its bare name, so an import alias
+(`use pb.Thing as Legacy`) and a namespace-qualified use (`pb.Thing`) both
+name pb's class, and `create()`, statics and self-method calls on a pb
+instance run pb's bodies -- in the interpreter and in the JIT.
+
+Before the fix both lanes printed `ln=1 lsize=24 lc=24`: pa's class.
+
+The `run` examples shell out so both execution lanes are covered. Set
+SIMPLE_BIN to target a binary.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+use test.fixtures.same_name_class.pa.{Thing}
+use test.fixtures.same_name_class.pb.{Thing as Legacy}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_fixture(mode: text, fixture: text) -> text:
+    val command = "SIMPLE_EXECUTION_MODE=" + mode + " " + simple_binary() + " run test/fixtures/same_name_class/" + fixture
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+describe "same-named classes keep their owner identity":
+    it "binds an alias, its statics and self-calls to the owner class in the test lane":
+        step("binds an alias, its statics and self-calls to the owner class in the test lane")
+        val a = Thing.create()
+        val l = Legacy.create()
+        expect(a.n).to_equal(1)
+        expect(a.compile()).to_equal(24)
+        expect(Thing.tag()).to_equal(100)
+        expect(l.n).to_equal(2)
+        expect(l.size()).to_equal(10)
+        expect(l.compile()).to_equal(1010)
+        expect(Legacy.tag()).to_equal(200)
+
+    it "binds an alias to the owner class under the interpreter":
+        step("binds an alias to the owner class under the interpreter")
+        val out = run_fixture("interpret", "main_alias.spl")
+        expect(out).to_contain("alias an=1 ac=24 atag=100 ln=2 lsize=10 lc=1010 ltag=200")
+        expect(out).to_contain("third oc=1010 disp=Thing(n: 2)")
+
+    it "binds an alias to the owner class under the JIT":
+        step("binds an alias to the owner class under the JIT")
+        val out = run_fixture("jit", "main_alias.spl")
+        expect(out).to_contain("alias an=1 ac=24 atag=100 ln=2 lsize=10 lc=1010 ltag=200")
+        expect(out).to_contain("third oc=1010 disp=Thing(n: 2)")
+
+    it "binds a namespace-qualified class to its module under the interpreter":
+        step("binds a namespace-qualified class to its module under the interpreter")
+        expect(run_fixture("interpret", "main_ns.spl")).to_contain("ns ac=24 qn=2 qsize=10 qc=1010 qtag=200")
+
+    it "binds a namespace-qualified class to its module under the JIT":
+        step("binds a namespace-qualified class to its module under the JIT")
+        expect(run_fixture("jit", "main_ns.spl")).to_contain("ns ac=24 qn=2 qsize=10 qc=1010 qtag=200")

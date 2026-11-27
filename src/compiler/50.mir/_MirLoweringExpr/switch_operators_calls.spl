@@ -791,7 +791,10 @@ impl MirLowering:
         ), call_origin: MirCallOrigin.Runtime)
         val value = b.emit_call(box, [mir_operand_copy(raw)], MirType.i64())
         self.builder = b
-        value ?? raw
+        if val boxed = value:
+            self.mark_runtime_value_local(boxed.id)
+            return boxed
+        raw
 
     me bitcast_float_enum_payload(payload_local: LocalId) -> LocalId:
         """Make a float enum payload bit-preserving before `rt_enum_new`.
@@ -7685,14 +7688,14 @@ impl MirLowering:
                 # binding captured from the enclosing activation. Retain the
                 # exact symbol owner; never classify by a bare name.
                 # Likewise a function or variant constructor (`Ok(x)`).
-                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or enum_payload_nominal_kind(SymbolId(id: sid), self.symbols) == 3 or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
                 if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
                     acc
             case NamedVar(symbol, name):
                 val sid = mir_expr_symbol_id_value(symbol)
-                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
+                val is_record_declaration = self.symbols.record_owner_identity_scalar_raw(sid) != "" or enum_payload_nominal_kind(SymbolId(id: sid), self.symbols) == 3 or self.symbols.symbol_is_callable_declaration_scalar_raw(sid)
                 if sid >= 0 and not is_record_declaration and not int_list_contains(param_syms, sid) and not self.is_known_top_level_function(name, symbol) and not int_list_contains(acc, sid):
                     acc.push(sid)
                 else:
@@ -9311,7 +9314,9 @@ impl MirLowering:
                 auto_inner = self.option_inner_hir_type_for_local(expr, result)
             if val detected = auto_inner:
                 if not self.hir_type_mentions_type_param(detected, self.symbols):
-                    _erased_lambda_opt_detected_inner_v1 = Some(detected)
+                    match detected.kind:
+                        case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                        case _: _erased_lambda_opt_detected_inner_v1 = Some(detected)
                     if hir_type_is_erased_opt_scalar_v1(detected):
                         return self.encode_erased_scalar_opt_arg_v1(result, expr, [], Some(detected))
         result
@@ -9510,7 +9515,7 @@ impl MirLowering:
                             if dict_param == payload_param: payload_through_dict = true
                         case _: ()
                 case _: ()
-            if slot_param != "" and wanted.contains(slot_param) and not call_arg.has_name and source_locals.contains(index):
+            if slot_param != "" and wanted.contains(slot_param) and source_locals.contains(index):
                 val arg_local = LocalId(id: source_locals[index])
                 var candidate_opt: HirType? = None
                 if enum_name == "Option":
@@ -9537,7 +9542,7 @@ impl MirLowering:
                     if bound.has(slot_param):
                         if not hir_types_equal(bound[slot_param], candidate): return result
                     bound[slot_param] = candidate
-            elif enum_name == "Option" and not call_arg.has_name:
+            elif enum_name == "Option":
                 var fn_slot_param = ""
                 match declared_param.kind:
                     case HirTypeKind.Function(_, fn_ret, _):
@@ -9553,10 +9558,14 @@ impl MirLowering:
                         val (_, det_cb_inner) = self.erased_opt_callable_concrete_inner_v1(call_arg.value, declared_param, true, callee, call_type_args)
                         cb_inner_opt = det_cb_inner
                     if val cb_candidate = cb_inner_opt:
-                        if self.hir_type_mentions_type_param(cb_candidate, self.symbols): return result
-                        if bound.has(fn_slot_param):
-                            if not hir_types_equal(bound[fn_slot_param], cb_candidate): return result
-                        bound[fn_slot_param] = cb_candidate
+                        var cb_ready = not self.hir_type_mentions_type_param(cb_candidate, self.symbols)
+                        if not cb_ready: return result
+                        match cb_candidate.kind:
+                            case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                            case _:
+                                if bound.has(fn_slot_param):
+                                    if not hir_types_equal(bound[fn_slot_param], cb_candidate): return result
+                                bound[fn_slot_param] = cb_candidate
             index = index + 1
         # `T` unbound but the payload can come from a `Dict<K, T>` argument
         # (an unannotated or inline dict carries no element type in MIR):
@@ -9584,6 +9593,18 @@ impl MirLowering:
         if not compat_dict_decode:
             val bound_kind_type: HirType = bound[payload_param]
             match bound_kind_type.kind:
+                case HirTypeKind.Int(64, false):
+                    val u64_instance = match return_hir.kind:
+                        case HirTypeKind.Result(_, err_type):
+                            val err_instance: HirType = if err_param != "": bound[err_param] else: err_type
+                            HirType(kind: HirTypeKind.Result(bound_kind_type, err_instance), span: return_hir.span)
+                        case _: HirType(kind: HirTypeKind.Optional(bound_kind_type), span: return_hir.span)
+                    self.remember_local_hir_type(result.id, u64_instance, 0, 0)
+                    self.remember_result_err_record_owner(result.id, callee)
+                    if enum_name == "Option":
+                        self.option_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                    return result
                 case HirTypeKind.Int(_, _): decode_type = self.lower_type(bound_kind_type)
                 case HirTypeKind.Float(_):
                     decode_type = MirType.f64()
@@ -9593,6 +9614,18 @@ impl MirLowering:
                     is_bool = true
                 case HirTypeKind.Char:
                     decode_type = MirType(kind: MirTypeKind.Char)
+                case HirTypeKind.Named(named_sym, _):
+                    val rec_layout = self.optional_payload_struct_name(bound_kind_type)
+                    if not self.bitfield_map.has(named_sym.id) and custom_primitive_underlying_type_tag_by_symbol(named_sym.id) < 0 and (rec_layout != "" or self.enum_constructor_symbol_owner(named_sym) != ""):
+                        val rec_instance = match return_hir.kind:
+                            case HirTypeKind.Result(_, err_type):
+                                val err_instance: HirType = if err_param != "": bound[err_param] else: err_type
+                                HirType(kind: HirTypeKind.Result(bound_kind_type, err_instance), span: return_hir.span)
+                            case _: HirType(kind: HirTypeKind.Optional(bound_kind_type), span: return_hir.span)
+                        self.remember_local_hir_type(result.id, rec_instance, 0, 0)
+                        if rec_layout != "" and not self.struct_value_syms.contains(result.id):
+                            self.struct_value_syms[result.id] = rec_layout
+                    return result
                 case _: return result
         val enum_id = self.enum_runtime_id(enum_name)
         if enum_id < 0: return result
@@ -10218,7 +10251,9 @@ impl MirLowering:
                                     auto_tail = lw.option_inner_hir_type_for_local(body, result)
                                 if val det_tail = auto_tail:
                                     if not lw.hir_type_mentions_type_param(det_tail, lw.symbols):
-                                        _erased_lambda_opt_detected_inner_v1 = Some(det_tail)
+                                        match det_tail.kind:
+                                            case HirTypeKind.Error | HirTypeKind.Infer(_, _): ()
+                                            case _: _erased_lambda_opt_detected_inner_v1 = Some(det_tail)
                                         if hir_type_is_erased_opt_scalar_v1(det_tail):
                                             result = lw.encode_erased_scalar_opt_arg_v1(result, body, [], Some(det_tail))
                         case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
@@ -11361,7 +11396,7 @@ impl MirLowering:
                         self.mark_runtime_value_local(result.id)
                     case _:
                         ()
-            return self.decode_erased_scalar_call_payload(result, direct_symbol, args, call_param_types, arg_source_locals, call_type_args, erased_opt_callable_inners)
+            return self.decode_erased_scalar_call_payload(result, direct_symbol, source_call_args, source_call_types, arg_source_locals, call_type_args, erased_opt_callable_inners)
 
         # Field-method fallback can supply the projected callable so its
         # receiver is not evaluated a second time. Argument lowering above

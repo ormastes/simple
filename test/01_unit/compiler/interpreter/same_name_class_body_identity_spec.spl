@@ -1,0 +1,66 @@
+# Purpose and audience: compiler engineers who own class identity across
+# flattened modules (interpreter and JIT lanes).
+# @req REQ-SSPEC-UNIT
+# Tracks: interpreter_same_name_class_method_dispatch_collision_2026_11_26
+"""
+# Owner-exact instances still match their type inside function bodies
+
+`qa` and `qb` each declare `struct P` and a generic `struct Box<T>` with the
+same layout, so both get owner-exact identities. Their own struct patterns
+(`case P { x }`, `case Box { item }`) must still match their instances, and
+a same-module overload `fn show(t: Thing)` beside `fn show(n: i64)` must
+still score its own (renamed) `Thing` instance.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+use test.fixtures.same_name_class.body.qc.{Thing}
+use test.fixtures.same_name_class.body.qa.{qa_make, qa_px, qa_box, qa_any}
+use test.fixtures.same_name_class.body.qb.{qb_make, qb_px, qb_box, qb_show}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_fixture(mode: text, fixture: text) -> text:
+    val command = "SIMPLE_EXECUTION_MODE=" + mode + " " + simple_binary() + " run test/fixtures/same_name_class/body/" + fixture
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+describe "owner-exact instances keep matching their own type":
+    it "matches struct and generic struct patterns in the test lane":
+        step("matches struct and generic struct patterns in the test lane")
+        expect(qa_px(qa_make())).to_equal(3)
+        expect(qb_px(qb_make())).to_equal(5)
+        expect(qa_box()).to_equal(104)
+        expect(qb_box()).to_equal(206)
+
+    it "scores a same-module overload for its own renamed class":
+        step("scores a same-module overload for its own renamed class")
+        val t = Thing(n: 0)
+        expect(t.n).to_equal(0)
+        expect(qb_show()).to_equal(1122)
+
+    it "matches the patterns under the interpreter run lane":
+        step("matches the patterns under the interpreter run lane")
+        expect(run_fixture("interpret", "main_flat.spl")).to_contain("flat apx=3 bpx=5 abox=104 bbox=206")
+
+    it "matches the patterns under the JIT run lane":
+        step("matches the patterns under the JIT run lane")
+        expect(run_fixture("jit", "main_flat.spl")).to_contain("flat apx=3 bpx=5 abox=104 bbox=206")
+
+    it "rejects another module's same-named struct in the test lane":
+        step("rejects another module's same-named struct in the test lane")
+        expect(qa_any(qa_make())).to_equal(3)
+        expect(qa_any(qb_make())).to_equal(-1)
+
+    it "rejects the other module's struct through an import or alias under the interpreter":
+        step("rejects the other module's struct through an import or alias under the interpreter")
+        expect(run_fixture("interpret", "main_alias_neg.spl")).to_contain("aliasneg pa=3 pb=-1 qa=-1 qb=5")
+
+    it "keeps the entry module's own bare struct apart under the interpreter":
+        step("keeps the entry module's own bare struct apart under the interpreter")
+        expect(run_fixture("interpret", "main_entry_neg.spl")).to_contain("entryneg a_entry=-1 e_a=-1 e_e=9 a_a=3")

@@ -93,6 +93,27 @@ fn record_flattened_global(owner: Option<&Arc<str>>, name: String, value: Value)
     });
 }
 
+/// A class renamed to its owner-exact symbol (same-named classes of several
+/// flattened modules) is ALSO registered under its source name, exactly as
+/// before the rename (last registration wins), so a lookup that bypasses the
+/// owner-scope resolver keeps its historical meaning. The scope resolver
+/// (`resolve_class_in_scope`) still answers owner-exactly.
+fn register_bare_source_class(
+    name: &str,
+    class_def: &Arc<ClassDef>,
+    env: &mut Env,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+) {
+    let source = crate::interpreter::flatten_owner_source_name(name);
+    // Never replace a class that really is named `source` (the entry
+    // module's own declaration keeps the bare name).
+    if source == name || classes.get(source).is_some_and(|existing| existing.name == source) {
+        return;
+    }
+    env.insert(source.to_string(), Value::Constructor { class_name: source.to_string() });
+    classes.insert(source.to_string(), Arc::clone(class_def));
+}
+
 fn record_flattened_import_binding(marker: &str) {
     // Decoder shared with HIR lowering -- see
     // `interpreter_state::decode_import_binding_marker`.
@@ -496,6 +517,25 @@ impl ModuleItems<'_> {
 }
 
 fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileError> {
+    // Same-named classes of different flattened modules are identified by
+    // their OWNER (owner decision 2026-11-27): rename them to the owner-exact
+    // symbols HIR lowering uses, before any registration. A unit with no such
+    // collision is evaluated untouched (no copy).
+    let collisions = crate::hir::lower::module_lowering::interpreter_class_collisions(module_items.as_slice());
+    let module_items = if collisions.is_empty() {
+        module_items
+    } else {
+        let mut owned = match module_items {
+            ModuleItems::Owned(items) => items,
+            ModuleItems::Borrowed(items) => items.to_vec(),
+        };
+        crate::hir::lower::module_lowering::qualify_flattened_classes_for_interpreter(&mut owned, &collisions);
+        crate::interpreter::enable_owner_qualified_classes(owned.iter().filter_map(|item| match item {
+            Node::Const(marker) => crate::interpreter::decode_module_namespace_marker(&marker.name),
+            _ => None,
+        }));
+        ModuleItems::Owned(owned)
+    };
     let items = module_items.as_slice();
     if let Some(message) = crate::impl_duplicate_check::find_duplicate_impl_method(items) {
         return Err(CompileError::semantic(message));
@@ -667,8 +707,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 crate::interpreter::record_flattened_owner_class(&struct_class);
                 crate::interpreter::record_entry_owner_class(&struct_class);
                 classes.insert(s.name.clone(), Arc::clone(&struct_class));
+                register_bare_source_class(&s.name, &struct_class, &mut env, &mut classes);
                 CLASS_OVERLOADS.with(|cell| {
-                    cell.borrow_mut().entry(s.name.clone()).or_default().push(struct_class);
+                    cell.borrow_mut().entry(crate::interpreter::flatten_owner_source_name(&s.name).to_string()).or_default().push(struct_class);
                 });
             }
             Node::Enum(e) => {
@@ -703,8 +744,9 @@ fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileEr
                 crate::interpreter::record_flattened_owner_class(&arc_c);
                 crate::interpreter::record_entry_owner_class(&arc_c);
                 classes.insert(c.name.clone(), Arc::clone(&arc_c));
+                register_bare_source_class(&c.name, &arc_c, &mut env, &mut classes);
                 CLASS_OVERLOADS.with(|cell| {
-                    cell.borrow_mut().entry(c.name.clone()).or_default().push(arc_c);
+                    cell.borrow_mut().entry(crate::interpreter::flatten_owner_source_name(&c.name).to_string()).or_default().push(arc_c);
                 });
             }
             Node::Bitfield(bitfield) => {

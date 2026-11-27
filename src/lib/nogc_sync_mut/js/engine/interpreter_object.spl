@@ -8,6 +8,7 @@ use std.js.types.js_types.JsProperty
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
 use std.js.engine.runtime.{NATIVE_REQUEST_ANIMATION_FRAME, NATIVE_CANCEL_ANIMATION_FRAME}
+use std.common.js.engine.response_body.{JS_RESPONSE_HOST_KEY, JS_RESPONSE_CONSUMED_KEY, JS_RESPONSE_BODY_USED_KEY}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 
 val JS_STORAGE_ENTRY_LIMIT: i64 = 1024
@@ -309,6 +310,27 @@ impl JsInterpreter:
             storage_id, "length", JsValue.Number(v: keys.len().to_f64())
         )
 
+    me _is_response_body_consumed(response_id: i64) -> bool:
+        match self.get_object_property(response_id, JS_RESPONSE_CONSUMED_KEY):
+            JsValue.Boolean(true): true
+            _: false
+
+    me _write_response_body_flag(response_id: i64, consumed: bool):
+        val flag_value = JsValue.Boolean(v: consumed)
+        self.object_store.sync_prop_slots()
+        val existing_i = self.object_store.find_prop_slot(response_id, JS_RESPONSE_CONSUMED_KEY)
+        if existing_i >= 0:
+            self.object_store.update_slot(existing_i, flag_value)
+        else:
+            self.object_store.append_slot(response_id, JS_RESPONSE_CONSUMED_KEY, flag_value)
+            self.object_store.sync_prop_slots()
+        val used_i = self.object_store.find_prop_slot(response_id, JS_RESPONSE_BODY_USED_KEY)
+        if used_i >= 0:
+            self.object_store.update_slot(used_i, flag_value)
+        else:
+            self.object_store.append_slot(response_id, JS_RESPONSE_BODY_USED_KEY, flag_value)
+            self.object_store.sync_prop_slots()
+
     me set_object_property(obj_id: i64, key: text, value: JsValue):
         if key != "__simple_frozen" and self._is_object_frozen(obj_id):
             self.logger.debug("Ignoring write to frozen object {obj_id}.{key}")
@@ -317,18 +339,18 @@ impl JsInterpreter:
         # WHATWG Fetch: `Response.bodyUsed` is a read-only accessor that
         # mirrors the internal "disturbed" flag. A script assignment
         # (`r.bodyUsed = false`) is ignored in sloppy mode, not an error. The
-        # write is coerced to the internal flag rather than dropped so the
-        # engine's own `_consume_response_body` keeps a single source of truth.
-        # See doc/08_tracking/bug/browser_session_fetch_body_not_disturbed_and_timer_rollback_2026-08-21.md
+        # internal disturbed slot is likewise protected from script tampering.
         var write_value = value
-        if key == "bodyUsed":
-            match self.get_object_property(obj_id, "__simple_response_host"):
+        if key == JS_RESPONSE_CONSUMED_KEY:
+            match self.get_object_property(obj_id, JS_RESPONSE_HOST_KEY):
                 JsValue.Boolean(true):
-                    val consumed = match self.get_object_property(
-                        obj_id, "__simple_internal_response_body_consumed"
-                    ):
-                        JsValue.Boolean(true): true
-                        _: false
+                    return
+                _:
+                    pass_dn("not a Response host object")
+        if key == JS_RESPONSE_BODY_USED_KEY:
+            match self.get_object_property(obj_id, JS_RESPONSE_HOST_KEY):
+                JsValue.Boolean(true):
+                    val consumed = self._is_response_body_consumed(obj_id)
                     write_value = JsValue.Boolean(v: consumed)
                 _:
                     pass_dn("not a Response host object")

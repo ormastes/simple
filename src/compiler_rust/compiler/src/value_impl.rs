@@ -561,7 +561,7 @@ impl Value {
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
-                format!("{}({})", class, parts.join(", "))
+                format!("{}({})", crate::interpreter::flatten_owner_source_name(class), parts.join(", "))
             }
             Value::ClassInstance(instance) => {
                 let fields = instance.fields_snapshot();
@@ -569,7 +569,7 @@ impl Value {
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_display_string()))
                     .collect();
-                format!("{}({})", instance.class(), parts.join(", "))
+                format!("{}({})", crate::interpreter::flatten_owner_source_name(instance.class()), parts.join(", "))
             }
             Value::Enum {
                 enum_name,
@@ -623,7 +623,7 @@ impl Value {
                     .iter()
                     .map(|(k, v)| format!("{}: {}", k, Value::dict_entry_value_ref(v).to_debug_string()))
                     .collect();
-                format!("{}({})", class, parts.join(", "))
+                format!("{}({})", crate::interpreter::flatten_owner_source_name(class), parts.join(", "))
             }
             Value::Enum {
                 enum_name,
@@ -815,7 +815,7 @@ impl Value {
                 // same-named function of another module
                 // (seed_interp_cross_module_free_fn_collision_2026_11_06).
                 if let Some(class) = self.aggregate_class() {
-                    class == type_name
+                    crate::interpreter::class_identity_matches(class, type_name)
                 } else if let Value::Enum { enum_name, .. } = self {
                     enum_name == type_name
                 } else if matches!(self, Value::NativeFunction(_)) {

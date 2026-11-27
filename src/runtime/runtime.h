@@ -906,6 +906,7 @@ void     rt_http_client_destroy(int64_t client);
 int64_t  rt_gui_get_glyph_8x16(int32_t codepoint);
 int64_t  rt_jit_cleanup(int64_t handle);
 int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
+int64_t  rt_enum_new_none(int32_t enum_id, int32_t discriminant, int64_t payload);
 int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
@@ -967,6 +968,7 @@ int64_t  rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit);
 int64_t  rt_string_join(int64_t array, int64_t separator);
 int8_t   rt_contains(int64_t collection, int64_t value);
 int64_t  rt_unwrap_or_self(int64_t value);
+int64_t  rt_option_float_bits(int64_t value);
 int64_t  rt_unwrap_or_value(int64_t value, int64_t default_val);
 int64_t  rt_unwrap_or_trap(int64_t value);
 
@@ -1014,6 +1016,7 @@ int64_t  rt_gpu_atomic_exchange(int64_t a, int64_t b);  /* NAMED TRAP */
 int64_t  rt_gpu_atomic_xchg_i64(int64_t a, int64_t b);  /* NAMED TRAP */
 int64_t  rt_gpu_atomic_cmpxchg_i64(int64_t a, int64_t b, int64_t c);  /* NAMED TRAP */
 int8_t   rt_is_none(int64_t value);
+int8_t   rt_is_none_variant(int64_t value);
 int8_t   rt_is_some(int64_t value);
 /* `.?` presence: nil/None or an EMPTY array/dict/string is absent. */
 int8_t   rt_is_present(int64_t value);
@@ -1686,6 +1689,7 @@ bool        rt_editor_wait_simple_dap_stopped(int64_t pid);
 
 const char* spl_env_get(const char* key);
 int64_t     rt_env_get(const uint8_t* key, uint64_t key_len);
+int64_t     rt_env_get_raw(const uint8_t* key, uint64_t key_len);
 int64_t     rt_env_get_value(int64_t key);
 int64_t     rt_env_get_i64(const uint8_t* key, uint64_t key_len, int64_t default_value);
 void        spl_env_set(const char* key, const char* value);
@@ -1824,6 +1828,8 @@ int64_t     rt_file_read_regular_no_follow_bounded(
 int64_t     rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
 int64_t     rt_file_read_under_root_bytes(const uint8_t* root_ptr, uint64_t root_len, const uint8_t* rel_ptr, uint64_t rel_len, int64_t max_bytes);
 int8_t      rt_file_write_under_root_bytes(int64_t root, int64_t rel, int64_t data);
+int64_t     rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len);
+int64_t     rt_file_read_regular_no_follow_bounded_raw(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
 /* Arm code of the last bounded no-follow read: 77 never called, 100 succeeded,
  * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
 int64_t     rt_file_read_regular_no_follow_last_failure(void);

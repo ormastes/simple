@@ -836,7 +836,7 @@ pub(crate) fn pattern_matches(
                 fields: obj_fields,
             } = value
             {
-                if class == name {
+                if crate::interpreter::class_identity_matches(class, name) {
                     if std::env::var("SIMPLE_DEBUG_MATCH").as_deref() == Ok("1") {
                         eprintln!(
                             "[DEBUG Pattern::Struct] class={} obj_fields={:?}",

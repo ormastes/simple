@@ -7,8 +7,7 @@
 # No multi-recipient, no key derivation, no detached payload.
 # Byte representation strategy:
 #   - CBOR layer: [i64] throughout (matches cbor_encode_* / cbor_decode_*)
-#   - hmac_sha256_bytes: list (compatible with [i64])
-#   - ed25519_sign/verify: [u8] — bridged with helpers below
+#   - hmac_sha256_bytes, ed25519_sign/verify: [u8] — bridged with helpers below
 #
 # Reference: https://www.rfc-editor.org/rfc/rfc9052
 # ==============================================================================
@@ -282,7 +281,7 @@ fn cose_mac0_create(
 
     # Build MAC_structure and compute MAC
     val tbm    = _encode_mac_structure(protected_bstr, payload_bytes)
-    val mac_bytes = hmac_sha256_bytes(mac_key, tbm)
+    val mac_bytes = _u8_to_i64_list(hmac_sha256_bytes(_i64_list_to_u8(mac_key), _i64_list_to_u8(tbm)))
     val tag_cbor  = cbor_encode_bytes(mac_bytes)
 
     val payload_cbor = cbor_encode_bytes(payload_bytes)
@@ -363,16 +362,16 @@ fn cose_mac0_verify(cose_bytes: [i64], mac_key: [i64]) -> ([i64], i64):
 
     # Recompute MAC and compare constant-time
     val tbm          = _encode_mac_structure(protected_bstr, payload_bytes)
-    val expected_tag = hmac_sha256_bytes(mac_key, tbm)
+    val expected_tag: [u8] = hmac_sha256_bytes(_i64_list_to_u8(mac_key), _i64_list_to_u8(tbm))
 
     if expected_tag.len() != stored_tag.len():
         return ([], COSE_ERR_BAD_MAC)
 
-    # Constant-time comparison (expected_tag: list; stored_tag: [i64])
+    # Constant-time comparison (expected_tag: [u8]; stored_tag: [i64])
     var diff: i64 = 0
     var i = 0
     while i < expected_tag.len():
-        diff = diff | (expected_tag.get(i) ^ stored_tag[i])
+        diff = diff | ((expected_tag[i] as i64) ^ stored_tag[i])
         i = i + 1
 
     if diff != 0:

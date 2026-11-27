@@ -6,10 +6,7 @@
 #   - ed25519.spl        — point operations and public key/sign/verify API
 #
 # No SFFI/Rust externs — pure Simple language, suitable for any tier.
-# SHA-512 via std.common.crypto.sha512 (sha512_bytes: [i64] -> [i64]).
-#
-# NOTE: std.common.crypto.sha512 exports sha512_bytes([i64])->[i64], not
-#       sha512([u8])->[u8]. The _pure_ed25519_sha512_u8 wrapper below bridges the types.
+# SHA-512 via std.common.crypto.sha512 (sha512_bytes: [u8] -> [u8]).
 #
 # Public API:
 #   pure_ed25519_keypair_from_seed(seed) -> ([u8], [u8])
@@ -34,27 +31,12 @@ use std.common.crypto.ed25519_scalar.{
 }
 
 # ============================================================================
-# SHA-512 bridge: [u8] -> [u8]  (common/crypto uses [i64] internally)
+# SHA-512 over [u8]
 # ============================================================================
 
 fn _pure_ed25519_sha512_u8(data: [u8]) -> [u8]:
-    """SHA-512 over [u8] input, returning [u8].
-
-    Bridges the common/crypto sha512_bytes([i64])->[i64] API.
-    Each input byte is widened to i64; each output i64 is masked to u8.
-    """
-    var i64_data: [i64] = []
-    var i: u64 = 0
-    while i < data.len():
-        i64_data.push(data[i].to_i64())
-        i = i + 1
-    val result = sha512_bytes(i64_data)
-    var u8_result: [u8] = []
-    i = 0
-    while i < result.len():
-        u8_result.push((result[i] & 0xFF).to_u8())
-        i = i + 1
-    u8_result
+    """SHA-512 over [u8] input, returning [u8] (std.common.crypto.sha512)."""
+    sha512_bytes(data)
 
 # A derived secret plus the number of its temporaries whose volatile wipe read back as zero (test hook; the public
 # entry points return only `output`). std signing cannot fail, so a wipe that does not verify is best effort.
@@ -75,25 +57,16 @@ fn _ed25519_wipe_i64(mut words: [i64]) -> i64:
 fn _pure_ed25519_sha512_secret(data: [u8]) -> Ed25519SecretRunV1:
     """SHA-512 of a SECRET preimage (seed, nonce prefix || M): the same digest as _pure_ed25519_sha512_u8.
 
-    Drives the sha512 family primitives directly (as pbkdf2 does) so the widened input copy, the state words, the
-    block words (which still hold the last input block) and the digest words are owned here and wiped before return.
-    The [u8] digest is the caller's to wipe. Public preimages keep _pure_ed25519_sha512_u8 and pay no wipe.
+    Drives the sha512 family primitives directly (as pbkdf2 does) so the state words and the block words (which
+    still hold the last input block) are owned here and wiped before return. The input is absorbed in place (no
+    widened copy exists any more) and the [u8] digest is the caller's to wipe. Public preimages keep
+    _pure_ed25519_sha512_u8 and pay no wipe.
     """
-    var widened: [i64] = [0; data.len()]
-    var i: u64 = 0
-    while i < data.len():
-        widened[i] = data[i].to_i64()
-        i = i + 1
     var st = sha512_family_iv(64)
     var w = sha512_family_block()
-    sha512_family_absorb(st, widened, 0, w)
-    var words = sha512_family_words_to_bytes(st, 8)
-    var digest: [u8] = [0u8; 64]
-    i = 0
-    while i < 64:
-        digest[i] = (words[i] & 0xFF).to_u8()
-        i = i + 1
-    val wiped = _ed25519_wipe_i64(widened) + _ed25519_wipe_i64(st) + _ed25519_wipe_i64(w) + _ed25519_wipe_i64(words)
+    sha512_family_absorb(st, data, 0, w)
+    val digest = sha512_family_words_to_bytes(st, 8)
+    val wiped = _ed25519_wipe_i64(st) + _ed25519_wipe_i64(w)
     Ed25519SecretRunV1(output: digest, wiped: wiped)
 
 # ============================================================================

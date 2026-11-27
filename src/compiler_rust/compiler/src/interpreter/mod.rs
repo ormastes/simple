@@ -26,7 +26,7 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    decode_import_binding_marker, decode_module_namespace_marker, flatten_owner_mangled_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
+    decode_import_binding_marker, decode_module_namespace_marker, flatten_owner_mangled_name, flatten_owner_source_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
     get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
     debug_call_stack_snapshot, field_access_debug_enabled, note_enum_payload_function, note_enum_payload_function_opt,
 };
@@ -192,8 +192,9 @@ pub(crate) use module_cache::bump_registry_generation;
 pub use module_cache::{
     clear_entry_owner_classes, owner_module_class, owner_module_enum, record_entry_owner_class, record_flattened_owner_class,
     record_flattened_owner_enum, refresh_cached_class, resolve_class_for_instance, resolve_class_for_receiver,
-    resolve_class_in_scope,
+    resolve_class_in_scope, owner_qualified_class_symbol, owner_qualified_classes_enabled, owner_qualified_namespace_class_symbol,
 };
+pub(crate) use module_cache::{class_identity_matches, note_renamed_class, renamed_classes_present, class_name_owned_elsewhere, class_slot_key, with_exec_owner, clear_owner_qualified_classes, enable_owner_qualified_classes};
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{

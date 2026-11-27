@@ -231,6 +231,7 @@ class CudaVmExecutor:
             return init_err
         val load_err = self.session.load_entry(kernel_bytes, SVMG_ENTRY)
         if load_err != "":
+            val _cleanup = self.session.shutdown()
             return load_err
         self.entry_loaded = true
         ""
@@ -274,7 +275,16 @@ class CudaVmExecutor:
                 log_text: "", records: [], out_arena: [], data_off: 0)
 
         val value_ptr = lane_scratch_alloc(8)
+        if value_ptr == 0:
+            return SvmgRunOutcome(ok: false, error: "cuda-vm-host-scratch-alloc-failed",
+                sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
+                log_text: "", records: [], out_arena: [], data_off: 0)
         val args_ptr = lane_scratch_alloc(8)
+        if args_ptr == 0:
+            lane_scratch_free(value_ptr)
+            return SvmgRunOutcome(ok: false, error: "cuda-vm-host-scratch-alloc-failed",
+                sentinel: 0, trapped: false, timed_out: false, exit_code: 0,
+                log_text: "", records: [], out_arena: [], data_off: 0)
         rt_ptr_write_i64(value_ptr, 0, self.session.arena_ptr)
         rt_ptr_write_i64(args_ptr, 0, value_ptr)
         val launch_err = self.session.launch_once(1, 1, args_ptr)
@@ -303,7 +313,10 @@ class CudaVmExecutor:
         )
 
     me shutdown() -> text:
-        self.session.shutdown()
+        val err = self.session.shutdown()
+        if err == "":
+            self.entry_loaded = false
+        err
 
 export CudaVmExecutor, SvmgRunOutcome, SvmgResultRecord
 export SVMG_ENTRY, DEFAULT_STEP_BUDGET

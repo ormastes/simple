@@ -898,6 +898,9 @@ impl Lowerer {
                 // never true for an absent `text?` (rt_string_eq(nil, nil) == 0),
                 // so the arm silently never matched.
                 if matches!(lit_hir.kind, HirExprKind::Nil) {
+                    if subject_ty == TypeId::ANY {
+                        return Ok(self.erased_none_arm_condition(&subject_ref));
+                    }
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -1058,6 +1061,10 @@ impl Lowerer {
 
                 // Special handling for None - check both nil and enum None
                 if variant == "None" && !subject_enum_owns_variant {
+                    // An untyped subject can hold a user enum's own `None`.
+                    if subject_ty == TypeId::ANY && matches!(pattern_enum.as_str(), "_" | "Option") {
+                        return Ok(self.erased_none_arm_condition(&subject_ref));
+                    }
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -1223,11 +1230,14 @@ impl Lowerer {
     }
 
     /// Bare-name runtime id of each user enum declaring a `Some` or `None`
-    /// variant, with its `Some` discriminant when it has one. Such values are
-    /// not the raw form of an optional, so a bare `Some` arm over an untyped
-    /// subject only matches them through their own `Some` variant. Cached per
-    /// type-registry size: it is consulted for every erased `Some` arm.
-    pub(crate) fn user_option_shaped_enums(&mut self) -> std::sync::Arc<Vec<(i64, Option<i64>)>> {
+    /// variant, with its `Some` discriminant when it has one and whether it
+    /// declares `None`.
+    /// Such values are not the raw form of an optional, so a bare `Some` arm
+    /// over an untyped subject only matches them through their own `Some`
+    /// variant, and a bare `None` arm also matches their own `None`. Cached
+    /// per type-registry size: it is consulted for every erased `Some`/`None`
+    /// arm.
+    pub(crate) fn user_option_shaped_enums(&mut self) -> std::sync::Arc<Vec<(i64, Option<i64>, bool)>> {
         let count = self.module.types.type_count();
         if let Some((at, cached)) = &self.user_option_shaped_cache {
             if *at == count {
@@ -1235,7 +1245,7 @@ impl Lowerer {
             }
         }
         let builtin_global_option = self.global_option_is_builtin();
-        let mut out: Vec<(i64, Option<i64>)> = Vec::new();
+        let mut out: Vec<(i64, Option<i64>, bool)> = Vec::new();
         for (tid, ty) in self.module.types.iter() {
             let HirType::Enum {
                 name,
@@ -1254,14 +1264,14 @@ impl Lowerer {
                 continue;
             }
             let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
-            if out.iter().any(|(seen, _)| *seen == id) {
+            if out.iter().any(|(seen, _, _)| *seen == id) {
                 continue;
             }
             let some_disc = variants
                 .iter()
                 .any(|(v, _)| v == "Some")
                 .then(|| self.owner_variant_discriminant(tid, Some(name.as_str()), "Some", "hir user Some arm"));
-            out.push((id, some_disc));
+            out.push((id, some_disc, variants.iter().any(|(v, _)| v == "None")));
         }
         // Enums seen only through the project-wide table count too.
         if let Some(defs) = self.global_enum_defs.as_ref() {
@@ -1272,7 +1282,7 @@ impl Lowerer {
                     continue;
                 }
                 let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
-                if out.iter().any(|(seen, _)| *seen == id) {
+                if out.iter().any(|(seen, _, _)| *seen == id) {
                     continue;
                 }
                 let owner = self.module.types.lookup(name).unwrap_or(TypeId::ANY);
@@ -1280,7 +1290,7 @@ impl Lowerer {
                     .iter()
                     .any(|(v, _)| v == "Some")
                     .then(|| self.owner_variant_discriminant(owner, Some(name.as_str()), "Some", "hir user Some arm"));
-                out.push((id, some_disc));
+                out.push((id, some_disc, variants.iter().any(|(v, _)| v == "None")));
             }
         }
         let out = std::sync::Arc::new(out);
@@ -1380,7 +1390,7 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
         let mut all_ok: Option<HirExpr> = None;
-        for &(enum_id, some_disc) in shaped.iter() {
+        for &(enum_id, some_disc, _) in shaped.iter() {
             // Not this enum (the value's own discriminant under E's identity
             // fails), or it is E's `Some` variant.
             let not_e = HirExpr {
@@ -1450,7 +1460,7 @@ impl Lowerer {
         let shaped = self.user_option_shaped_enums();
         let mut chain = unwrap.clone();
         let mut any_some_owner = false;
-        for &(enum_id, some_disc) in shaped.iter() {
+        for &(enum_id, some_disc, _) in shaped.iter() {
             let Some(d) = some_disc else {
                 continue;
             };
@@ -1482,10 +1492,31 @@ impl Lowerer {
         }
         // A user `enum Option` shares id 1 with the builtin on the JIT lane,
         // so the id split cannot skip its payload read.
-        if shaped.iter().any(|&(enum_id, _)| enum_id < 2) {
+        if shaped.iter().any(|&(enum_id, _, _)| enum_id < 2) {
             return chain;
         }
         Self::erased_enum_id_split(subject, ctx, payload_ty, unwrap, chain)
+    }
+
+    /// Arm test for a bare `None` over an untyped subject. The interpreter
+    /// matches nil, the builtin `None`, and any enum value whose own variant is
+    /// named `None`; `rt_is_none` knows only the first two. A user variant
+    /// named `None` is stamped at construction (`enum_constructor_symbol` ->
+    /// `rt_enum_new_none`), so `rt_is_none_variant` answers all three in one
+    /// call with no knowledge of the enum; `Result` and other variants carry no
+    /// stamp. A module that sees no `None`-declaring user enum keeps the plain
+    /// `rt_is_none`.
+    /// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+    pub(crate) fn erased_none_arm_condition(&mut self, subject: &HirExpr) -> HirExpr {
+        let shaped = self.user_option_shaped_enums();
+        let user_none = shaped.iter().any(|&(enum_id, _, has_none)| enum_id >= 2 && has_none);
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: if user_none { "rt_is_none_variant" } else { "rt_is_none" }.to_string(),
+                args: vec![subject.clone()],
+            },
+            ty: TypeId::BOOL,
+        }
     }
 
     /// Arm test for a top-level builtin-optional `case Some(p):`: presence
@@ -1884,7 +1915,16 @@ impl Lowerer {
                 // path below, became irrefutable, and `Ok(nil)` took the
                 // `Ok(Some(c))` arm with `c` unbound.
                 // Bug: doc/08_tracking/bug/native_enum_nil_payload_pattern_2026_10_11.md
-                if self.is_builtin_optional_variant_name(variant) {
+                // `is_builtin_optional_variant_name` is a MODULE-wide name test:
+                // any user enum in the flattened module declaring a `None`/`Some`
+                // variant turns it false, and a `Result<Struct?, E>`'s `Ok(None)`
+                // then fell to the discriminant test below, which is false on the
+                // raw-nil form (match exhausted). The slot's own static type
+                // decides first: a builtin-`Option` slot is always presence/absence.
+                // Bug: doc/08_tracking/bug/native_build_jit_nested_option_result_match_exhausted_2026-11-27.md
+                if self.is_builtin_optional_variant_name(variant)
+                    || ((variant == "Some" || variant == "None") && self.slot_is_builtin_option(slot_ty))
+                {
                     let probe = if variant == "None" { "rt_is_none" } else { "rt_is_some" };
                     let presence = HirExpr {
                         kind: HirExprKind::BuiltinCall {
@@ -2446,6 +2486,25 @@ impl Lowerer {
                 .any(|(variant, fields)| variant == name && fields.as_ref().is_none_or(|f| f.is_empty())),
             // Empty local list: the global-summary fallback is already unit-only.
             _ => self.subject_enum_has_variant(subject_ty, name),
+        }
+    }
+
+    /// Is a slot of type `ty` an optional (`T?`) in nil-boxed form? True for the
+    /// builtin generic `Option<T>` enum (not a user enum named `Option`) and for
+    /// a source-declared `T?` (`optional_inner`; a genuine pointer never gets
+    /// Optional semantics). `rt_is_none` checks the enum id, so `T` may itself
+    /// be an enum that owns a `None`/`Some` variant.
+    pub(crate) fn slot_is_builtin_option(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, generic_params, .. }) => {
+                name == "Option"
+                    && !generic_params.is_empty()
+                    && variants.len() == 2
+                    && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
+                    && variants.iter().any(|(n, p)| n == "None" && p.is_none())
+            }
+            Some(HirType::Pointer { .. }) => self.module.types.optional_inner(ty).is_some(),
+            _ => false,
         }
     }
 

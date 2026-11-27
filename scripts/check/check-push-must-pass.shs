@@ -1937,6 +1937,48 @@ new_ref_closest_published_base() {
     rebased_push_published_base "$1"
 }
 
+# Release promotion (2026-11-27): a branch whose declared base is main
+# (`branch.<b>.merge = refs/heads/main`, exactly one value) and whose tip is
+# already published on a versioned release/<x.y> line of the actual push
+# destination carries 0 unreviewed commits, exactly like a tag. The verdict is
+# release-promotion-admission.shs's, on the LIVE remote; exit 0 is the only
+# admission, and every other outcome leaves the normal range gates in force.
+# A local, non-authoritative pre-check keeps an ordinary main-based push from
+# paying a remote query: its tip is neither on a release tracking ref nor
+# tree-identical to one's tip.
+# Prints the admission line. Returns non-zero when not admitted.
+release_promotion_admission() {
+    _rp_ref=$1; _rp_sha=$2
+    case "$_rp_ref" in refs/heads/*) ;; *) return 1 ;; esac
+    _rp_merge=$(git -C "$ROOT" config --get-all "branch.${_rp_ref#refs/heads/}.merge" 2>/dev/null) || return 1
+    [ "$_rp_merge" = refs/heads/main ] || return 1
+    _rp_remote=${MUST_CHECK_PUSH_REMOTE:-}
+    case "$_rp_remote" in ''|*[!A-Za-z0-9._/-]*) return 1 ;; esac
+    _rp_destination=${MUST_CHECK_PUSH_DESTINATION:-}
+    case "$_rp_destination" in ''|-*) return 1 ;; esac
+    _rp_tree=$(git -C "$ROOT" rev-parse --verify --quiet "$_rp_sha^{tree}") || return 1
+    _rp_candidate=0
+    for _rp_tip in $(git -C "$ROOT" for-each-ref --format='%(objectname)' "refs/remotes/$_rp_remote/release/" 2>/dev/null); do
+        if [ "$_rp_tip" = "$_rp_sha" ] ||
+            git -C "$ROOT" merge-base --is-ancestor "$_rp_sha" "$_rp_tip" 2>/dev/null ||
+            [ "$(git -C "$ROOT" rev-parse --verify --quiet "$_rp_tip^{tree}")" = "$_rp_tree" ]; then
+            _rp_candidate=1
+            break
+        fi
+    done
+    [ "$_rp_candidate" -eq 1 ] || return 1
+    _rp_out=$(sh "$ROOT/scripts/check/release-promotion-admission.shs" --repo "$ROOT" \
+        --base-ref refs/heads/main --head "$_rp_sha" --remote "$_rp_destination" 2>/dev/null)
+    _rp_rc=$?
+    _rp_line=$(printf '%s\n' "$_rp_out" | tail -n 1)
+    if [ "$_rp_rc" -ne 0 ]; then
+        echo "push-must-check: release promotion of $_rp_ref: $_rp_line" >&2
+        return 1
+    fi
+    case "$_rp_line" in "PASS — release promotion: $_rp_sha tree == published release/"*) ;; *) return 1 ;; esac
+    printf '%s\n' "$_rp_line"
+}
+
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
 # tool, never an unbudgeted run. Resolved here, BEFORE --self-test, so the
 # budget/dispatcher self-test fixtures below exercise the exact same
@@ -2730,8 +2772,13 @@ MUST_CHECK_CONFLICT_UNION_DONE=1
 export MUST_CHECK_CONFLICT_UNION_DONE
 
 MUST_CHECK_TOTAL_SPENT_MS=0
+_refs_content=0
+_refs_gated=0
+_refs_promoted=0
+_refs_tags=0
 while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     [ "$_local_sha" = "$ZERO" ] && continue
+    _refs_content=$(( _refs_content + 1 ))
     # PER-REF BUDGET (2026-09-24 fix): the blocking budget is per PUSHED REF,
     # not shared across the whole invocation. Sharing one MUST_CHECK_BUDGET_MS
     # across `while read` iterations meant a legitimate 2-ref push (the bound
@@ -2776,9 +2823,31 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
             git -C "$ROOT" merge-base --is-ancestor "$_tag_commit" "$_tag_base" ||
                 die "tag $_local_ref points at $_tag_commit, which is not published on $_tag_base; land the commit through a pull request first"
             echo "push-must-check: tag $_local_ref -> $_tag_commit is already published on $_tag_base; 0 new commits, range gates do not apply"
+            _refs_tags=$(( _refs_tags + 1 ))
             continue
             ;;
     esac
+    # Release promotion: admitted like a tag, on verified conditions only (see
+    # release_promotion_admission). The conflict-tree union above already ran
+    # over this tip; the range-bound checks (64-commit bound, per-commit size
+    # band, the manifest's range rows, the ledger) do not apply to commits
+    # that were gated when they landed on the release line. The promoted TREE
+    # is still checked: absolute size band, duplicate entries, src/ band and
+    # path floors; every sealed *.sdn against its seal; and no conflict
+    # markers in any file that differs from main.
+    if _promo_line=$(release_promotion_admission "$_local_ref" "$_local_sha"); then
+        _promo_main=$(published_main_ref) || die "release promotion needs refs/remotes/$MUST_CHECK_PUSH_REMOTE/main; fetch it and retry"
+        sh "$ROOT/scripts/check/check-tree-size-push.shs" --push-tip "$_promo_main..$_local_sha" ||
+            die "release promotion tip $_local_sha has a structurally wrong tree"
+        sh "$ROOT/scripts/check/check-sdn-crc32-sealed.shs" --rev "$_local_sha" --root "$ROOT" ||
+            die "release promotion tip $_local_sha has a sealed *.sdn that does not verify"
+        sh "$ROOT/scripts/check/check-no-conflict-markers-push.shs" "$_promo_main..$_local_sha" ||
+            die "release promotion tip $_local_sha carries conflict markers, or the marker scan could not run"
+        echo "push-must-check: $_promo_line"
+        _refs_promoted=$(( _refs_promoted + 1 ))
+        continue
+    fi
+    _refs_gated=$(( _refs_gated + 1 ))
     _ledger=$(git -C "$ROOT" show "$_local_sha:$LEDGER_REL" 2>/dev/null) || die "ledger is missing from $_local_sha"
     _manifest=$(git -C "$ROOT" show "$_local_sha:$MANIFEST_REL" 2>/dev/null) || die "manifest is missing from $_local_sha"
     load_committed_dispatcher "$_local_sha"
@@ -2817,4 +2886,22 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     MUST_CHECK_TOTAL_SPENT_MS=$(( MUST_CHECK_TOTAL_SPENT_MS + MUST_CHECK_BUDGET_SPENT_MS ))
 done < "$_unique_refs"
 
-echo "push-must-check: PASS — $MUST_CHECK_BLOCKING_RUN blocking gate(s) checked in ${MUST_CHECK_TOTAL_SPENT_MS}ms total (each pushed ref got its own ${MUST_CHECK_PUSH_BUDGET_S}s budget), bootstrap ledger validated"
+# The verdict names what was actually done per kind of ref. A ref that carries
+# content and was neither range-gated nor admitted on a verified condition
+# would mean nothing was checked for it: that is an ERROR, never a pass.
+if [ "$_refs_content" -gt 0 ] && [ $(( _refs_gated + _refs_promoted + _refs_tags )) -ne "$_refs_content" ]; then
+    echo "push-must-check: ERROR — nothing was checked for $(( _refs_content - _refs_gated - _refs_promoted - _refs_tags )) of $_refs_content pushed ref(s) (exit 2)"
+    exit 2
+fi
+_verdict_admitted=""
+[ "$_refs_promoted" -eq 0 ] ||
+    _verdict_admitted="$_verdict_admitted; $_refs_promoted ref(s) admitted as a RELEASE PROMOTION (range gates and ledger NOT run for them; conflict-tree, tree-size, SDN seal and conflict-marker checks of the promoted tree passed)"
+[ "$_refs_tags" -eq 0 ] ||
+    _verdict_admitted="$_verdict_admitted; $_refs_tags tag(s) admitted as already published (range gates NOT run for them)"
+if [ "$_refs_gated" -gt 0 ]; then
+    echo "push-must-check: PASS — $_refs_gated ref(s) range-gated: $MUST_CHECK_BLOCKING_RUN blocking gate(s) checked in ${MUST_CHECK_TOTAL_SPENT_MS}ms total (each pushed ref got its own ${MUST_CHECK_PUSH_BUDGET_S}s budget), bootstrap ledger validated$_verdict_admitted"
+elif [ -n "$_verdict_admitted" ]; then
+    echo "push-must-check: PASS — 0 ref(s) range-gated${_verdict_admitted}"
+else
+    echo "push-must-check: PASS — 0 refs carried content (deletion only), nothing to gate"
+fi

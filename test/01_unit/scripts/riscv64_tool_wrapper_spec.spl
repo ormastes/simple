@@ -1,0 +1,38 @@
+# @cover scripts/tool/lib/riscv64_tool_wrapper_policy.spl 90%
+"""
+## Purpose and audience
+Purpose: pins the argument rewriting and tool resolution of the riscv64 GNU tool
+wrapper (ported from riscv64-unknown-elf-tool-wrapper.py) and that the launcher
+relays a child's exit code and output.
+Audience: maintainers of scripts/tool/riscv64-unknown-elf-*-wrapper.cmd.
+"""
+
+use std.spec.step
+use std.spec.*
+use scripts.tool.lib.riscv64_tool_wrapper_policy.{resolve_tool_path, tool_exe_name, filtered_args, is_tool_kind}
+
+describe "riscv64 tool wrapper policy":
+    it "drops the clang target flags and lld selection":
+        val got = filtered_args(["-c", "--target=riscv64-unknown-elf", "a.c", "-fuse-ld=lld", "-o", "a.o"])
+        expect(got).to_equal(["-c", "a.c", "-o", "a.o"])
+    it "matches flags case-insensitively":
+        expect(filtered_args(["--TARGET=RISCV64-Unknown-Elf", "-FUSE-LD=LLD", "x"])).to_equal(["x"])
+    it "drops a bare --target together with its value":
+        expect(filtered_args(["--target", "riscv64", "a.c"])).to_equal(["a.c"])
+    it "treats a trailing bare --target as the end":
+        expect(filtered_args(["a.c", "--target"])).to_equal(["a.c"])
+    it "keeps unrelated flags and order":
+        expect(filtered_args(["-O2", "-mabi=lp64", "--target-x"])).to_equal(["-O2", "-mabi=lp64", "--target-x"])
+    it "prefers the env override":
+        expect(resolve_tool_path("gcc", "D:/x/gcc.exe", true)).to_equal("D:/x/gcc.exe")
+    it "uses the MSYS2 default when present":
+        expect(resolve_tool_path("gxx", "", true)).to_equal("C:/dev/tool/msys2/mingw64/bin/riscv64-unknown-elf-g++.exe")
+    it "falls back to the bare name for PATH lookup":
+        expect(resolve_tool_path("gcc", "", false)).to_equal("riscv64-unknown-elf-gcc.exe")
+    it "names the exes":
+        expect(tool_exe_name("gcc")).to_equal("riscv64-unknown-elf-gcc.exe")
+        expect(tool_exe_name("gxx")).to_equal("riscv64-unknown-elf-g++.exe")
+    it "accepts only gcc and gxx":
+        expect(is_tool_kind("gcc")).to_equal(true)
+        expect(is_tool_kind("gxx")).to_equal(true)
+        expect(is_tool_kind("cc")).to_equal(false)

@@ -1465,6 +1465,9 @@ typedef struct RtCoreMutex {
     int64_t value;
 } RtCoreMutex;
 
+/* RtCoreEnum.reserved2 flag: a variant NAMED `None` of an enum other than the
+ * builtin Option (set by rt_enum_new_none, read by rt_is_none_variant). */
+#define RT_ENUM_FLAG_NONE_VARIANT 1u
 typedef struct RtCoreEnum {
     uint8_t kind;
     uint8_t reserved[3];
@@ -6833,6 +6836,27 @@ static inline int rt_is_result_enum_id(uint32_t id) { return id == 0u || id == 2
 static inline int rt_result_disc_is_ok(uint32_t d) { return d == 0u || d == RT_DISC_OK; }
 static inline int rt_result_disc_is_err(uint32_t d) { return d == 1u || d == RT_DISC_ERR; }
 
+/* Exact IEEE-754 bits of the payload of a PRESENT typed float optional, in one
+ * enum lookup. The Option enum holds the RAW float bits (explicit typed
+ * `Some(x)`) or a registered heap float (generic/untyped producers); any other
+ * word is the flat tagged float. Twin of rt_option_float_bits in the Rust
+ * runtime (value/objects.rs).
+ * seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27 */
+int64_t rt_option_float_bits(int64_t value) {
+    RtCoreEnum* e = rt_core_as_enum(value);
+    double out;
+    if (e && e->enum_id == RT_OPTION_ENUM_ID) {
+        RtCoreFloat* f = rt_core_as_heap_float(e->payload);
+        if (!f) return e->payload;
+        out = f->value;
+    } else {
+        out = rt_core_as_float(value);
+    }
+    int64_t bits;
+    memcpy(&bits, &out, sizeof(bits));
+    return bits;
+}
+
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e) return value; /* bare/flat-nullable payload convention */
@@ -6861,6 +6885,20 @@ int8_t rt_is_none(int64_t value) {
      * resolved the enum again): `?` on an Option calls this per evaluation. */
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e || (int64_t)e->enum_id != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = (int64_t)e->discriminant;
+    return discriminant == 1 || discriminant == RT_DISC_NONE;
+}
+/* rt_is_none, or a user enum variant named `None` (rt_enum_new_none): the test
+ * of a bare `None` / `nil` arm over an untyped subject. rt_is_none itself must
+ * keep ignoring the flag: a typed `Q?` holding `Q.None` is present. Twin of the
+ * Rust runtime's rt_is_none_variant (value/objects.rs).
+ * seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27 */
+int8_t rt_is_none_variant(int64_t value) {
+    if (value == rt_core_nil()) return 1;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e) return 0;
+    if (__atomic_load_n(&e->reserved2, __ATOMIC_RELAXED) & RT_ENUM_FLAG_NONE_VARIANT) return 1;
+    if ((int64_t)e->enum_id != RT_OPTION_ENUM_ID) return 0;
     int64_t discriminant = (int64_t)e->discriminant;
     return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
@@ -12341,6 +12379,17 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
     return tagged;
 }
 
+/* rt_enum_new for a variant named `None` of a user enum: the object is stamped
+ * so rt_is_none_variant matches it by name. Unit variants are singletons per
+ * (enum_id, discriminant), so the stamp is the same for every holder; it is
+ * set with an atomic OR because the singleton may already be shared. */
+int64_t rt_enum_new_none(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    int64_t value = rt_enum_new(enum_id, discriminant, payload);
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (e) __atomic_fetch_or(&e->reserved2, RT_ENUM_FLAG_NONE_VARIANT, __ATOMIC_RELAXED);
+    return value;
+}
+
 int64_t rt_enum_discriminant(int64_t value) {
     RtCoreEnum* e = rt_core_as_enum(value);
     return e ? (int64_t)e->discriminant : -1;
@@ -15487,6 +15536,20 @@ int64_t rt_file_read_regular_no_follow_bounded(
     return result;
 }
 
+/* Raw pointer/length ABI twins for the low-level sffi tier
+ * (src/compiler/70.backend/sffi_minimal.spl): same behaviour, distinct names,
+ * so the raw `(ptr, len) -> i64?` view never shares a name with the typed
+ * `(text) -> text?` view (seed extern return types are keyed by bare name).
+ * See doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+int64_t rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_read_text(path_ptr, path_len);
+}
+
+int64_t rt_file_read_regular_no_follow_bounded_raw(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    return rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes);
+}
+
 /* Binary sibling; both result forms share the same handle admission and read
  * ceiling, including growth after stat and the one-byte oversize sentinel. */
 int64_t rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
@@ -17065,6 +17128,16 @@ int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
     int64_t result = rt_env_get_cstr(key);
     free(key);
     return result;
+}
+
+/* Raw pointer/length ABI twin of rt_env_get for the deliberately low-level
+ * sffi tier (src/compiler/70.backend/sffi_minimal.spl). Distinct NAME, same
+ * symbol semantics: the seed resolves extern return types by bare name, so the
+ * raw `(ptr, len) -> i64?` view must not share a name with the typed
+ * `(text) -> text?` view. See
+ * doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+int64_t rt_env_get_raw(const uint8_t* key_ptr, uint64_t key_len) {
+    return rt_env_get(key_ptr, key_len);
 }
 
 int64_t rt_env_get_value(int64_t key) {

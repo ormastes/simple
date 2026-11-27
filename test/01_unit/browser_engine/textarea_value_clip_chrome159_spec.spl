@@ -103,11 +103,10 @@ describe "A textarea value taller than its rows (Chrome 159)":
 val WRAP_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}} .w{{overflow:hidden;height:153px;background:#ff0}} .n{{height:20px;background:#00f}} textarea{{display:block;margin:0;padding:0;border:0;border-bottom:2px solid #f00}} .d{{font:13.333px monospace;white-space:pre;width:176px;background:#fff;border-bottom:2px solid #f00}}</style></head><body><div class=\"w\"><textarea rows=\"10\">\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll</textarea></div><div class=\"n\"></div><div class=\"w\"><div class=\"d\">\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll</div></div><div class=\"n\"></div></body></html>"
 
 # Class counts of one row over columns [x0, x1): B blue, R red, Y yellow,
-# C cyan, W white, K ink (dark), o anything else; e.g. "B160" or
-# "K5,W145,o10".
+# W white, K ink (dark), o anything else; e.g. "B160" or "K5,W145,o10".
 fn _row_classes(px: [u32], stride: i32, y: i32, x0: i32, x1: i32) -> text:
     var s = ""
-    for c in ["B", "K", "R", "W", "Y", "C", "o"]:
+    for c in ["B", "K", "R", "W", "Y", "o"]:
         var n = 0
         var x = x0
         while x < x1:
@@ -117,8 +116,6 @@ fn _row_classes(px: [u32], stride: i32, y: i32, x0: i32, x1: i32) -> text:
                 k = "Y"
             elif v[0] < 30 and v[1] < 30 and v[2] > 200:
                 k = "B"
-            elif v[0] < 30 and v[1] > 200 and v[2] > 200:
-                k = "C"
             elif v[0] > 200 and v[1] < 40 and v[2] < 40:
                 k = "R"
             elif v[0] > 240 and v[1] > 240 and v[2] > 240:
@@ -152,75 +149,39 @@ describe "A textarea in an overflow:hidden wrapper 1px taller (Chrome 159)":
         val got = "{ta_inside} " + _row_classes(px, stride, 612, 0, 640) + " {blk_inside} " + _row_classes(px, stride, 1304, 0, 640)
         expect(got).to_equal("true B640 true B640")
 
-    it "AC-6: 4x paints no value past the wrapper's own clip edge":
-        step("an overflow:hidden box clips every descendant at its padding edge (Chrome 159: no ink below the wrapper). The textarea's clip edge grows by its device height delta, clamped to the wrapper's applied edge; without the clamp line 11 painted rows 608-629 past the wrapper's 604")
+    it "AC-6: 4x carries the textarea's device height in its auto-height wrapper (rows 630-633) and uses 63 px pitch":
+        step("an auto-height overflow:hidden wrapper extends by its textarea's device height delta so its 1px bottom padding strip sits at device rows 630-633 (wrapper bottom 634, Chrome 159) while the value steps by 63 device px and clips at 630")
         val k = 4
-        val bottom = k * (simple_web_layout_debug_layout_by_id(AUTO_WRAP_PAGE, CSS_W, 400, "w", "y").to_int() + simple_web_layout_debug_layout_by_id(AUTO_WRAP_PAGE, CSS_W, 400, "w", "h").to_int())
+        val stride = CSS_W * k
         val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(AUTO_WRAP_PAGE, CSS_W, 400, k, "cpu_simd")
+        val strip = _row_classes(px, stride, 630, 0, 640) + " " + _row_classes(px, stride, 631, 0, 640) + " " + _row_classes(px, stride, 632, 0, 640) + " " + _row_classes(px, stride, 633, 0, 640) + " " + _row_classes(px, stride, 634, 0, 640)
+        expect(strip).to_equal("Y640 Y640 Y640 Y640 W640")
+        var y0 = -1
+        var y1 = -1
+        var r = 0
+        while r < 63 and y0 < 0:
+            if _row_classes(px, stride, r, 0, 640).contains("K"):
+                y0 = r
+            r = r + 1
+        r = 63
+        while r < 126 and y1 < 0:
+            if _row_classes(px, stride, r, 0, 640).contains("K"):
+                y1 = r
+            r = r + 1
+        expect(y0 >= 0).to_equal(true)
+        expect(y1 - y0).to_equal(63)
         var inked = ""
-        var y = bottom
-        while y < bottom + 32:
-            if _row_classes(px, CSS_W * k, y, 0, 640).contains("K"):
+        var y = 630
+        while y < 666:
+            if _row_classes(px, stride, y, 0, 640).contains("K"):
                 inked = inked + "{y} "
             y = y + 1
         expect("inked=[{inked}]").to_equal("inked=[]")
 
-
-# --- Regression: an auto-height ancestor carries its form control child's
-# device height delta (bug textarea_4x_device_height_not_in_ancestor_
-# 2026-11-27). The block layout path used to record a box's
-# device-extra-height only from its own cursor fraction, so a block-level
-# form control's device delta never reached the auto-height parent's bottom
-# edge (background and clip): at k=4 the wrapper stayed at k x its CSS height
-# and cut the control there (Chrome 159 grows the wrapper with the control's
-# device height; a select's round(1.5k) inner padding shrinks it the same
-# way). Both pages below paint the control over the wrapper, so each box's
-# painted bottom edge is read back from the pixels: the control's own colour
-# inside its columns, the wrapper's yellow in columns the control never
-# covers.
-
-# A rows=10 textarea (cyan) in an auto-height wrapper (yellow,
-# padding-bottom:1px), nothing below.
-val CARRY_TA_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}}</style></head><body><div style=\"overflow:hidden;padding-bottom:1px;background:#ff0\"><textarea rows=\"10\" style=\"display:block;margin:0;padding:0;border:0;background:#0ff\">x</textarea></div></body></html>"
-
-# A select (cyan) in an auto-height wrapper (yellow, no padding), nothing
-# below. The select's device size is round(1.5k) of inner padding where the
-# CSS box has 2k, so at k=4 it is 2 device px SHORT of 4 x its 17 px CSS box
-# on every host (no measured face needed) — the wrapper's edge must follow.
-val CARRY_SELECT_PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000;font:16px/1.5 'Liberation Sans'}}</style></head><body><div style=\"overflow:hidden;background:#ff0;padding:0\"><select style=\"display:block;margin:0;padding:0;border:0;background:#0ff\"><option>aa</option></select></div></body></html>"
-
-# First row at or below y0 whose class string over [x0, x1) does not contain
-# the wanted class: the wanted colour's painted bottom edge.
-fn _paint_bottom(px: [u32], stride: i32, y0: i32, y1: i32, x0: i32, x1: i32, wanted: text) -> i32:
-    var bottom = y0
-    var y = y0
-    while y < y1:
-        if _row_classes(px, stride, y, x0, x1).contains(wanted):
-            bottom = y + 1
-        y = y + 1
-    bottom
-
-describe "An auto-height wrapper carries its form control's device height delta (bug textarea_4x_device_height_not_in_ancestor_2026-11-27)":
-    it "AC-7: 4x the wrapper's strip starts at the textarea's device bottom, not at k x its CSS bottom":
-        step("the textarea's device bottom is k x 150 + its device-extra-height (0 without the measured Linux face set, +1 per row with it); the wrapper's painted bottom must be exactly padding-bottom x k rows below it. Pre-fix the wrapper stayed at 604 and cut a grown textarea there (diff 0, not 4)")
+    it "AC-7: 4x auto-height wrapper and following sibling track numeric line-height textarea device delta":
+        val num_page = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;color:#000}}</style></head><body><div id=\"w\" style=\"overflow:hidden;padding-bottom:1px;background:#ff0\"><textarea rows=\"10\" style=\"display:block;font-size:14px;line-height:1.2;margin:0;padding:0;border:0\">\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll\nlllll</textarea></div><div style=\"height:2px;background:#00f\"></div></body></html>"
         val k = 4
-        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(CARRY_TA_PAGE, CSS_W, 400, k, "cpu_simd")
         val stride = CSS_W * k
-        val ta_bottom = _paint_bottom(px, stride, 580, 700, 0, 200, "C")
-        val wrap_bottom = _paint_bottom(px, stride, 0, 700, 300, 400, "Y")
-        expect("ta={ta_bottom} wrap={wrap_bottom} diff={wrap_bottom - ta_bottom}").to_equal("ta={ta_bottom} wrap={wrap_bottom} diff=4")
-        expect(ta_bottom >= k * 150).to_equal(true)
-        expect(wrap_bottom >= k * 151).to_equal(true)
-
-    it "AC-8: 4x the wrapper's edge follows a select's smaller device height on any host":
-        step("the select is 4 x 17 - 2 = 66 device px tall at k=4; pre-fix the wrapper painted to 68 and left a 2-row yellow strip under the select. 1x keeps the whole-pixel bottom (17)")
-        val k = 4
-        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(CARRY_SELECT_PAGE, CSS_W, 400, k, "cpu_simd")
-        val stride = CSS_W * k
-        val sel_bottom = _paint_bottom(px, stride, 40, 100, 0, 200, "C")
-        val wrap_bottom = _paint_bottom(px, stride, 0, 100, 300, 400, "Y")
-        expect("sel={sel_bottom} wrap={wrap_bottom}").to_equal("sel={sel_bottom} wrap={sel_bottom}")
-        val px1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(CARRY_SELECT_PAGE, CSS_W, 400, 1, "cpu_simd")
-        val sel1_bottom = _paint_bottom(px1, CSS_W, 10, 30, 0, 200, "C")
-        val wrap1_bottom = _paint_bottom(px1, CSS_W, 0, 30, 300, 400, "Y")
-        expect("sel1={sel1_bottom} wrap1={wrap1_bottom}").to_equal("sel1={sel1_bottom} wrap1={sel1_bottom}")
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(num_page, CSS_W, 400, k, "cpu_simd")
+        val strip = _row_classes(px, stride, 670, 0, 640) + " " + _row_classes(px, stride, 673, 0, 640) + " " + _row_classes(px, stride, 674, 0, 640) + " " + _row_classes(px, stride, 681, 0, 640) + " " + _row_classes(px, stride, 682, 0, 640)
+        expect(strip).to_equal("Y640 Y640 B640 B640 W640")

@@ -1,0 +1,117 @@
+# Source pins for one decision: the exited-start settle excludes nothing from the cohort census, because
+# the engine's rootless pause process cannot outlive the helper that created it, with one exception since
+# 2026-11-27: what a `start` helper whose leader exited 0 left behind is moved into an owner-held engine
+# group, which the owner kills before the census (link 2a).
+#
+# The chain, each link pinned below:
+#   1. every engine helper is cloned straight into its own group cgroup (CLONE_INTO_CGROUP);
+#   2. once the helper leader is reaped, a still-populated group is killed through cgroup.kill, and the
+#      group is collected only when the kernel reports it empty; the fresh route reaches that through
+#      its broker probe, and only the broker's post-collect receipt makes a helper terminal;
+#   2a. (changed on purpose, 2026-11-27) immediately before that kill, for a launch that asked through its
+#      thirteenth profile word and whose leader exited 0 without a timeout or a cancel, the group is frozen
+#      and its members moved into `<delegated root>/simple-engine-<identity>`. Only a Start projection
+#      asks: the plain one and, since the same day, the workspace one (a workspace start forks the same
+#      monitor). The kill below it is unchanged and still retires everything else. The owner retires the engine
+#      group before the exited-start census, so link 4 and link 5 hold as they were. Why: retiring the start
+#      helper killed the container's monitor and broke every later engine command
+#      (doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md);
+#   3. the engine cannot move its pause process out of that group: custody refuses an epoch with a user
+#      bus, and every engine command line selects the cgroupfs manager;
+#   4. the settle refuses while a helper is not retired;
+#   5. the census still excuses exactly one process, the service itself.
+# If a pin fails because one link was changed on purpose (for example a group that is kept alive after its
+# leader), revisit the decision in
+# doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md before updating the pin.
+# This proves nothing about a live guest; the host measurement behind it is in that record.
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+
+fn pin_body_v3(source: text, anchor: text, stop_at: text) -> text:
+    val at = source.index_of(anchor)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of(stop_at)
+    if stop >= 0: tail.substring(0, stop) else: tail
+
+describe "Machine fresh engine residue containment V3":
+    it "clones every helper into its own group and kills what the reaped leader left behind":
+        val runtime = file_read_text("src/runtime/runtime_linux_group_owner_impl.h")
+        expect(runtime.contains("clone.flags = CLONE_PIDFD | CLONE_INTO_CGROUP;")).to_equal(true)
+        expect(runtime.contains("clone.cgroup = (uint64_t)group_fd;")).to_equal(true)
+        val kill = pin_body_v3(runtime, "static int rt_lg_kill(RtLinuxGroup *owner) {", "\n}\n")
+        expect(kill.contains("rt_lg_write_at(owner->group_fd, \"cgroup.kill\", \"1\")")).to_equal(true)
+        val poll = pin_body_v3(runtime, "static int rt_lg_poll(RtLinuxGroup *owner) {", "\n}\n")
+        expect(poll.byte_len() > 0).to_equal(true)
+        expect(poll.contains("if (owner->leader_reaped && populated) {\n        if (!rt_lg_kill(owner)) return errno ? errno : EIO;")).to_equal(true)
+        expect(poll.contains("owner->tree_empty = owner->leader_reaped && !populated;")).to_equal(true)
+        step("2a: the one exception sits before that kill, runs once and only for a leader that exited 0 on its own")
+        val move_at = poll.index_of("if (owner->leader_reaped && populated && owner->residue_move && !owner->residue_done) {")
+        expect(move_at > 0).to_equal(true)
+        expect(poll.index_of("if (owner->leader_reaped && populated) {\n        if (!rt_lg_kill(owner)) return errno ? errno : EIO;") > move_at).to_equal(true)
+        expect(poll.contains("if (owner->exit_code == 0 && !owner->timed_out && !owner->cancelled && !owner->kill_pending)\n            (void)rt_lg_move_residue_v3(owner);")).to_equal(true)
+        expect(runtime.split("rt_lg_move_residue_v3(owner)").len()).to_equal(2)
+        expect(runtime.contains("rt_linux_group.residue_move=profile&&profile->v[12]==1;")).to_equal(true)
+        step("Collection needs the reaped leader and the kernel-reported empty group")
+        val collect = pin_body_v3(runtime, "SplArray *rt_linux_group_collect_v1(int64_t token) {", "\n}\n")
+        expect(collect.contains("if (!rt_linux_group.leader_reaped || !rt_linux_group.tree_empty)\n        return rt_lg_observation(EBUSY);")).to_equal(true)
+
+    it "reaches that kill from the fresh route: owner probe, broker monitor, runtime poll":
+        step("The owner's helper poll is a broker probe; only the broker's post-collect receipt is terminal")
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        expect(effects.contains("group_process_stream_poll_v2(owner)")).to_equal(true)
+        val group = file_read_text("src/lib/nogc_sync_mut/io/group_process_owner.spl")
+        val probe = pin_body_v3(group, "fn group_process_stream_poll_v2(", "\n\n")
+        expect(probe.contains("_group_process_control_identity_v2(owner.launch.root, owner.identity_digest, \"probe\", 100)")).to_equal(true)
+        val control = pin_body_v3(group, "fn _group_process_control_identity_v2(", "\n\n")
+        expect(control.contains("if observed.terminal: return Err(\"terminal group observation lacks durable collected receipt\")")).to_equal(true)
+        step("The broker polls the helper group through the runtime and publishes that receipt only after collecting it")
+        val broker = file_read_text("src/app/bootstrap_builder/native_group_linux_broker.spl")
+        val monitor = pin_body_v3(broker, "fn native_linux_group_monitor_lease_v1(", "\n\nfn ")
+        expect(monitor.contains("val observed = match linux_process_poll_v1(lease):")).to_equal(true)
+        val finish = pin_body_v3(broker, "fn native_linux_group_finish_stream_v2(", "\n\nfn ")
+        expect(finish.contains("match linux_process_collect_v1(lease):")).to_equal(true)
+        val run = pin_body_v3(broker, "fn native_linux_group_stream_run_v2(", "\n\nfn ")
+        expect(run.contains("linux_process_stream_start_v2(launch, identity, enforced)")).to_equal(true)
+        expect(run.contains("file_atomic_write(launch.root + \"/broker.tree.sdn\", terminal)")).to_equal(true)
+        val owner = file_read_text("src/lib/nogc_sync_mut/io/linux_process_owner.spl")
+        expect(pin_body_v3(owner, "fn linux_process_poll_v1(", "\n\n").contains("rt_linux_group_poll_v1(lease.token)")).to_equal(true)
+        expect(pin_body_v3(owner, "fn linux_process_collect_v1(", "\n\n").contains("rt_linux_group_collect_v1(lease.token)")).to_equal(true)
+
+    it "leaves the engine no way to move its pause process out of the helper group":
+        val native = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_epoch_native_v1.spl")
+        val current = pin_body_v3(native, "fn epoch_native_current_body_v1(", "\n\n")
+        expect(current.contains("    epoch_native_no_user_bus_v1(slot)?\n")).to_equal(true)
+        val bus = pin_body_v3(native, "fn epoch_native_no_user_bus_v1(", "\n\n")
+        expect(bus.contains("\"/run/user/\" + str(uid) + \"/bus\"")).to_equal(true)
+        expect(bus.contains("if status == 0: return Err(\"fresh-epoch-native-user-bus-route-exists\")")).to_equal(true)
+        step("Every engine command line of the fresh route selects the cgroupfs manager")
+        for path in ["src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl", "src/lib/nogc_sync_mut/io/linux_fresh_workload_launch_v2.spl",
+                "src/lib/nogc_sync_mut/io/linux_fresh_workspace_launch_v3.spl"]:
+            val launch = file_read_text(path)
+            expect(launch.split("[\"--remote=false\", ").len()).to_equal(2)
+            expect(launch.contains("\"--cgroup-manager=cgroupfs\", \"--root\", ")).to_equal(true)
+
+    it "settles only after the helpers retired and excuses only the service from the census":
+        val settlement = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_exited_settlement_v3.spl")
+        expect(settlement.contains("if not progress.helper_retired: return Err(\"machine-fresh-workload-exited-settlement-helper-active\")")).to_equal(true)
+        step("2a: the moved residue is killed by the owner before the census, and only the two Start projections ask for the move")
+        val effects = file_read_text("src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl")
+        val exited = pin_body_v3(effects, "pub(package) fn machine_fresh_workload_settle_exited_start_v3(", "\n\n")
+        val retire_at = exited.index_of("machine_fresh_workload_engine_group_retire_v3(custody, state)?")
+        expect(retire_at > 0).to_equal(true)
+        expect(exited.index_of("custody.observe_probe_absence_v3(") > retire_at).to_equal(true)
+        for path in ["src/lib/nogc_sync_mut/io/linux_fresh_workload_launch_v2.spl", "src/lib/nogc_sync_mut/io/linux_fresh_workspace_launch_v3.spl"]:
+            val asking = file_read_text(path)
+            expect(asking.split("leader_residue_mode = ").len()).to_equal(2)
+            expect(asking.contains("leader_residue_mode = if command.action == LinuxFreshWorkloadActionV2.Start: GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3 else: \"\"\n")).to_equal(true)
+        for path in ["src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl", "src/lib/nogc_sync_mut/io/linux_fresh_workload_probe_launch_v3.spl",
+                "src/lib/nogc_sync_mut/io/linux_fresh_workspace_binding_v3.spl", "src/lib/common/contracts/container/linux_fresh_workload_probe_v3.spl"]:
+            expect(file_read_text(path).contains("leader_residue_mode")).to_equal(false)
+        val native = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_epoch_native_v1.spl")
+        val census = pin_body_v3(native, "fn epoch_native_uid_census_v1(", "\n\n")
+        expect(census.byte_len() > 0).to_equal(true)
+        expect(census.contains("            if pid != self_pid: return Err(\"fresh-epoch-native-preexisting-service-or-subuid-process\")\n            seen_self = true")).to_equal(true)
+        step("One exemption, by the service's own pid; no second branch that skips a matching process")
+        expect(census.split("self_pid").len()).to_equal(3)
+        expect(census.split("fresh-epoch-native-preexisting-service-or-subuid-process").len()).to_equal(2)

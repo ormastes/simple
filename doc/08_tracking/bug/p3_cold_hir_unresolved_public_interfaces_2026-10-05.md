@@ -52,3 +52,9 @@ and a subsequent absent text payload. Native execution is UNRUN. This is a
 source-proven contract repair, not proof of the three remaining packet failures.
 It performs no new traversal/allocation and avoids lowering absent payloads;
 runtime performance and memory measurements are still pending.
+
+
+## Pure-Container Alias Workaround & Shard Registration (2026-11-27)
+
+- **Workaround site:** `src/lib/common/contracts/container/pure_backend_v1.spl:23-27` (added explicit `: text` type annotations on `PURE_CONTAINER_BACKEND_V1` and `PURE_CONTAINER_ENGINE_V1` in commit `a2fc53df77e`, tagged `# @workaround bug=p3_cold_hir_unresolved_public_interfaces_2026-10-05`).
+- **Shard:** `doc/08_tracking/bug/db/p3_cold_hir_unresolved_public_interfaces_2026-10-05.sdn` (`status=open`; general cold-HIR constant inference and remaining unresolved modules stay open).

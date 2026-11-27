@@ -1988,7 +1988,7 @@ pub fn load_and_merge_module(
     let explicit_names = group_import_names(&use_stmt.target);
     let preserved = unimported_def_collisions(explicit_names.as_deref(), &module_classes, classes);
     for (name, class_def) in &module_classes {
-        classes.insert(name.clone(), class_def.clone());
+        classes.insert(crate::interpreter::class_slot_key(name, class_def), class_def.clone());
     }
     classes.extend(preserved);
     for (name, func_def) in &module_functions {

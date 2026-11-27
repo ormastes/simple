@@ -737,19 +737,20 @@ impl RuntimeValue {
                 }
                 // Enum values: same enum identity, payload cloned recursively.
                 Some(HeapObjectType::Enum) => {
-                    let (enum_id, discriminant, payload) =
+                    let (enum_id, discriminant, payload, flags) =
                         super::heap::with_typed_ptr::<super::objects::RuntimeEnum, _>(
                             self,
                             HeapObjectType::Enum,
                             |ptr| unsafe {
-                                ((*ptr).enum_id, (*ptr).discriminant, (*ptr).payload)
+                                ((*ptr).enum_id, (*ptr).discriminant, (*ptr).payload, (*ptr).header.reserved)
                             },
                         )?;
                     let cloned_payload = payload.clone_for_isolated_thread_depth(depth + 1)?;
-                    Some(super::objects::rt_enum_new(
+                    Some(super::objects::enum_new_with_flags(
                         enum_id,
                         discriminant,
                         cloned_payload,
+                        flags,
                     ))
                 }
                 _ => None,

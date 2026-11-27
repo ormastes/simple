@@ -2686,6 +2686,25 @@ impl Lowerer {
                                     ty: subject_ty,
                                 };
                                 self.erased_some_arm_binding(&subject, payload_expr_ty, ctx)
+                            } else if enum_variant == "Some"
+                                && payload_patterns.len() == 1
+                                && subject_is_optional
+                                && matches!(payload_expr_ty, TypeId::F32 | TypeId::F64)
+                            {
+                                // A float Option payload is raw bits OR a boxed
+                                // float (generic/untyped producers); MIR's
+                                // float `rt_unwrap_or_self` reader tells them
+                                // apart. seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+                                HirExpr {
+                                    kind: HirExprKind::BuiltinCall {
+                                        name: "rt_unwrap_or_self".to_string(),
+                                        args: vec![HirExpr {
+                                            kind: HirExprKind::Local(subject_idx),
+                                            ty: subject_ty,
+                                        }],
+                                    },
+                                    ty: payload_expr_ty,
+                                }
                             } else if enum_variant == "Some" && payload_patterns.len() == 1 && subject_is_optional {
                                 HirExpr {
                                     kind: HirExprKind::If {
@@ -3602,6 +3621,9 @@ impl Lowerer {
                 //
                 // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
                 if matches!(**lit_expr, Expr::Nil) {
+                    if subject_ty == TypeId::ANY {
+                        return Ok(self.erased_none_arm_condition(&subject_ref));
+                    }
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -3786,6 +3808,10 @@ impl Lowerer {
 
                 // Special handling for None - check both nil and enum None
                 if variant == "None" && !subject_enum_owns_variant {
+                    // An untyped subject can hold a user enum's own `None`.
+                    if subject_ty == TypeId::ANY && matches!(pattern_enum.as_str(), "_" | "Option") {
+                        return Ok(self.erased_none_arm_condition(&subject_ref));
+                    }
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),

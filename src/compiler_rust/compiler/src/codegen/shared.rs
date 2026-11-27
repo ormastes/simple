@@ -23,6 +23,19 @@ use super::types_util::type_to_cranelift;
 mod function_alignment;
 pub use function_alignment::{compile_aligned, define_compiled, define_function_aligned, MIN_FUNCTION_ALIGNMENT};
 
+/// Runtime constructor of an enum value. A variant NAMED `None` of a user enum
+/// is built by `rt_enum_new_none`, which stamps the object so a bare `None` /
+/// `nil` arm over an untyped subject (`rt_is_none_variant`) matches it by name,
+/// as the interpreter does. The builtin Option/Result ids keep `rt_enum_new`.
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+pub(crate) fn enum_constructor_symbol(enum_name: &str, variant_name: &str) -> &'static str {
+    if variant_name == "None" && enum_runtime_type_id(enum_name) >= 2 {
+        "rt_enum_new_none"
+    } else {
+        "rt_enum_new"
+    }
+}
+
 /// Stable runtime type ID shared by native enum constructors and match checks.
 /// IDs 0 and 1 are reserved for the built-in Result and Option types.
 pub(crate) fn enum_runtime_type_id(runtime_name: &str) -> u32 {

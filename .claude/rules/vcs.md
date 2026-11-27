@@ -204,6 +204,86 @@ verification above was run with such a name and left
 `doc/08_tracking/bug/stray_vgate_probe_tag_2026-09-07.md`. Probe with a name
 that does not start with `v` (e.g. `probe-tag-gate`), which no ruleset covers
 and which deletes cleanly.
+## Promoting a release line onto main (2026-11-27)
+
+A release line that absorbed main and moved on cannot land on main through the
+range gates: `main..release/<x.y>` was 21,916 commits and +4.6% files on
+2026-11-27, against a 64-commit bound and a ±0.15% size band, although every
+one of those commits was gated when it landed on the release line. Like a tag
+push, such a promotion carries **0 unreviewed commits**, and it is admitted the
+same way — fail closed, on conditions that are verified, never by branch name.
+`scripts/check/release-promotion-admission.shs` is the one predicate; the push
+dispatcher (`check-push-must-pass.shs`) and the required `fast-gates` job both
+call it and admit on exit 0 only:
+
+1. the base is `main` (push: `branch.<b>.merge` is exactly `refs/heads/main`;
+   CI: the PR's base ref);
+2. the head is published on a versioned `release/<x.y>` of the **live** remote
+   (`git ls-remote`, never a local tracking ref): it is that tip or an ancestor
+   of it; or its tree is byte-identical to the tree of that **tip** (never an
+   interior commit), the tip itself descends from main, and
+   `git rev-list <head> --not <main> <tip>` is exactly the head — an extra
+   parent would smuggle unreviewed history in behind an identical tree;
+3. live `main` (and the PR's base sha) is an ancestor of the head, so nothing
+   of main is dropped or re-merged.
+
+```
+PASS — release promotion: <head> tree == published release/<x.y> <head>; 0 unreviewed commits
+PASS — release promotion: <head> tree == published release/<x.y> tip <tip>; the head is 1 new commit carrying that tree, 0 other unpublished commits
+NOT ADMITTED — <reason> (normal gates apply)
+```
+
+On admission the range-bound checks are skipped (commit bound, per-commit size
+band, range scans, the `local` tier rows, the push ledger), and the verdict
+says so by name: `... ref(s) admitted as a RELEASE PROMOTION (range gates and
+ledger NOT run for them; ...)`. The promoted tree is still checked: the
+conflict-tree guard; the tree-size guard's absolute 90,000/150,000 band,
+duplicate-entry, `src/` band and path-floor checks (`--push-tip`); every sealed
+`*.sdn` against its seal (`check-sdn-crc32-sealed.shs --rev`); and conflict
+markers in every file that differs from main. Anything not admitted — an extra
+commit on top, an extra parent, an interior or pre-merge release tree, main
+ahead of the release line, a commit that exists only locally — runs the normal
+gates and fails them.
+
+```bash
+git fetch origin main 'refs/heads/release/*:refs/remotes/origin/release/*'
+git rev-list --left-right --count origin/main...origin/release/<x.y>   # left MUST be 0
+git branch work/release-into-main-<date> origin/release/<x.y>
+git config branch.work/release-into-main-<date>.remote origin
+git config branch.work/release-into-main-<date>.merge refs/heads/main
+sh scripts/check/release-promotion-admission.shs --base-ref main \
+    --head "$(git rev-parse work/release-into-main-<date>)" --remote origin   # expect PASS
+git push origin work/release-into-main-<date>
+gh pr create --base main --head work/release-into-main-<date> ...
+gh pr merge <n> --admin --merge        # once the required check is green
+git fetch origin && git diff --stat origin/main <promoted sha>   # must be empty
+```
+
+If left is not 0, merge main into the release line through an ordinary PR
+first. In CI the verdict is computed in a private commit-only scratch
+repository (~60 s for an admitted promotion, ~4 s for an ordinary main PR),
+bound to the checked-out tree with `--expect-tree`, by the predicate **as
+committed at the PR's base** — a PR cannot edit the script that admits it. The
+one exception is a base that does not carry the script at all (the first
+promotion, which brings it to main): the checked-out copy runs and the log
+says `NOTE — base <sha> has no release-promotion predicate`. `--selftest`
+(25 fixtures) runs in the required job on every PR.
+
+Limits, stated rather than closed:
+
+- **`release/*` has no creation rule.** `spipe-vcs-v3-release-lines` governs
+  updates to an existing line, not who may create `release/<new x.y>`. Anyone
+  who can push a new versioned release branch could create a line that then
+  vouches for its own content. The admission trusts "published on a live
+  versioned release line"; it does not prove that line was itself gated.
+  Closing this needs a ruleset change, which is an owner decision.
+- **An admin merge while `BEHIND` carries the usual risk.** If main advances
+  after the PR is cut, the merge is no longer a pure promotion: GitHub merges
+  the two lines and the result is a tree no gate saw. Admission is evaluated
+  at CI time against the main of that moment. Confirm
+  `git rev-list --count <head>..origin/main` is 0 immediately before
+  `gh pr merge --admin --merge`, and re-sync the release line if it is not.
+
 ## Pre-push guards
 
 **(2026-09-28) Merging main into a stale PR branch no longer trips the 64-commit bound:** `check-push-must-pass.shs` excludes `refs/remotes/<remote>/main` from the conflict-tree union and uses the tip's merge-base with it as the per-ref range base, so only the branch's own commits count; `check-tree-size-push.shs` bands a merge against its closest parent. Missing remote main ⇒ NOTE on stderr and the old range (fail-closed); 65 genuinely new commits still FAIL. **(2026-11-17) Release lines too:** the per-ref base is the closest unique merge-base among remote main and every `refs/remotes/<remote>/release/<x.y>` (conflict-tree union already excluded advertised release tips), so merging an advanced `release/1.0.0` into a release-based PR counts only the branch's own commits (selftest: release-line merge fixture).

@@ -1,0 +1,472 @@
+# I/O half of the Hello BuildRunner adapter twin (pure-Simple port of
+# scripts/bootstrap/hello-sanity-buildrunner.py). Decisions live in
+# scripts/bootstrap/lib/hello_sanity_buildrunner.spl; this file stages the
+# isolated attempt, drives the manager through the matrix port and reads the
+# manager-verified result back.
+#
+# STABLE ENTRY POINT for the hello-sanity-matrix twin (lane b):
+#
+#   hello_buildrunner_run_lane(port: HelloMatrixPort, ctx: HelloLaneContext,
+#       backend: text, name: text, provider: HelloProvider, target: text)
+#       -> Result<[SdnField], text>
+#
+# Ok(record) is the lane record the matrix writes to
+# `buildrunner-<name>.sdn` (render it with `sdn_record_text`); a failed lane is
+# Ok with status FAIL and a `reason`, exactly like the Python adapter's return
+# value. Err(reason) is only what the Python adapter lets escape as an exception
+# (the lane directory already exists).
+#
+# Trust anchor: in place of the Python interpreter pin, the twin requires the
+# running verified stage binary (`ctx.producer_path`) to hash to
+# `ctx.producer_sha256` before staging and again after the manager verified,
+# and fails closed otherwise (`verify_stage_binary_pin`).
+
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, file_read_bytes, file_copy, file_hash_sha256_or_empty, is_dir, dir_walk, mkdir_p, process_run, remove_file_if_exists}
+use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_mode}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField, BundleMember, sdn_str, sdn_int, sdn_bool, hello_forms, runtime_external_headers, task_budget_seconds, lane_status, is_hex64, target_matches_host, verify_result_receipt, memory_receipt_relative, verify_memory_receipt, parse_sdn_record, verify_lane_records, records_equal, record_text, expected_lane_identity, bundle_members, admit_bundle_members, executable_name, BUNDLE_MAX_BYTES, JOB_MANIFEST, MONITOR_VERDICT, LANE_COMMAND_MANIFEST, LANE_COMMAND_MANAGER_RUN, LANE_COMMAND_MANAGER_VERIFY, MEMORY_POLICY_MONITOR}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.common.text_bytes.{text_to_bytes, bytes_to_text}
+use std.common.crypto.sha256.{sha256_u8_hex}
+# io_runtime.file_write{,_bytes} collide with the private file_ops twins
+# under the seed's same-signature co-compile (one body silently wins and the
+# private one is then refused), so the twin calls the shared native writer.
+extern fn rt_file_size(path: text) -> i64
+
+fn file_size_of(path: text) -> i64:
+    # io_runtime.file_size collides with a private file_ops name on the seed.
+    rt_file_size(host_path_native(path))
+
+fn write_bytes(path: text, data: [u8]) -> bool:
+    file_write_bytes_tagged_native(host_path_native(path), data)
+
+fn write_text(path: text, content: text) -> bool:
+    write_bytes(path, text_to_bytes(content))
+
+
+val WORKER_SCRIPT = "scripts/bootstrap/hello-sanity-buildrunner-worker.spl"
+val FIXTURES = "test/fixtures/bootstrap/hello_sanity_matrix"
+
+# The matrix side of the adapter. `run` launches one recorded lane command
+# (seconds 0 = the matrix default timeout) and returns its stdout, or Err with
+# the reason the Python Matrix.run would raise. `check_executable` runs the
+# published Hello executable and returns Err when it does not pass.
+struct HelloMatrixPort:
+    run: fn(text, text, [text], i64) -> Result<text, text>
+    check_executable: fn(text, text) -> Result<bool, text>
+
+struct RuntimeHash:
+    relative: text
+    sha256: text
+
+struct HelloLaneContext:
+    out: text
+    root: text
+    runtime: text
+    compiler: text
+    sha: text
+    linker: text
+    runtime_hashes: [RuntimeHash]
+    phase: i64
+    max_rss_kib: i64
+    timeout_seconds: i64
+    compile_route: text
+    min_free_disk_bytes: i64
+    max_log_bytes: i64
+    windows_abi: text
+    trace_stages: bool
+    memory_policy: text
+    host_machine: text
+    host_os: text
+    producer_path: text
+    producer_sha256: text
+
+struct HelloProvider:
+    manager: text
+    manifest_writer: text
+    template: text
+
+pub fn digest(path: text) -> Result<text, text>:
+    """matrix_digest: sha256 of a regular file, or the Python FileNotFoundError text."""
+    if not file_exists(path) or is_dir(path):
+        return Err("[Errno 2] No such file or directory: '" + path + "'")
+    val sha = file_hash_sha256_or_empty(path)
+    if sha == "": return Err("cannot hash " + path)
+    Ok(sha)
+
+pub fn verify_stage_binary_pin(path: text, pin: text) -> Result<text, text>:
+    """Trust anchor: the running verified stage binary must hash to its pin."""
+    if not is_hex64(pin): return Err("stage binary pin missing or malformed")
+    if path == "" or not file_exists(path): return Err("running stage binary unavailable")
+    val sha = file_hash_sha256_or_empty(path)
+    if sha != pin: return Err("running stage binary does not match its pin")
+    Ok(sha)
+
+pub fn prepare_private_roots(paths: [text]) -> Result<(), text>:
+    """Fresh 0700 roots; an existing root is never reused (mkdir without exist_ok)."""
+    for path in paths:
+        val made = directory_create_mode(path, 0o700)
+        if made == -17: return Err("[Errno 17] File exists: '" + path + "'")
+        if made != 0: return Err("cannot create private root " + path)
+    Ok(())
+
+fn parent_of(path: text) -> text:
+    val at = path.last_index_of("/") ?? -1
+    if at <= 0: return path
+    path.substring(0, at)
+
+fn copy_file_into(source: text, destination: text) -> Result<(), text>:
+    if not file_exists(source) or is_dir(source):
+        return Err("[Errno 2] No such file or directory: '" + source + "'")
+    mkdir_p(parent_of(destination))
+    if not file_copy(source, destination): return Err("cannot copy " + source)
+    Ok(())
+
+fn copy_tree(source: text, destination: text) -> Result<(), text>:
+    """shutil.copytree(symlinks=False): regular files under source, relative paths kept."""
+    if not is_dir(source): return Err("[Errno 2] No such file or directory: '" + source + "'")
+    mkdir_p(destination)
+    val prefix = source + "/"
+    for entry in dir_walk(source):
+        val path = if entry.starts_with(prefix): entry else: prefix + entry
+        if not is_dir(path):
+            copy_file_into(path, destination + "/" + path.substring(prefix.len(), path.len()))?
+    Ok(())
+
+fn relative_files(root: text) -> [text]:
+    var out: [text] = []
+    val prefix = root + "/"
+    for entry in dir_walk(root):
+        val path = if entry.starts_with(prefix): entry else: prefix + entry
+        if not is_dir(path):
+            out.push(path.substring(prefix.len(), path.len()))
+    out
+
+fn lower_sorted(items: [text]) -> [text]:
+    """sorted(key=str.lower); ties keep input order (Python's sort is stable)."""
+    var out: [text] = []
+    for item in items:
+        var at = out.len()
+        while at > 0 and out[at - 1].lower() > item.lower():
+            at = at - 1
+        out.insert(at, item)
+    out
+
+# ---------------------------------------------------------------------------
+# Worker import closure: the attempt has no other repository root, so every
+# module the .spl worker loads is staged (and digest-pinned) with it.
+# ---------------------------------------------------------------------------
+
+fn module_head(line: text) -> text:
+    var rest = line.substring(4, line.len()).trim()
+    val brace = rest.index_of(".{") ?? -1
+    if brace >= 0: rest = rest.substring(0, brace)
+    if rest.ends_with(".*"): rest = rest.substring(0, rest.len() - 2)
+    val space = rest.index_of(" ") ?? -1
+    if space >= 0: rest = rest.substring(0, space)
+    rest
+
+fn stdlib_variants() -> [text]:
+    """The interpreter's stdlib family search set (path_resolution.rs)."""
+    ["nogc_sync_mut", "nogc_async_mut", "nogc_async_immut", "gc_async_mut", "nogc_async_mut_noalloc", "common"]
+
+fn module_candidates(module: text) -> [text]:
+    val parts = module.split(".")
+    if parts.len() < 2: return []
+    var rest = ""
+    for i in 1..parts.len():
+        rest = if rest == "": parts[i] else: rest + "/" + parts[i]
+    var bases: [text] = []
+    if parts[0] == "scripts":
+        bases.push("scripts")
+    elif parts[0] == "std":
+        bases.push("src/lib")
+        for variant in stdlib_variants():
+            bases.push("src/lib/" + variant)
+    var out: [text] = []
+    for base in bases:
+        out.push(base + "/" + rest + ".spl")
+        out.push(base + "/" + rest + "/__init__.spl")
+    out
+
+fn resolve_module(root: text, module: text) -> [text]:
+    """Every family file the module may resolve to (over-staging is harmless:
+    each staged input is digest-pinned). `use a.b.c` may name a symbol c of
+    module a.b, so the longest resolvable prefix wins."""
+    var parts = module.split(".")
+    while parts.len() >= 2:
+        var found: [text] = []
+        for rel in module_candidates(parts.join(".")):
+            if file_exists(root + "/" + rel): found.push(rel)
+        if found.len() > 0: return found
+        parts = parts[0..(parts.len() - 1)]
+    []
+
+pub fn worker_import_closure(root: text, entry: text) -> Result<[text], text>:
+    """Transitive `use std.*` / `use scripts.*` closure of the worker entry."""
+    var seen: [text] = [entry]
+    var queue: [text] = [entry]
+    while queue.len() > 0:
+        val current = queue[0]
+        queue = queue[1..queue.len()]
+        if not file_exists(root + "/" + current):
+            return Err("worker import closure misses " + current)
+        for raw in file_read(root + "/" + current).split("\n"):
+            val line = raw.trim()
+            if line.starts_with("use std.") or line.starts_with("use scripts."):
+                val module = module_head(line)
+                val found = resolve_module(root, module)
+                if found.len() == 0: return Err("worker import closure cannot resolve " + module)
+                for rel in found:
+                    if not seen.contains(rel):
+                        seen.push(rel)
+                        queue.push(rel)
+    Ok(seen)
+
+# ---------------------------------------------------------------------------
+# Manager-verified evidence
+# ---------------------------------------------------------------------------
+
+pub fn verified_memory_receipt(state: text, receipt: text, output: text, artifact: text, limit: i64, policy: text) -> Result<text, text>:
+    """Bind the worker's memory receipt to the manager's verified result."""
+    if policy != "enforce" and policy != MEMORY_POLICY_MONITOR: return Err("unknown memory policy")
+    val artifact_sha = digest(artifact)?
+    val owner = verify_result_receipt(file_read(receipt), output, artifact_sha)?
+    val memory = state + "/" + memory_receipt_relative(owner)
+    if not file_exists(memory) or is_dir(memory): return Err("worker memory receipt missing")
+    verify_memory_receipt(file_read(memory), owner.identity, limit, policy)?
+    Ok(memory)
+
+fn member_bytes(b: [u8], m: BundleMember) -> Result<[u8], text>:
+    val lh = m.local_offset
+    if lh + 30 > b.len(): return Err("Bad magic number for file header")
+    val sig = b[lh].to_i64() | (b[lh + 1].to_i64() << 8) | (b[lh + 2].to_i64() << 16) | (b[lh + 3].to_i64() << 24)
+    if sig != 0x04034b50: return Err("Bad magic number for file header")
+    val name_len = b[lh + 26].to_i64() | (b[lh + 27].to_i64() << 8)
+    val extra_len = b[lh + 28].to_i64() | (b[lh + 29].to_i64() << 8)
+    if name_len != m.name.len() or lh + 30 + name_len > b.len() or bytes_to_text(b[(lh + 30)..(lh + 30 + name_len)]) != m.name:
+        return Err("File name in directory and header differ")
+    val start = lh + 30 + name_len + extra_len
+    if start + m.comp_size > b.len(): return Err("Truncated file header")
+    val raw = b[start..(start + m.comp_size)]
+    if m.method == 0: return Ok(raw)
+    # ponytail: stored only; std inflate is module-private on this seed (deflate_inflate.spl fails to resolve). Upgrade: pub inflate_bounded, then bound-inflate here.
+    if m.method == 8: return Err("deflated bundle members are not supported by the Simple twin")
+    Err("That compression method is not supported")
+
+fn bytes_text(bytes: [u8]) -> text:
+    bytes_to_text(bytes)
+
+fn member_named(members: [BundleMember], name: text) -> BundleMember?:
+    for m in members:
+        if m.name == name: return Some(m)
+    None
+
+pub fn unpack_verified_lane(bundle: text, destination: text, expected: [SdnField], os_name: text) -> Result<text, text>:
+    """Read only flat, bounded artifacts from a manager-verified task output."""
+    if file_size_of(bundle) > BUNDLE_MAX_BYTES + 1048576: return Err("worker bundle exceeds extraction budget")
+    val b = file_read_bytes(bundle)
+    val members = bundle_members(b)?
+    admit_bundle_members(members)?
+    val identity_member = member_named(members, "managed-lane.sdn")
+    if not identity_member.?: return Err("worker bundle member missing")
+    val identity = parse_sdn_record(bytes_text(member_bytes(b, identity_member.unwrap())?))?
+    if not records_equal(identity, expected): return Err("managed lane identity mismatch")
+    val result_member = member_named(members, "result.sdn")
+    if not result_member.?: return Err("worker bundle member missing")
+    val result = parse_sdn_record(bytes_text(member_bytes(b, result_member.unwrap())?))?
+    verify_lane_records(identity, result, expected)?
+    val executable = executable_name(os_name)
+    val exe_member = member_named(members, executable)
+    if not exe_member.?: return Err("worker bundle member missing")
+    val exe_bytes = member_bytes(b, exe_member.unwrap())?
+    val exe_sha = sha256_u8_hex(exe_bytes)
+    if exe_sha == "" or exe_sha != record_text(result, "executable_sha256"):
+        return Err("worker executable identity mismatch")
+    val made = directory_create_mode(destination, 0o777)
+    if made == -17: return Err("[Errno 17] File exists: '" + destination + "'")
+    if made != 0: return Err("cannot create " + destination)
+    for m in members:
+        if not write_bytes(destination + "/" + m.name, member_bytes(b, m)?):
+            return Err("cannot extract " + m.name)
+    val artifact = destination + "/" + executable
+    if os_name != "windows":
+        val (_o, _e, chmod_rc) = process_run("chmod", ["u+x", artifact])
+        if chmod_rc != 0: return Err("cannot mark artifact executable")
+    Ok(artifact)
+
+# ---------------------------------------------------------------------------
+# The lane
+# ---------------------------------------------------------------------------
+
+pub fn staged_helpers() -> [text]:
+    """Non-Simple helpers the matrix twin launches (shared with the Python lane)."""
+    ["scripts/bootstrap/bootstrap-session-exec.c",
+     "scripts/resource/macos-process-observer.c",
+     "scripts/resource/macos-observer-denial-policy.h",
+     "scripts/resource/process-tree-rss-watchdog.pl"]
+
+pub fn worker_argv(ctx: HelloLaneContext, backend: text, name: text, target: text, output: text) -> [text]:
+    var argv: [text] = ["run", WORKER_SCRIPT,
+        "--backend", backend, "--lane", name, "--phase", "{ctx.phase}",
+        "--target", target,
+        "--compile-route", ctx.compile_route, "--compiler-sha256", ctx.sha,
+        "--producer-sha256", ctx.producer_sha256,
+        "--timeout-seconds", "{ctx.timeout_seconds}",
+        "--max-rss-kib", "{ctx.max_rss_kib}",
+        "--min-free-disk-bytes", "{ctx.min_free_disk_bytes}",
+        "--max-log-bytes", "{ctx.max_log_bytes}",
+        "--linker", ctx.linker, "--windows-abi", ctx.windows_abi,
+        "--output", output]
+    if ctx.trace_stages: argv.push("--trace-stages")
+    argv
+
+pub fn manifest_argv(ctx: HelloLaneContext, provider: HelloProvider, source: text, manifest: text, backend: text, name: text, target: text, output: text) -> [text]:
+    val task_seconds = task_budget_seconds(ctx.timeout_seconds)
+    var argv: [text] = ["--job-from-inventory", provider.template, ctx.producer_path,
+        source, "hello", "sanity", output, "inputs.txt",
+        "--memory-limit-bytes", "{ctx.max_rss_kib * 1024}",
+        "--links-inventory", "links.txt", "--work-timeout-ms", "{task_seconds * 1000}"]
+    if ctx.memory_policy == MEMORY_POLICY_MONITOR:
+        argv.push("--memory-policy")
+        argv.push("monitor")
+    argv.push("--manifest")
+    argv.push(manifest)
+    argv.push("--")
+    for a in worker_argv(ctx, backend, name, target, output):
+        argv.push(a)
+    argv
+
+fn initial_record(ctx: HelloLaneContext, backend: text, name: text) -> [SdnField]:
+    [sdn_int("phase", ctx.phase), sdn_str("backend", backend), sdn_str("lane", name),
+     sdn_str("compile_route", ctx.compile_route), sdn_str("compiler_sha256", ctx.sha),
+     sdn_str("status", "FAIL"), sdn_bool("admitted", false)]
+
+fn set_field(fields: [SdnField], field: SdnField) -> [SdnField]:
+    """dict.update: replace in place, else append (Python insertion order)."""
+    var out: [SdnField] = []
+    var replaced = false
+    for f in fields:
+        if f.key == field.key:
+            out.push(field)
+            replaced = true
+        else:
+            out.push(f)
+    if not replaced: out.push(field)
+    out
+
+struct PassEvidence:
+    status: text
+    fields: [SdnField]
+
+fn stage_source(ctx: HelloLaneContext, source: text) -> Result<(), text>:
+    mkdir_p(source)
+    for rel in worker_import_closure(ctx.root, WORKER_SCRIPT)?:
+        copy_file_into(ctx.root + "/" + rel, source + "/" + rel)?
+    for rel in staged_helpers():
+        copy_file_into(ctx.root + "/" + rel, source + "/" + rel)?
+    copy_tree(ctx.root + "/" + FIXTURES, source + "/" + FIXTURES)?
+    # The compiler builds its core C runtime objects from src/runtime even when
+    # linking the prebuilt archive; the isolated attempt has no other root.
+    copy_tree(ctx.root + "/src/runtime", source + "/src/runtime")?
+    for rel in runtime_external_headers():
+        copy_file_into(ctx.root + "/" + rel, source + "/" + rel)?
+    val staged_compiler = source + "/" + (if ctx.host_os == "windows": "compiler.exe" else: "compiler")
+    copy_file_into(ctx.compiler, staged_compiler)?
+    for entry in ctx.runtime_hashes:
+        val destination = source + "/runtime/" + entry.relative
+        copy_file_into(ctx.runtime + "/" + entry.relative, destination)?
+        if digest(destination)? != entry.sha256:
+            return Err("runtime authority changed during staging")
+    if digest(staged_compiler)? != ctx.sha:
+        return Err("compiler changed during staging")
+    val paths = lower_sorted(relative_files(source))
+    var lowered: [text] = []
+    for p in paths:
+        val l = p.lower()
+        if lowered.contains(l): return Err("invalid or ambiguous BuildRunner input inventory")
+        lowered.push(l)
+    if paths.len() == 0: return Err("invalid or ambiguous BuildRunner input inventory")
+    var inventory = ""
+    for p in paths:
+        inventory = inventory + p + "\n"
+    write_text(source + "/inputs.txt", inventory)
+    write_text(source + "/links.txt", "")
+    Ok(())
+
+fn lane_body(port: HelloMatrixPort, ctx: HelloLaneContext, lane: text, backend: text, name: text, provider: HelloProvider, target: text) -> Result<PassEvidence, text>:
+    if not hello_forms().contains(name): return Err("unsupported Hello form")
+    if not target_matches_host(target, ctx.host_machine, ctx.host_os, ctx.windows_abi):
+        return Err("BuildRunner target differs from native linkage host")
+    val producer_sha = verify_stage_binary_pin(ctx.producer_path, ctx.producer_sha256)?
+    val manager_sha = digest(provider.manager)?
+    val writer_sha = digest(provider.manifest_writer)?
+    val template_sha = digest(provider.template)?
+    val source = lane + "/source"
+    stage_source(ctx, source)?
+    val manifest = lane + "/" + JOB_MANIFEST
+    val state = lane + "/state"
+    val published = lane + "/published"
+    val output = "hello-result.zip"
+    val task_seconds = task_budget_seconds(ctx.timeout_seconds)
+    (port.run)(lane, LANE_COMMAND_MANIFEST, [provider.manifest_writer] + manifest_argv(ctx, provider, source, manifest, backend, name, target, output), 0)?
+    prepare_private_roots([state, published])?
+    val args: [text] = ["--manifest", manifest, "--state", state, "--source-root", source, "--output-root", published]
+    var run_argv: [text] = [provider.manager, "run"] + args
+    if ctx.trace_stages: run_argv.push("--trace-stages")
+    (port.run)(lane, LANE_COMMAND_MANAGER_RUN, run_argv, task_seconds + 30)?
+    val verified = (port.run)(lane, LANE_COMMAND_MANAGER_VERIFY, [provider.manager, "verify"] + args, 0)?
+    if not verified.contains("builder: verified tasks=1"):
+        return Err("manager did not verify the expected task")
+    val receipt = state + "/receipts/hello.sdn"
+    val bundle = published + "/" + output
+    if not file_exists(receipt) or not file_exists(bundle) or is_dir(bundle) or file_size_of(bundle) <= 0:
+        return Err("verified receipt or published bundle missing")
+    val memory = verified_memory_receipt(state, receipt, output, bundle, ctx.max_rss_kib * 1024, ctx.memory_policy)?
+    val artifact = unpack_verified_lane(bundle, lane + "/verified",
+        expected_lane_identity(name, backend, ctx.phase, ctx.compile_route, ctx.sha), ctx.host_os)?
+    (port.check_executable)(lane, artifact)?
+    if digest(provider.manager)? != manager_sha or digest(provider.manifest_writer)? != writer_sha or digest(provider.template)? != template_sha or verify_stage_binary_pin(ctx.producer_path, producer_sha).is_err():
+        return Err("BuildRunner provider identity changed during execution")
+    val status = lane_status(ctx.memory_policy)?
+    val fields = pass_fields(digest(artifact)?, digest(receipt)?, digest(memory)?, digest(bundle)?,
+        producer_sha, manager_sha, writer_sha, template_sha, ctx.memory_policy)
+    if ctx.memory_policy == MEMORY_POLICY_MONITOR: print(MONITOR_VERDICT)
+    Ok(PassEvidence(status: status, fields: fields))
+
+pub fn pass_fields(exe: text, receipt: text, memory: text, bundle: text, producer: text, manager: text, writer: text, template: text, policy: text) -> [SdnField]:
+    """Python run_lane's PASS `values.update(...)` keys, same names and order.
+
+    `python_sha256` keeps the Python key so every record consumer is unchanged;
+    in the twin it carries the pinned running stage binary's digest (the
+    producer that replaces the Python interpreter as trust anchor).
+    """
+    var fields: [SdnField] = [
+        sdn_str("executable_sha256", exe), sdn_str("receipt_sha256", receipt),
+        sdn_str("memory_receipt_sha256", memory), sdn_str("bundle_sha256", bundle),
+        sdn_str("python_sha256", producer), sdn_str("manager_sha256", manager),
+        sdn_str("manifest_writer_sha256", writer), sdn_str("template_sha256", template)]
+    if policy == MEMORY_POLICY_MONITOR:
+        fields.push(sdn_str("memory_policy", "monitor"))
+        fields.push(sdn_str("evidence_scope", "functional-only-memory-deferred"))
+        fields.push(sdn_str("verdict", MONITOR_VERDICT))
+    fields
+
+pub fn hello_buildrunner_run_lane(port: HelloMatrixPort, ctx: HelloLaneContext, backend: text, name: text, provider: HelloProvider, target: text) -> Result<[SdnField], text>:
+    """Dispatch compile, explicit link and execution within one enforced task."""
+    val lane = ctx.out + "/buildrunner-" + backend + "-" + name
+    val made = directory_create_mode(lane, 0o777)
+    if made == -17: return Err("[Errno 17] File exists: '" + lane + "'")
+    if made != 0: return Err("cannot create " + lane)
+    var record = initial_record(ctx, backend, name)
+    match lane_body(port, ctx, lane, backend, name, provider, target):
+        case Ok(evidence):
+            record = set_field(record, sdn_str("status", evidence.status))
+            for f in evidence.fields:
+                record = set_field(record, f)
+        case Err(reason):
+            record = set_field(record, sdn_str("reason", reason))
+    Ok(record)
+
+pub fn hello_buildrunner_run_one_source(port: HelloMatrixPort, ctx: HelloLaneContext, backend: text, provider: HelloProvider, target: text) -> Result<[SdnField], text>:
+    hello_buildrunner_run_lane(port, ctx, backend, "one-source", provider, target)

@@ -368,7 +368,7 @@ pub struct Lowerer {
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
     pub(super) global_enum_defs: Option<GlobalEnumDefs>,
     /// `user_option_shaped_enums`, keyed by the type count it was built at.
-    pub(super) user_option_shaped_cache: Option<(usize, std::sync::Arc<Vec<(i64, Option<i64>)>>)>,
+    pub(super) user_option_shaped_cache: Option<(usize, std::sync::Arc<Vec<(i64, Option<i64>, bool)>>)>,
     /// Bare enum names declared by several modules; their `global_enum_defs`
     /// row is a merged union, so a seeded registration from it is not one
     /// owner's declaration and must not yield a discriminant (#6953).

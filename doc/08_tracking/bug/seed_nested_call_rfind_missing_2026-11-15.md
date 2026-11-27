@@ -64,3 +64,10 @@ Add `"rfind" | "last_index_of"` to the chained `Value::Str` arm, matching
   - `test/01_unit/compiler/wa_src_lane3_workarounds_spec.spl --mode=interpreter`: `7 passed, 0 failed`
   - `test/01_unit/compiler/lint/star_import_fix_edit_spec.spl --mode=interpreter`: `8 passed, 0 failed`
 
+
+
+## Shard Registration (2026-11-27)
+
+- **Workaround site:** `src/compiler/90.tools/fix/rules/impl_/lint_star_import.spl:481-483` (`_resolve_numbered`, tagged `# @workaround bug=seed_nested_call_rfind_missing_2026-11-15 recover=8e96296d9e6 reason=ROOT-FIXED+SEED-GATED`).
+- **Verification (`wa3_shared_bin/simple.exe --mode=interpreter`):** `test/01_unit/compiler/lint/star_import_fix_edit_spec.spl` 8/8 PASS, `test/01_unit/compiler/wa_src_lane3_workarounds_spec.spl` 7/7 PASS.
+- **Shard:** `doc/08_tracking/bug/db/seed_nested_call_rfind_missing_2026-11-15.sdn` (`status=fix-implemented-verification-pending`, waiting for pre-fix frozen Stage-1 seed binaries to be superseded before retiring the workaround).

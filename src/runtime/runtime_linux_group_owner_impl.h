@@ -46,6 +46,7 @@ typedef struct {
     char name[80];
     int64_t started_ms, timeout_ms, peak, current;
     int leader_reaped, tree_empty, timed_out, cancelled, exit_code, kill_pending;
+    int residue_move, residue_done;
 } RtLinuxGroup;
 
 static RtLinuxGroup rt_linux_group = {0};
@@ -741,6 +742,54 @@ SplArray *rt_linux_group_parent_acquire_profiled_at_v3(const char *path,uint64_t
     return rt_lg_parent_acquire_at_mode_v3(path,path_len,attempt,attempt_len,identity,identity_len,1);
 }
 
+/* Leader-residue policy (thirteenth profile word). What a reaped leader that
+ * exited 0 left in its group is frozen, then every member of the frozen group
+ * is written to <delegated root>/simple-engine-<identity>. Membership is the
+ * only selector. The caller falls through to the unchanged kill, which retires
+ * the helper group and anything that was not moved. A move that does not
+ * finish kills the engine group it made: no half-filled group stays alive.
+ * The engine group takes no limit of its own; it stays under the delegated
+ * root's. Its owner finds it by this fixed name and retires it. */
+static int rt_lg_move_residue_v3(RtLinuxGroup *owner) {
+    static char members[65536];
+    char name[80], events[256], *line, *end;
+    int engine = -1, frozen = 0, moved = 0;
+    if (!rt_lg_delegation.active || !owner->stream_mode || owner->stream_identity[0] == 0) return 0;
+    snprintf(name, sizeof(name), "simple-engine-%s", owner->stream_identity);
+    if (!rt_lg_write_at(owner->group_fd, "cgroup.freeze", "1")) return 0;
+    for (int attempt = 0; attempt < 200 && !frozen; attempt++) {
+        if (!rt_lg_read_at(owner->group_fd, "cgroup.events", events, sizeof(events))) return 0;
+        frozen = strstr(events, "frozen 1\n") != NULL;
+        if (!frozen) (void)poll(NULL, 0, 5);
+    }
+    if (!frozen) return 0;
+    /* Never adopt an existing directory: its membership is not this group's. */
+    if (mkdirat(rt_lg_delegation.root_fd, name, 0700) != 0) return 0;
+    engine = openat(rt_lg_delegation.root_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (engine < 0) goto undo;
+    members[0] = 0;
+    if (!rt_lg_read_at(owner->group_fd, "cgroup.procs", members, sizeof(members)) && errno != ENODATA) goto undo;
+    for (line = members; *line; line = end) {
+        int64_t member = 0;
+        end = strchr(line, '\n');
+        if (!end) goto undo;
+        *end++ = 0;
+        if (!rt_lg_number(line, &member) || member <= 0) goto undo;
+        /* A member that is already gone has nothing to move. */
+        if (!rt_lg_write_at(engine, "cgroup.procs", line) && errno != ESRCH) goto undo;
+    }
+    members[0] = 0;
+    if (rt_lg_read_at(owner->group_fd, "cgroup.procs", members, sizeof(members)) || errno != ENODATA) goto undo;
+    moved = 1;
+undo:
+    if (!moved) {
+        if (engine >= 0) (void)rt_lg_write_at(engine, "cgroup.kill", "1");
+        (void)unlinkat(rt_lg_delegation.root_fd, name, AT_REMOVEDIR);
+    }
+    if (engine >= 0) close(engine);
+    return moved;
+}
+
 static int rt_lg_poll(RtLinuxGroup *owner) {
     /* A scope acquired without cloning a child is not a reaped child tree. */
     if(owner->no_child_scope)return EPROTO;
@@ -771,6 +820,13 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     int populated = 1;
     char current_text[128];
     if (!rt_lg_populated(owner->group_fd, &populated)) return EIO;
+    /* One attempt per group, only for a leader that exited 0 on its own. */
+    if (owner->leader_reaped && populated && owner->residue_move && !owner->residue_done) {
+        owner->residue_done = 1;
+        if (owner->exit_code == 0 && !owner->timed_out && !owner->cancelled && !owner->kill_pending)
+            (void)rt_lg_move_residue_v3(owner);
+        if (!rt_lg_populated(owner->group_fd, &populated)) return EIO;
+    }
     /* Retire remaining descendants even when resource telemetry fails.
      * Telemetry errors still retain ownership and block collection. */
     if (owner->leader_reaped && populated) {
@@ -832,13 +888,17 @@ int64_t rt_linux_group_stream_admit_v2(const char* path,int64_t length) {
     close(fd);return error;
 }
 /* Exactly twelve tagged integers; no coercion from text/bool/pointers. */
-typedef struct RtGroupStreamProfileV3 { int64_t v[12]; char broker[4096], policy[65]; } RtGroupStreamProfileV3;
+typedef struct RtGroupStreamProfileV3 { int64_t v[13]; char broker[4096], policy[65]; } RtGroupStreamProfileV3;
 static int rt_lg_profile_parse_v3(const char* broker,int64_t broker_len,
         const char* policy,int64_t policy_len,SplArray* words,RtGroupStreamProfileV3* out) {
-    if(!words||rt_array_len(words)!=12||!rt_lg_copy_text(broker,(uint64_t)broker_len,out->broker,sizeof(out->broker))||
+    /* Twelve words, or thirteen whose last is exactly 1: the leader-residue policy. */
+    int64_t count=words?rt_array_len(words):0;
+    if((count!=12&&count!=13)||!rt_lg_copy_text(broker,(uint64_t)broker_len,out->broker,sizeof(out->broker))||
        !rt_lg_canonical_path(out->broker)||!rt_lg_hex_digest(policy,(uint64_t)policy_len,out->policy))return 0;
-    for(int i=0;i<12;i++) { int64_t value=rt_array_get(words,i);
+    out->v[12]=0;
+    for(int i=0;i<count;i++) { int64_t value=rt_array_get(words,i);
         if(!rt_value_is_int(value))return 0;out->v[i]=rt_value_as_int(value); }
+    if(count==13&&out->v[12]!=1)return 0;
     int64_t *v=out->v, multiplier=v[0]<10?1000:100, period=v[0]<10?1000000:100000;
     if(v[0]<=0||v[0]>INT64_MAX/multiplier||v[1]!=v[0]*multiplier||v[2]!=period||
        v[3]<0||v[4]<=0||v[5]<=0||v[6]<1000||v[7]<1000||v[7]>1000000||v[8]<=0||
@@ -1248,7 +1308,8 @@ static SplArray *rt_lg_start_mode_v2(const char *program_data,uint64_t program_l
     memcpy(rt_linux_group.name, name, strlen(name) + 1);
     if(stream){rt_linux_group.stream_mode=1;
         memcpy(rt_linux_group.stream_root,root,strlen(root)+1);
-        memcpy(rt_linux_group.stream_identity,identity,65);}
+        memcpy(rt_linux_group.stream_identity,identity,65);
+        rt_linux_group.residue_move=profile&&profile->v[12]==1;}
     answer[0] = 1; answer[1] = 0;
     parent_fd = group_fd = pidfd = -1; created = 0;
     if(stream) {

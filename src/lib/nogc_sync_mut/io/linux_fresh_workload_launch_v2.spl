@@ -7,12 +7,13 @@ use std.common.contracts.container.linux_fresh_workload_inspect_v2.linux_fresh_w
 use std.common.contracts.container.configuration_inspect_query_v1.{ContainerConfigurationInspectKindV1, container_configuration_inspect_command_v1}
 use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
 use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_child_argv_digest_v2}
+use std.common.build_manager.group_process_stream_profile_v3.GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3
 
 pub fn linux_fresh_workload_project_launch_v2(profile: LinuxFreshEpochProfileV1,
         base: GroupProcessStreamLaunchV2, command: LinuxFreshWorkloadCommandV2) -> Result<GroupProcessStreamLaunchV2, text>:
     linux_fresh_workload_command_validate_v2(command)?
     if base.profile_v3.is_none(): return Err("fresh-workload-profile-required")
-    val resource = base.profile_v3.unwrap()
+    var resource = base.profile_v3.unwrap()
     if resource.helper_cpu.cpu_millis != command.helper_cpu_millis or base.memory_limit_bytes != command.helper_memory_bytes:
         return Err("fresh-workload-helper-subcharge-mismatch")
     val cpu = profile.number_v1("partitionCpuMillis")? - profile.number_v1("reservedCpuMillis")?
@@ -27,10 +28,22 @@ pub fn linux_fresh_workload_project_launch_v2(profile: LinuxFreshEpochProfileV1,
     request.timeout_ms = command.timeout_ms
     request.child_argv_digest = group_process_child_argv_digest_v2(request.program, args)
     result.request = request
+    # Start only: the engine forks the container's monitor from this helper, so what its reaped leader left
+    # is moved into the owner-held engine group instead of dying with the helper group. Part of the identity.
+    # Every other action clears it, whatever the base carried.
+    resource.leader_residue_mode = if command.action == LinuxFreshWorkloadActionV2.Start: GROUP_PROCESS_LEADER_RESIDUE_ENGINE_GROUP_V3 else: ""
+    result.profile_v3 = Some(resource)
     Ok(result)
 
 pub fn linux_fresh_workload_argv_v2(profile: LinuxFreshEpochProfileV1, command: LinuxFreshWorkloadCommandV2) -> Result<[text], text>:
     linux_fresh_workload_command_validate_v2(command)?
+    # Authoritative gate: build roots and a TTY reach argv only when THIS
+    # (installed) profile admits them. Applies to every action of the command.
+    linux_fresh_workload_features_v2(linux_fresh_workload_admission_v2(profile)?, command.build_input_root,
+        command.build_output_root, command.terminal_mode)?
+    # A TTY without --interactive: stdin stays closed, exactly as before.
+    var extensions: [text] = if command.terminal_mode == "tty": ["--tty"] else: []
+    for mount in linux_fresh_workload_build_mounts_v2(command): extensions = extensions + ["--mount", mount]
     val plan = command.request.plan
     val fence = container_scope_fence_id_v2(command.scope)?
     var args = ["--remote=false", "--log-level=error", "--cgroup-manager=cgroupfs", "--root", profile.text_v1("graphRoot")?,
@@ -48,7 +61,7 @@ pub fn linux_fresh_workload_argv_v2(profile: LinuxFreshEpochProfileV1, command: 
                 "--memory=" + str(command.memory_bytes), "--memory-swap=" + str(command.memory_bytes),
                 "--pids-limit=" + str(command.pid_limit), "--network=none", "--read-only", "--read-only-tmpfs=false",
                 "--security-opt=no-new-privileges", "--cap-drop=ALL", "--cgroups=enabled", "--cgroupns=private", "--pid=private",
-                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + profile.text_v1("delegatedCgroup")?,
+                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + profile.text_v1("delegatedCgroup")?] + extensions + [
                 "--entrypoint", command.entrypoint[0], "--", command.image]
             for at in 1..command.entrypoint.len(): args.push(command.entrypoint[at])
             args = args + command.args

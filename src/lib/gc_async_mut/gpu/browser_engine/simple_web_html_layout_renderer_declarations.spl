@@ -1555,6 +1555,7 @@ fn apply_authored_style_metadata(
     st.scrollbar_width_none = previous.scrollbar_width_none
     st.display_inline_flex_authored = previous.display_inline_flex_authored
     st.pointer_events_none = previous.pointer_events_none
+    st.min_width_milli = previous.min_width_milli
     val pointer_events = decl_tbl_get(table, "pointer-events").trim().lower()
     if pointer_events.len() > 0 and pointer_events != "inherit":
         st.pointer_events_none = pointer_events == "none"
@@ -1607,6 +1608,35 @@ fn apply_authored_style_metadata(
         decl_tbl_last_index(table, "place-items") >= 0
     ):
         st.align_items_authored = true
+    val min_width_pos = decl_tbl_last_index(table, "min-width")
+    val min_inline_pos = decl_tbl_last_index(table, "min-inline-size")
+    val min_block_pos = decl_tbl_last_index(table, "min-block-size")
+    var min_width_tok = ""
+    if min_width_pos >= 0:
+        min_width_tok = decl_tbl_get(table, "min-width")
+    if logical_inline_is_height and min_block_pos > min_width_pos:
+        min_width_tok = decl_tbl_get(table, "min-block-size")
+    elif (not logical_inline_is_height) and min_inline_pos > min_width_pos:
+        min_width_tok = decl_tbl_get(table, "min-inline-size")
+    if min_width_tok.len() > 0:
+        val mw_trim = min_width_tok.trim().lower()
+        if mw_trim == "auto" or mw_trim == "none" or mw_trim.starts_with("-"):
+            st.min_width_milli = 0
+        elif mw_trim.contains("%") or mw_trim.ends_with("vw"):
+            st.min_width_milli = -1
+        else:
+            val mw_px = _decl_width_length_px(mw_trim, st.font_size)
+            val mw_frac = _decl_width_frac_milli(mw_trim, st.font_size, mw_px)
+            if mw_px >= 0 and mw_frac >= 0:
+                st.min_width_px = mw_px
+                st.min_width_milli = mw_frac
+            else:
+                st.min_width_milli = 0
+    elif decl_tbl_last_index(table, "width") >= 0:
+        val mw_width_raw = decl_tbl_get(table, "width")
+        val mw_width_implied = css_math_implied_min_px(mw_width_raw)
+        if mw_width_implied > 0 and st.min_width_px == mw_width_implied:
+            st.min_width_milli = 0
     st
 
 fn _apply_decls_on_writing_mode(
@@ -2047,6 +2077,7 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     out.top_auto = st.top_auto
     out.left_milli = st.left_milli
     out.width_milli = st.width_milli
+    out.min_width_milli = st.min_width_milli
     out.top_milli = st.top_milli
     out.right_milli = st.right_milli
     out.bottom_milli = st.bottom_milli

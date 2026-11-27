@@ -1,0 +1,154 @@
+# Owner-side holder of one engine group: `<delegatedCgroup>/simple-engine-<start helper identity>`, the
+# cgroup the group runtime fills by freeze-and-move when a `start` helper's leader is reaped
+# (rt_lg_move_residue_v3). The owner selects it by name under its own retained delegated descriptor and by
+# the device and inode it recorded; it never selects a process. This is the route's only owner-side
+# cgroup.kill, and the caller decides the order (machine_fresh_engine_group_decide_v3): only after the
+# owner's own Stop, Remove and Absence.
+#
+# No descriptor outlives a call. The delegated descriptor is the caller's retained one; the group is
+# re-opened by name each time and its recorded identity compared, which detects a replaced directory
+# without a second descriptor owner on a value-copied record.
+# Decision and host measurement: doc/08_tracking/bug/container_fresh_route_start_helper_kills_conmon_2026-11-27.md
+use std.nogc_sync_mut.io.linux_fresh_workload_abi_v2.*
+use std.nogc_sync_mut.io.time_ops.sleep_ms
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+pub enum LinuxFreshEngineGroupStateV3:
+    Absent
+    Present(identity: text)
+    Retired
+
+pub enum LinuxFreshEngineGroupStepV3:
+    Done
+    Kill
+    Wait
+    Remove
+
+# The only name this holder opens, kills or removes: the fixed prefix and one launch identity digest.
+pub fn linux_fresh_engine_group_name_check_v3(name: text) -> Result<(), text>:
+    if name.byte_len() != 78 or not name.starts_with("simple-engine-") or not builder_digest_valid_v1(name.substring(14, 78)):
+        return Err("fresh-workload-engine-group-name")
+    Ok(())
+
+# @allow(primitive_api) reason: events is the kernel's cgroup.events text; bool is its populated flag
+pub fn linux_fresh_engine_group_populated_v3(events: text) -> Result<bool, text>:
+    var found = 0
+    var populated = false
+    for line in events.split("\n"):
+        if line == "populated 0":
+            found = found + 1
+        elif line == "populated 1":
+            found = found + 1
+            populated = true
+        elif line.starts_with("populated"): return Err("fresh-workload-engine-group-events")
+    if found != 1: return Err("fresh-workload-engine-group-events")
+    Ok(populated)
+
+# @allow(primitive_api) reason: both are statx identity texts of the same directory name; "" means never recorded
+pub fn linux_fresh_engine_group_identity_check_v3(expected: text, observed: text) -> Result<(), text>:
+    if expected != "" and expected != observed: return Err("fresh-workload-engine-group-replaced")
+    Ok(())
+
+# One retirement turn as DATA. `polls` counts the populated reads already made after the kill; the bound is
+# 200 reads five milliseconds apart. A present group is always killed first, populated or not.
+# @allow(primitive_api) reason: closed kernel observations (present, populated) and a poll counter
+pub fn linux_fresh_engine_group_retire_step_v3(present: bool, populated: bool, polls: i64) -> Result<LinuxFreshEngineGroupStepV3, text>:
+    if not present: return Ok(LinuxFreshEngineGroupStepV3.Done)
+    if polls < 1: return Ok(LinuxFreshEngineGroupStepV3.Kill)
+    if not populated: return Ok(LinuxFreshEngineGroupStepV3.Remove)
+    if polls > 200: return Err("fresh-workload-engine-group-still-populated")
+    Ok(LinuxFreshEngineGroupStepV3.Wait)
+
+@when(os="linux"):
+use std.nogc_sync_mut.io.linux_machine_policy_abi_v1.*
+use std.nogc_sync_mut.io.host_identity_store_abi_v1.{write, unlinkat}
+use std.nogc_sync_mut.io.volatile_ops.volatile_write_u8
+
+@unsafe(reason: "opens one fixed control file under the caller's open group descriptor and closes it before returning", capabilities: [ffi, raw_ptr])
+fn engine_group_events_v3(arena: i64, group: i64) -> Result<bool, text>:
+    val pointer = linux_workload_name_v2(arena, "cgroup.events")
+    if pointer == 0: return Err("fresh-workload-engine-group-name")
+    val fd = openat(group as i32, pointer, linux_workload_flags_v2(false), 0u32) as i64
+    if fd < 0: return Err("fresh-workload-engine-group-events-open")
+    val events = linux_workload_text_v2(arena, fd, 4096)
+    if close(fd as i32) != 0: return Err("fresh-workload-engine-group-close")
+    val observed = events?
+    linux_fresh_engine_group_populated_v3(observed)
+
+@unsafe(reason: "writes the single byte 1 to cgroup.kill of the caller's open group descriptor; the write flag is O_WRONLY on the fixed no-follow flags", capabilities: [ffi, raw_ptr])
+fn engine_group_kill_v3(arena: i64, group: i64) -> Result<(), text>:
+    val pointer = linux_workload_name_v2(arena, "cgroup.kill")
+    if pointer == 0: return Err("fresh-workload-engine-group-name")
+    val fd = openat(group as i32, pointer, linux_workload_flags_v2(false) + 1, 0u32) as i64
+    if fd < 0: return Err("fresh-workload-engine-group-kill-open")
+    volatile_write_u8(arena + 8192, 49)
+    val written = write(fd as i32, arena + 8192, 1 as u64)
+    if close(fd as i32) != 0 or written != 1: return Err("fresh-workload-engine-group-kill")
+    Ok(())
+
+@unsafe(reason: "opens the group by fixed name under the caller's retained delegated descriptor, retains the descriptor before statx and closes it on every path", capabilities: [ffi, raw_ptr])
+fn engine_group_open_v3(arena: i64, delegated_fd: i64, name: text, expected: text) -> Result<(i64, text), text>:
+    val pointer = linux_workload_name_v2(arena, name)
+    if pointer == 0: return Err("fresh-workload-engine-group-name")
+    val fd = openat(delegated_fd as i32, pointer, linux_workload_flags_v2(true), 0u32) as i64
+    if fd < 0: return Err("fresh-workload-engine-group-open")
+    val meta = linux_workload_metadata_v2(arena, fd)
+    var checked: Result<(), text> = if meta.is_err(): Err(meta.unwrap_err()) else: Ok(())
+    if checked.is_ok() and (meta.unwrap().mode & 61440) != 16384: checked = Err("fresh-workload-engine-group-directory")
+    if checked.is_ok(): checked = linux_workload_filesystem_v2(arena, fd, 1667723888)
+    if checked.is_ok(): checked = linux_fresh_engine_group_identity_check_v3(expected, meta.unwrap().identity)
+    if checked.is_err():
+        val closed = close(fd as i32)
+        return Err(checked.unwrap_err())
+    Ok((fd, meta.unwrap().identity))
+
+# Read-only: is the group there, and which directory is it. Recorded by the owner after its Start helper
+# retired; an absent group is a start that left nothing behind.
+@unsafe(reason: "opens the named child of the caller's retained delegated descriptor read-only and closes it before returning", capabilities: [ffi, raw_ptr])
+# @allow(primitive_api) reason: arena and delegated_fd are the caller's own retained native handles, name the fixed derived group name
+pub fn linux_fresh_engine_group_observe_v3(arena: i64, delegated_fd: i64, name: text) -> Result<LinuxFreshEngineGroupStateV3, text>:
+    if linux_workload_named_absent_v2(arena, delegated_fd, name).is_ok(): return Ok(LinuxFreshEngineGroupStateV3.Absent)
+    val opened = engine_group_open_v3(arena, delegated_fd, name, "")?
+    if close(opened.0 as i32) != 0: return Err("fresh-workload-engine-group-close")
+    Ok(LinuxFreshEngineGroupStateV3.Present(opened.1))
+
+# Kill, observe the kernel report the group empty, remove it and read its absence back. Absent is done:
+# that is a crash before the move or a start that left nothing. A refusal leaves the group in place under
+# its name, so the same call may be repeated.
+@unsafe(reason: "kills and removes exactly the named child of the caller's retained delegated descriptor after its recorded identity matched", capabilities: [ffi, raw_ptr])
+# @allow(primitive_api) reason: arena and delegated_fd are the caller's own retained native handles; name and expected are the owner's recorded group name and statx identity
+pub fn linux_fresh_engine_group_retire_v3(arena: i64, delegated_fd: i64, name: text, expected: text) -> Result<LinuxFreshEngineGroupStateV3, text>:
+    if linux_workload_named_absent_v2(arena, delegated_fd, name).is_ok(): return Ok(LinuxFreshEngineGroupStateV3.Absent)
+    val opened = engine_group_open_v3(arena, delegated_fd, name, expected)?
+    val fd = opened.0
+    var polls = 0
+    var populated = true
+    var failure = ""
+    var removing = false
+    while failure == "" and not removing:
+        val step = linux_fresh_engine_group_retire_step_v3(true, populated, polls)
+        if step.is_err(): failure = step.unwrap_err()
+        elif step.unwrap() == LinuxFreshEngineGroupStepV3.Kill:
+            val killed = engine_group_kill_v3(arena, fd)
+            if killed.is_err(): failure = killed.unwrap_err()
+        elif step.unwrap() == LinuxFreshEngineGroupStepV3.Wait: sleep_ms(5)
+        elif step.unwrap() == LinuxFreshEngineGroupStepV3.Remove: removing = true
+        else: failure = "fresh-workload-engine-group-step"
+        if failure == "" and not removing:
+            val events = engine_group_events_v3(arena, fd)
+            if events.is_err(): failure = events.unwrap_err()
+            else: populated = events.unwrap()
+            polls = polls + 1
+    if close(fd as i32) != 0 and failure == "": failure = "fresh-workload-engine-group-close"
+    if failure != "": return Err(failure)
+    val pointer = linux_workload_name_v2(arena, name)
+    if pointer == 0: return Err("fresh-workload-engine-group-name")
+    if unlinkat(delegated_fd as i32, pointer, 512) != 0: return Err("fresh-workload-engine-group-remove")
+    linux_workload_named_absent_v2(arena, delegated_fd, name)?
+    Ok(LinuxFreshEngineGroupStateV3.Retired)
+@else:
+# @allow(primitive_api) reason: same signature as the Linux holder above; refuses on every other host
+pub fn linux_fresh_engine_group_observe_v3(arena: i64, delegated_fd: i64, name: text) -> Result<LinuxFreshEngineGroupStateV3, text>: Err("fresh-workload-linux-required")
+# @allow(primitive_api) reason: same signature as the Linux holder above; refuses on every other host
+pub fn linux_fresh_engine_group_retire_v3(arena: i64, delegated_fd: i64, name: text, expected: text) -> Result<LinuxFreshEngineGroupStateV3, text>: Err("fresh-workload-linux-required")
+@end

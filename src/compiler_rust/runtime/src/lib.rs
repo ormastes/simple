@@ -1044,8 +1044,11 @@ pub use value::{
     rt_enum_discriminant,
     rt_enum_id,
     rt_enum_new,
+    rt_enum_new_none,
+    rt_is_none_variant,
     rt_enum_register_name,
     rt_enum_payload,
+    rt_option_float_bits,
     rt_free,
     // Memory operations (raw pointer)
     rt_memcpy,

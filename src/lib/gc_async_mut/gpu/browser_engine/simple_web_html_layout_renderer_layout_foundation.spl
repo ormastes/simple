@@ -255,6 +255,13 @@ class LayoutResult:
     # with `box_device_top_px` and moves every command the box owns by it.
     # DEVICE_TOP_UNSET where the block cursor did not place the node. Empty at k == 1.
     device_top: [i32] = []
+    # Device-px extra height accumulated from auto-height form controls that an
+    # auto-height block ancestor must carry into its painted height and clip edge.
+    end_device_extra_h: i32 = 0
+    # Per node: collapsed nowrap leading whitespace width tables (saved/restored
+    # by layout_selected like pen_origin_milli).
+    nowrap_collapsed_lead_milli: [i32] = []
+    nowrap_collapsed_lead_px: [i32] = []
 
 class LayoutSelectedResult:
     layout: LayoutResult
@@ -1058,7 +1065,9 @@ fn form_control_button_frac_delta_milli_px(nodes: [HNode], styles: [Style], chil
 # rounded UP to a LayoutUnit (1/64 px, `LayoutUnit::FromFloatCeil`), back in
 # milli-px (rounded up). `HTML` at 16px DejaVu Sans is 43.5547 px exact and
 # 43.5625 (2788/64) in Chrome; six such items in a row sum to 357.5, not 357.498.
-fn layout_unit_ceil_milli(milli: i64) -> i64:
+pub fn layout_unit_ceil_milli(milli: i64) -> i64:
+    if milli <= 0:
+        return 0
     val w64 = (milli * 64 + 999) / 1000
     (w64 * 1000 + 63) / 64
 
@@ -1345,6 +1354,7 @@ fn style_with_height(st: Style, height_px: i32) -> Style:
     out.top_auto = st.top_auto
     out.left_milli = st.left_milli
     out.width_milli = st.width_milli
+    out.min_width_milli = st.min_width_milli
     out.top_milli = st.top_milli
     out.right_milli = st.right_milli
     out.bottom_milli = st.bottom_milli
@@ -1382,6 +1392,7 @@ fn style_with_width(st: Style, width_px: i32) -> Style:
     out.top_auto = st.top_auto
     out.left_milli = st.left_milli
     out.width_milli = if width_px == st.width_px: st.width_milli else: -1
+    out.min_width_milli = st.min_width_milli
     out.top_milli = st.top_milli
     out.right_milli = st.right_milli
     out.bottom_milli = st.bottom_milli
@@ -1468,13 +1479,6 @@ fn _lay_table_cell_min_content_width_inner(nodes: [HNode], styles: [Style], chil
 # document without such a run pays nothing.
 pub var g_text_first_line_dx_pending: i32 = 0
 pub var g_text_first_line_dx: [i32] = []
-# Width (px) a `white-space:nowrap` sole run's lead space lost to collapsing
-# into a space already in the pen (see the inline run loop): the box was
-# narrowed by this much, so `layout_with_style`'s nowrap intrinsic bump must
-# not re-widen it, and the run's single wrap range starts past the space so
-# paint slices it off. Handed over like `g_text_first_line_dx_pending` and
-# consumed by the next `#text` laid out.
-pub var g_text_nowrap_lead_collapse_pending: i32 = 0
 # The signed exact remainder (milli-px) a mid-line run's first line has
 # beyond its whole-px `first_dx` inset: the content edge error minus the
 # exact pen error where the run starts. INLINE_PEN_ERR_UNKNOWN when the
@@ -1484,7 +1488,6 @@ pub var g_text_first_line_err_pending: i64 = -1000000000  # INLINE_PEN_ERR_UNKNO
 fn text_first_line_dx_reset():
     g_text_first_line_dx_pending = 0
     g_text_first_line_err_pending = INLINE_PEN_ERR_UNKNOWN
-    g_text_nowrap_lead_collapse_pending = 0
     g_text_first_line_dx = []
 
 # Record node `i`'s inset. Called for EVERY `#text` placed by the inline run
@@ -1595,6 +1598,65 @@ pub fn box_right_edge_err_record(node_count: i32, i: i32, err_milli: i32):
 # @allow(primitive_api)
 pub fn box_right_edge_err_at(i: i32) -> i64:
     if i >= 0 and i < g_box_right_edge_err_milli.len().to_i32(): g_box_right_edge_err_milli[i] as i64 else: 0
+
+# Collapsed leading whitespace width (milli-px and rounded px) stripped from
+# a white-space:nowrap `#text` run after an active space or at line start.
+var g_nowrap_collapsed_lead_milli: [i32] = []
+var g_nowrap_collapsed_lead_px: [i32] = []
+
+pub fn nowrap_collapsed_lead_reset():
+    g_nowrap_collapsed_lead_milli = []
+    g_nowrap_collapsed_lead_px = []
+
+# reason: per-node collapse width tables carried through LayoutResult.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_lead_table_milli() -> [i32]:
+    g_nowrap_collapsed_lead_milli
+
+# reason: per-node collapse px table carried through LayoutResult.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_lead_table_px() -> [i32]:
+    g_nowrap_collapsed_lead_px
+
+# reason: per-node collapse tables restored by layout_selected.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_lead_restore(milli: [i32], px: [i32]):
+    g_nowrap_collapsed_lead_milli = milli
+    g_nowrap_collapsed_lead_px = px
+
+# reason: per-node milli-px / whole-px collapse record, same lifecycle as g_text_pen_origin_milli.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_lead_record(node_count: i32, i: i32, lead_milli: i32, lead_px: i32):
+    if g_nowrap_collapsed_lead_milli.len() == 0:
+        if lead_milli == 0 and lead_px == 0:
+            return
+        g_nowrap_collapsed_lead_milli = zero_i32_list(node_count)
+        g_nowrap_collapsed_lead_px = zero_i32_list(node_count)
+    g_nowrap_collapsed_lead_milli[i] = lead_milli
+    g_nowrap_collapsed_lead_px[i] = lead_px
+
+# reason: node index into per-node collapse table.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_lead_milli_at(i: i32) -> i64:
+    if i >= 0 and i < g_nowrap_collapsed_lead_milli.len().to_i32(): g_nowrap_collapsed_lead_milli[i] as i64 else: 0
+
+# reason: node index into per-node collapse px table.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_lead_px_at(i: i32) -> i32:
+    if i >= 0 and i < g_nowrap_collapsed_lead_px.len().to_i32(): g_nowrap_collapsed_lead_px[i] else: 0
+
+# Post-collapse advance width (whole CSS px) of a nowrap #text run whose
+# leading spaces were stripped from layout advance while preserving raw_bw
+# for Draw IR/raster paint visibility.
+# reason: raw box width and collapse scalars in, positive whole px out.
+# @allow(primitive_api)
+pub fn nowrap_collapsed_post_width_px(rst: Style, raw_bw: i32, collapsed_milli: i64, collapsed_px: i32) -> i32:
+    val p = if rst.resolved_font_width_milli > 0 and rst.resolved_space_milli > 0:
+        val exact_after = rst.resolved_font_width_milli - collapsed_milli
+        if exact_after > 0: ((exact_after + 500) / 1000) as i32 else: 1
+    else:
+        raw_bw - collapsed_px
+    if p > 0: p else: 1
 
 # Sentinel: the inline cursor moved by an advance with no exact width.
 pub val INLINE_PEN_ERR_UNKNOWN: i64 = -1000000000
@@ -1752,44 +1814,52 @@ pub fn inline_item_width_err_milli(nodes: [HNode], styles: [Style], child_index:
         val first = child_index.first_child[c]
         if first < 0 or child_index.next_sibling[first] >= 0 or nodes[first].tag != "#text":
             return INLINE_PEN_ERR_UNKNOWN
+        val first_collapsed = nowrap_collapsed_lead_milli_at(first)
         if bw[c] != bw[first]:
-            return INLINE_PEN_ERR_UNKNOWN
+            if first_collapsed <= 0:
+                return INLINE_PEN_ERR_UNKNOWN
+            val first_post_px = nowrap_collapsed_post_width_px(styles[first], bw[first], first_collapsed, nowrap_collapsed_lead_px_at(first))
+            if bw[c] != first_post_px:
+                return INLINE_PEN_ERR_UNKNOWN
         run = first
     val rst = styles[run]
     if wrap_starts[run].len() > 1 or rst.resolved_font_width_milli < 0:
         return INLINE_PEN_ERR_UNKNOWN
-    if bw[run] == rst.resolved_font_width:
-        return rst.resolved_font_width_milli - (bw[run] as i64) * 1000
+    val collapsed_lead = nowrap_collapsed_lead_milli_at(run)
+    val base_width_milli = rst.resolved_font_width_milli - collapsed_lead
+    val base_width_px = if collapsed_lead > 0:
+        nowrap_collapsed_post_width_px(rst, bw[run], collapsed_lead, nowrap_collapsed_lead_px_at(run))
+    else:
+        rst.resolved_font_width
+    if bw[run] == base_width_px or (collapsed_lead > 0 and bw[run] == rst.resolved_font_width):
+        return base_width_milli - (base_width_px as i64) * 1000
     # A run measured over its trimmed text whose box also holds one or two
     # edge spaces, rounded once with them (`Lead ` is 35.59 + 4.45 -> 40).
     if rst.resolved_space_milli > 0:
+        val space_m = layout_unit_ceil_milli(rst.resolved_space_milli)
         var k: i64 = 1
         while k <= 2:
-            val exact = rst.resolved_font_width_milli + k * rst.resolved_space_milli
-            if (bw[run] as i64) == (exact + 500) / 1000:
-                return exact - (bw[run] as i64) * 1000
+            val exact = base_width_milli + k * rst.resolved_space_milli
+            val exact_lu = base_width_milli + k * space_m
+            if (bw[run] as i64) == (exact + 500) / 1000 or (bw[run] as i64) == (exact_lu + 500) / 1000:
+                return exact_lu - (bw[run] as i64) * 1000
             k = k + 1
         # The same box with its edge space(s) kerned against the run's glyph.
         if rst.resolved_lead_space_milli > 0 or rst.resolved_trail_space_milli > 0:
-            val lead_m = if rst.resolved_lead_space_milli > 0: rst.resolved_lead_space_milli else: rst.resolved_space_milli
-            val trail_m = if rst.resolved_trail_space_milli > 0: rst.resolved_trail_space_milli else: rst.resolved_space_milli
-            val kerned_edges: [i64] = [trail_m, lead_m, lead_m + trail_m]
-            for edge in kerned_edges:
-                val exact = rst.resolved_font_width_milli + edge
-                if (bw[run] as i64) == (exact + 500) / 1000:
-                    return exact - (bw[run] as i64) * 1000
-        # A nowrap run whose lead space collapsed into the pen's space (see
-        # g_text_nowrap_lead_collapse_pending): the box holds the raw run
-        # minus the lead space's own in-run advance.
-        if rst.white_space_nowrap and rst.resolved_font_width_milli >= 0:
-            var collapsed_adv = 0
-            val run_cps = text_codepoints(nodes[run].text_data)
-            if rst.resolved_font_advances.len() == run_cps.len() and rst.resolved_font_advances.len() > 0:
-                collapsed_adv = rst.resolved_font_advances[0]
-            elif rst.resolved_space_milli > 0:
-                collapsed_adv = ((rst.resolved_space_milli + 500) / 1000) as i32
-            if collapsed_adv > 0 and bw[run] == rst.resolved_font_width - collapsed_adv:
-                return rst.resolved_font_width_milli - (collapsed_adv as i64) * 1000 - (bw[run] as i64) * 1000
+
+            val raw_lead_m = if rst.resolved_lead_space_milli > 0: rst.resolved_lead_space_milli else: rst.resolved_space_milli
+            val raw_trail_m = if rst.resolved_trail_space_milli > 0: rst.resolved_trail_space_milli else: rst.resolved_space_milli
+            val lead_m = layout_unit_ceil_milli(raw_lead_m)
+            val trail_m = layout_unit_ceil_milli(raw_trail_m)
+            val raw_edges: [i64] = [raw_trail_m, raw_lead_m, raw_lead_m + raw_trail_m]
+            val lu_edges: [i64] = [trail_m, lead_m, lead_m + trail_m]
+            var ei = 0
+            while ei < 3:
+                val exact = base_width_milli + raw_edges[ei]
+                val exact_lu = base_width_milli + lu_edges[ei]
+                if (bw[run] as i64) == (exact + 500) / 1000 or (bw[run] as i64) == (exact_lu + 500) / 1000:
+                    return exact_lu - (bw[run] as i64) * 1000
+                ei = ei + 1
     INLINE_PEN_ERR_UNKNOWN
 
 # Per-line boxes of wrapped `#text` runs whose lines floats shorten (see
@@ -1975,6 +2045,15 @@ pub fn box_device_top_record(node_count: i32, i: i32, frac_milli: i32):
     val k = g_layout_device_scale
     if k <= 1 or i < 0 or i >= node_count:
         return
+    box_device_top_record_milli(node_count, i, frac_milli * k)
+
+# Records an exact milli DEVICE px top residual for node `i` (k > 1 only).
+# reason: node index, node count and milli-device-px residual are layout-array scalars.
+# @allow(primitive_api)
+pub fn box_device_top_record_milli(node_count: i32, i: i32, dev_milli: i32):
+    val k = g_layout_device_scale
+    if k <= 1 or i < 0 or i >= node_count:
+        return
     if g_box_device_top.len() != node_count:
         var t: [i32] = []
         var n = 0
@@ -1982,7 +2061,7 @@ pub fn box_device_top_record(node_count: i32, i: i32, frac_milli: i32):
             t.push(DEVICE_TOP_UNSET)
             n = n + 1
         g_box_device_top = t
-    g_box_device_top[i] = frac_milli * k
+    g_box_device_top[i] = dev_milli
 
 # An atomic box a LINE placed (a form control) is not on the block cursor: it
 # hangs from the line's baseline, which Chrome finds in device px. Its entry
@@ -2102,6 +2181,17 @@ pub fn line_h_frac_milli(st: Style) -> i32:
         return 0
     val k = g_layout_device_scale
     (style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000) / k
+
+# Per-line CSS milli excess at device scale k for a form control (`textarea`)
+# whose UA font uses device metrics instead of k x CSS line-height.
+# reason: milli CSS px scalar consumed by text_line_frac_record.
+# @allow(primitive_api)
+pub fn form_control_line_frac_milli(st: Style) -> i32:
+    val k = g_layout_device_scale
+    if k <= 1:
+        return 0
+    val diff = style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000
+    if diff >= 0: (diff + k / 2) / k else: 0 - ((0 - diff + k / 2) / k)
 
 # Used line-height of `st` in milli DEVICE px at device scale k: Chrome zooms
 # the computed value, so `20px` is 20k, a number multiplies the device font
@@ -2452,7 +2542,7 @@ pub fn textarea_value_device_lines_record(node_count: i32, i: i32, st: Style):
         return
     val dy = inline_line_strut_baseline_offset_device(st, k) - k * inline_line_strut_baseline_offset(st) + text_device_painter_dy(st, k)
     text_device_dy_record(node_count, i, dy, dy)
-    val step = (style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000) / k
+    val step = form_control_line_frac_milli(st)
     if step != 0:
         text_line_steps_set(node_count, i, 0, step)
         text_line_steps_set(node_count, i, 1, 0)
@@ -2648,6 +2738,7 @@ fn style_with_resolved_percent_min_max(st: Style, containing_w: i32, containing_
     val out = style_with_width(st, st.width_px)
     if st.min_width_px < 0:
         out.min_width_px = if containing_w > 0: containing_w * (0 - st.min_width_px) / 100 else: 0
+        out.min_width_milli = 0
     if st.max_width_px < 0:
         out.max_width_px = if containing_w > 0: containing_w * (0 - st.max_width_px) / 100 else: 0
     if st.min_height_px < 0:
