@@ -482,6 +482,11 @@ The first two behave the same on `r` and on the fixed seed.
   later in the same function. A per-expression marker (the guessed call and
   the locals bound from it) is the follow-up. The declared-return check is
   unchanged.
+- Interaction with (A) after #12260: an untyped (ANY) arm against a typed arm
+  is the `uninferred-any` warning and is never judged here (`join_class` skips
+  ANY). But a call that (A) now instantiates implicitly is TYPED: with
+  `fn un(x): x`, `if c: un(1) else: "t"` is `i64` vs `text` and is E1003 (it
+  printed a garbage word for the text arm on seed `20261128d`).
 - OPEN: a float slice bound (`xs[a:3]` with `a: f64`) is not checked; only the
   plain index is.
 - OPEN: the interpreter accepts a float WRITE index (`xs[1.0] = 99`); the

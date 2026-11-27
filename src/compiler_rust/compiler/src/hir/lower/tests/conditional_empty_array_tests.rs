@@ -612,7 +612,7 @@ fn any_arm_against_a_typed_arm_is_not_a_value_join_error() {
     for body in [
         "    val r = if c: o else: 5\n",
         "    val r = if c: \"t\" else: o\n",
-        "    val r = match n:\n        case 0: o\n        case 1: [1.5]\n        case _: 2\n",
+        "    val r = match n:\n        case 0: o\n        case 1: 2\n        case _: 3\n",
         "    val r = if c: {} else: o\n",
     ] {
         let source = format!("fn probe(o, c: bool, n: i64) -> i64:\n{body}    0\n");
