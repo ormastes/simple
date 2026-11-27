@@ -1,0 +1,56 @@
+# Writes the fresh-owner launch TEMPLATE that podman_shared_api_live_spec reads.
+# Run once in the guest, as root, after the machine policy and the installed
+# fresh-epoch profile exist:
+#   SIMPLE_PODMAN_LIVE_RUN_ROOT=<runRoot of the installed fresh-epoch profile> \
+#     bin/simple run test/fixtures/container/podman_live_launch_template_gen.spl
+# Output: $SIMPLE_PODMAN_LIVE_TEMPLATE, default /etc/simple/podman-live-launch-template.sdn.
+#
+# Only the caller-owned template fields matter: root (<runRoot>/launch-<id>),
+# helper CPU millis, helper memory, a podman operation and the timeout.
+# `linux_fresh_epoch_project_launch_v1` re-projects the provider and broker
+# programs, digests, cgroups and broker budget from the installed profile, so
+# the values below for those fields are canonical placeholders, not authority.
+# The helper CPU/memory must fit the profile's partition minus its reserve.
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.nogc_sync_mut.io_runtime.{env_get, file_write_exact}
+
+fn live_template_env_v1(key: text, fallback: text) -> text:
+    val value = env_get(key)
+    if value == "": fallback else: value
+
+fn live_template_build_v1(run_root: text) -> Result<text, text>:
+    if not run_root.starts_with("/") or run_root.ends_with("/"): return Err("run root must be absolute without a trailing slash")
+    val program = "/usr/bin/podman"
+    val args = ["version"]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: [], directory: run_root, inputs: [], timeout_ms: 30000,
+        broker_program: "/usr/libexec/simple/broker", broker_digest: "b".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args), launch_deadline_unix_ms: 0)
+    val profile = GroupProcessStreamProfileV3(helper_cpu: GroupProcessCpuQuotaV3(100, 10000, 100000),
+        broker: GroupProcessBrokerBudgetV3("/sys/fs/cgroup/simple/broker", 1, 1, 1,
+            "c".repeat(64), 10000, 100000, 100, 67108864, 67108864),
+        child_image_mode: "trusted-local-admin-image-fd-v1")
+    val launch = GroupProcessStreamLaunchV2(root: run_root + "/launch-podman-live", worker_id: "podman_live",
+        generation: 1, snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64),
+        memory_limit_bytes: 67108864, request: request, delegated_cgroup_path: "/sys/fs/cgroup/simple",
+        transport_generation: 0, profile_v3: Some(profile))
+    group_process_stream_template_encode_v3(launch)
+
+fn live_template_main_v1():
+    val run_root = env_get("SIMPLE_PODMAN_LIVE_RUN_ROOT")
+    if run_root == "":
+        print "TEMPLATE ERROR: SIMPLE_PODMAN_LIVE_RUN_ROOT unset (runRoot of the installed fresh-epoch profile)"
+        return
+    val output = live_template_env_v1("SIMPLE_PODMAN_LIVE_TEMPLATE", "/etc/simple/podman-live-launch-template.sdn")
+    match live_template_build_v1(run_root):
+        case Ok(payload):
+            if group_process_stream_template_decode_v3(payload).is_err():
+                print "TEMPLATE ERROR: encoded template does not decode"
+                return
+            if not file_write_exact(output, payload):
+                print "TEMPLATE ERROR: cannot write " + output
+                return
+            print "TEMPLATE OK " + output
+        case Err(reason): print "TEMPLATE ERROR: " + reason
+
+live_template_main_v1()
