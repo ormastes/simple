@@ -9,7 +9,7 @@ use compiler.frontend.parser_types.{
     AssocTypeDecl, ParserFunction, ParserImport, ParserModule,
     ParserTypeParam, TraitBound, Variant
 }
-use compiler.frontend.parser_types_expr.{Type}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionTraceV1}
@@ -130,6 +130,11 @@ struct ModuleSurfaceConst:
     has_fixed_address: bool
     fixed_address: i64
     span: Span
+    has_inferred_type_: bool
+    inferred_type_: Type
+    inferred_has_elem_hint: bool
+    inferred_ref_names: [text]
+    inferred_array_depth: i64
 
 struct ModuleSurfaceTypeAlias:
     name: text
@@ -507,6 +512,47 @@ pub(package) fn module_surface_name_position(names: [text], name: text) -> i64:
             return position
         position = position + 1
     -1
+
+fn _module_surface_type_lists_equal(left: [Type], right: [Type]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if not module_surface_parser_types_equal(left[i], right[i]):
+            return false
+        i = i + 1
+    true
+
+# @allow(primitive_api)  # reason: package-internal compiler AST Type structural equality predicate
+pub(package) fn module_surface_parser_types_equal(left: Type, right: Type) -> bool:
+    """Structural equality for parser Type ASTs retained on module surfaces."""
+    match left.kind:
+        case TypeKind.Named(ln, la):
+            match right.kind:
+                case TypeKind.Named(rn, ra):
+                    ln == rn and _module_surface_type_lists_equal(la, ra)
+                case _: false
+        case TypeKind.Array(le, _):
+            match right.kind:
+                case TypeKind.Array(re, _):
+                    module_surface_parser_types_equal(le, re)
+                case _: false
+        case TypeKind.Tuple(ls):
+            match right.kind:
+                case TypeKind.Tuple(rs):
+                    _module_surface_type_lists_equal(ls, rs)
+                case _: false
+        case TypeKind.Optional(li):
+            match right.kind:
+                case TypeKind.Optional(ri):
+                    module_surface_parser_types_equal(li, ri)
+                case _: false
+        case TypeKind.Function(lp, lr):
+            match right.kind:
+                case TypeKind.Function(rp, rr):
+                    _module_surface_type_lists_equal(lp, rp) and module_surface_parser_types_equal(lr, rr)
+                case _: false
+        case _: false
 
 # Registry-owned selected bindings. Scalar backing arrays avoid aggregate-map
 # lifetime ambiguity at the staged native boundary. Tags are checked at the API.
