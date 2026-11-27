@@ -56,6 +56,12 @@ pub struct StoreGcV1:
     unreachable: [text]
     moved: StoreCountV1
 
+pub struct StorePinInfoV1:
+    pin_id: text        # "pins/<pin_id>" or, for a tomb, the id the pin was released under
+    location: text      # "pins" | "tomb"
+    tomb: text          # staging dir name holding the pin ("" when location is "pins")
+    refs: [text]
+
 struct Isv1DocV1:
     fields: Dict<text, text>
     keys: [text]
@@ -1289,25 +1295,122 @@ fn _isv1_release_pin_finish(root: text, pin_id: text, owner: text, tomb: text) -
             case Ok(value): value
             case Err(_): ""
         if moved_owner != owner:
-            var restored = false
-            val target = _isv1_pin_path(root, pin_id)
-            if not file_exists(target) and not is_dir(target):
-                restored = rename_path(tomb + "/pin", target)
-            var n: i64 = 1
-            while not restored and n <= 8 and (pin_id.byte_len() + 3) <= 128:
-                val alt = _isv1_pin_path(root, pin_id + ".r{n}")
-                if not file_exists(alt) and not is_dir(alt):
-                    restored = rename_path(tomb + "/pin", alt)
-                n = n + 1
-            if restored:
+            if _isv1_pin_restore(root, pin_id, tomb + "/pin"):
                 dir_remove_all(tomb)
                 return "pin-owner-changed"
             # Not restorable: keep the foreign pin in its tomb and mark it so the
-            # staging sweeper never deletes it (GC does not see it there).
-            file_write_bytes(tomb + "/keep", "pin-owner-changed".bytes())
+            # staging sweeper never deletes it (GC does not see it there). The
+            # marker records the pin id so its owner can find and reclaim it
+            # (`immutable_store_v1_list_owner_pins`, `immutable_store_v1_reclaim_pin_tomb`).
+            file_write_bytes(tomb + "/keep", ("id=" + pin_id).bytes())
             return "pin-owner-changed-unrestored"
     # Released: the tombstone is private staging garbage, never read by GC.
     dir_remove_all(tomb)
+    ""
+
+# Moves the pin directory `src` to `pins/<pin_id>`, or `pins/<pin_id>.r<n>` when
+# that id is taken (never clobbering). False when no name fits or every rename lost.
+fn _isv1_pin_restore(root: text, pin_id: text, src: text) -> bool:
+    val target = _isv1_pin_path(root, pin_id)
+    if not file_exists(target) and not is_dir(target):
+        if rename_path(src, target):
+            return true
+    var n: i64 = 1
+    while n <= 8 and (pin_id.byte_len() + 3) <= 128:
+        val alt = _isv1_pin_path(root, pin_id + ".r{n}")
+        if not file_exists(alt) and not is_dir(alt):
+            if rename_path(src, alt):
+                return true
+        n = n + 1
+    false
+
+fn _isv1_pin_owner_of(pin_dir: text) -> text:
+    val owner_path = pin_dir + "/owner"
+    if not file_exists(owner_path):
+        return ""
+    match file_read_regular_no_follow_bounded(owner_path, 512):
+        case Ok(value): value
+        case Err(_): ""
+
+fn _isv1_pin_ref_names(pin_dir: text) -> [text]:
+    var out: [text] = []
+    val refs_dir = pin_dir + "/refs"
+    if not is_dir(refs_dir):
+        return out
+    for entry in dir_list(refs_dir):
+        val name = entry.trim()
+        if name != "":
+            out.push(name)
+    out
+
+# The keep marker holds `id=<pin id>`; an older marker without it falls back to
+# the tomb name (still a valid pin id).
+fn _isv1_tomb_pin_id(tomb_dir: text, tomb_name: text) -> text:
+    val marker = match file_read_regular_no_follow_bounded(tomb_dir + "/keep", 512):
+        case Ok(value): value
+        case Err(_): ""
+    if marker.starts_with("id="):
+        val id = marker.substring(3, marker.byte_len())
+        if _isv1_name_valid(id):
+            return id
+    tomb_name
+
+# Every pin `owner` holds: live `pins/<id>` and restored `pins/<id>.r<n>` copies
+# (location "pins"), plus keep-marked tombs under staging/ whose foreign pin
+# could not be restored (location "tomb"; `tomb` names the staging dir). Refs
+# stay GC-reachable only while under pins/; a tomb's refs are listed so the
+# owner can reclaim or release it. Release a "pins" entry with
+# `immutable_store_v1_release_pin(root, pin_id, owner)` (`.r<n>` ids are valid),
+# a "tomb" entry with `immutable_store_v1_reclaim_pin_tomb`.
+pub fn immutable_store_v1_list_owner_pins(root: text, owner: text) -> [StorePinInfoV1]:
+    var out: [StorePinInfoV1] = []
+    if root == "" or owner == "" or not _isv1_owner_valid(owner):
+        return out
+    val pins_root = _isv1_join(root, "pins")
+    if is_dir(pins_root):
+        for entry in dir_list(pins_root):
+            val name = entry.trim()
+            if not _isv1_name_valid(name):
+                continue
+            val pin_dir = pins_root + "/" + name
+            if is_dir(pin_dir) and _isv1_pin_owner_of(pin_dir) == owner:
+                out.push(StorePinInfoV1(pin_id: name, location: "pins", tomb: "", refs: _isv1_pin_ref_names(pin_dir)))
+    val staging_root = _isv1_join(root, "staging")
+    if is_dir(staging_root):
+        for entry in dir_list(staging_root):
+            val name = entry.trim()
+            if not name.starts_with("pinrel-") or not _isv1_name_valid(name):
+                continue
+            val tomb_dir = staging_root + "/" + name
+            if is_dir(tomb_dir) and file_exists(tomb_dir + "/keep") and _isv1_pin_owner_of(tomb_dir + "/pin") == owner:
+                out.push(StorePinInfoV1(pin_id: _isv1_tomb_pin_id(tomb_dir, name), location: "tomb", tomb: name, refs: _isv1_pin_ref_names(tomb_dir + "/pin")))
+    out
+
+# Owner-requested handling of a keep-marked tomb from `list_owner_pins`. With
+# `release` false the pin is moved back under pins/ (as `<id>` or `<id>.r<n>`,
+# never clobbering) so the owner controls its refs again (objects GC moved to
+# quarantine while the pin sat in the tomb come back on the next `open`); when no
+# name fits it returns "pin-tomb-unrestored" and leaves the tomb. With `release`
+# true the tomb and its refs are deleted. Only the pin's owner may do either.
+pub fn immutable_store_v1_reclaim_pin_tomb(root: text, tomb_name: text, owner: text, release: StoreFlagV1) -> text:
+    val args_reason = _isv1_pin_args_error(root, tomb_name, owner)
+    if args_reason != "":
+        return args_reason
+    if owner == "":
+        return "pin-owner-invalid"
+    if not tomb_name.starts_with("pinrel-"):
+        return "pin-tomb-invalid"
+    val tomb_dir = _isv1_join(root, "staging") + "/" + tomb_name
+    if not is_dir(tomb_dir) or not file_exists(tomb_dir + "/keep") or not is_dir(tomb_dir + "/pin"):
+        return "pin-tomb-missing"
+    if _isv1_pin_owner_of(tomb_dir + "/pin") != owner:
+        return "pin-owner-mismatch"
+    if release.value:
+        dir_remove_all(tomb_dir)
+        return ""
+    if not _isv1_pin_restore(root, _isv1_tomb_pin_id(tomb_dir, tomb_name), tomb_dir + "/pin"):
+        return "pin-tomb-unrestored"
+    dir_remove_all(tomb_dir)
     ""
 
 # After a pinned ingest wrote its ref, confirm the pin still holds it.
