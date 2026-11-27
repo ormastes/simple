@@ -9,7 +9,7 @@ use std.common.hash.hash_policy_v1.{hash_policy_v1_digest, HASH_POLICY_V1_XXH3_1
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreIngestV1, StoreOpenV1, StoreGcV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_publish_root, immutable_store_v1_pin, immutable_store_v1_release_pin,
-    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1}
+    immutable_store_v1_collect, immutable_store_v1_ingest_pinned, immutable_store_v1_root_head, _isv1_restore_moved, _isv1_pin_live_error, _isv1_release_pin_finish, immutable_store_v1_sweep_staging, _isv1_quarantine_bytes, _isv1_pin_add_staged, _isv1_pin_add_in_place, StoreFlagV1, StoreCountV1, StoreGenerationV1}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_dir_raw,
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -363,7 +363,7 @@ describe "immutable_store_v1 garbage collection":
         val late = immutable_store_v1_ingest(root, "late pinned".bytes(), HASH_POLICY_V1_XXH3_128)
         val moved = immutable_store_v1_collect(root, StoreFlagV1(false))
         expect(moved.moved.value).to_equal(1)
-        expect(immutable_store_v1_open(root, late.object_key).status).to_equal("missing")
+        expect(immutable_store_v1_open(root, late.object_key).status).to_equal("ok")
         val dates = dir_list(root + "/quarantine")
         val destination = root + "/quarantine/" + dates[0].trim() + "/" + late.object_key + ".obj"
         expect(file_exists(destination)).to_equal(true)
@@ -374,6 +374,33 @@ describe "immutable_store_v1 garbage collection":
         expect(settled.len()).to_equal(1)
         expect(immutable_store_v1_open(root, late.object_key).status).to_equal("ok")
         expect(file_exists(destination)).to_equal(false)
+        _store_cleanup(root)
+
+    it "open serves a quarantined object read-only and moves nothing":
+        val root = _store_root("gc-open-quarantine")
+        val payload = "quarantined payload".bytes()
+        val orphan = immutable_store_v1_ingest(root, payload, HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).moved.value).to_equal(1)
+        val dates = dir_list(root + "/quarantine")
+        val destination = root + "/quarantine/" + dates[0].trim() + "/" + orphan.object_key + ".obj"
+        expect(file_exists(root + "/objects/" + orphan.object_key.substring(0, 2) + "/" + orphan.object_key + ".obj")).to_equal(false)
+        val opened = immutable_store_v1_open(root, orphan.object_key)
+        expect(opened.status).to_equal("ok")
+        expect(opened.bytes == payload).to_equal(true)
+        expect(_isv1_quarantine_bytes(root, orphan.object_key).is_ok()).to_equal(true)
+        expect(file_exists(destination)).to_equal(true)
+        expect(file_exists(root + "/objects/" + orphan.object_key.substring(0, 2) + "/" + orphan.object_key + ".obj")).to_equal(false)
+        _store_cleanup(root)
+
+    it "open does not return a corrupt quarantined copy":
+        val root = _store_root("gc-open-quarantine-corrupt")
+        val orphan = immutable_store_v1_ingest(root, "will be corrupted".bytes(), HASH_POLICY_V1_XXH3_128)
+        expect(immutable_store_v1_collect(root, StoreFlagV1(false)).moved.value).to_equal(1)
+        val dates = dir_list(root + "/quarantine")
+        val destination = root + "/quarantine/" + dates[0].trim() + "/" + orphan.object_key + ".obj"
+        expect(file_write_bytes(destination, "tampered".bytes())).to_equal(true)
+        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("missing")
+        expect(_isv1_quarantine_bytes(root, orphan.object_key).is_ok()).to_equal(false)
         _store_cleanup(root)
 
     it "dry-run lists unreachable objects without moving them":
@@ -406,7 +433,7 @@ describe "immutable_store_v1 garbage collection":
         expect(pruned.dry_run.value).to_equal(false)
         expect(pruned.moved.value).to_equal(1)
         expect(pruned.unreachable.len()).to_equal(1)
-        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("missing")
+        expect(immutable_store_v1_open(root, orphan.object_key).status).to_equal("ok")
         expect(immutable_store_v1_open(root, rooted.object_key).status).to_equal("ok")
         expect(immutable_store_v1_open(root, pinned.object_key).status).to_equal("ok")
         val quarantine_root = root + "/quarantine"

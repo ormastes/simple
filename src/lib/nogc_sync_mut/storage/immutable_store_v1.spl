@@ -6,8 +6,10 @@
 # Pins are append-only directories (`pins/<id>/owner`, `pins/<id>/refs/<key>`).
 # GC lists objects first, then reads roots and pins, moves unreachable
 # candidates to quarantine, re-reads roots and pins, and moves back any moved
-# key that became reachable. A concurrent reader may therefore transiently see
-# `missing` for an object that GC moved and then restored.
+# key that became reachable. `open` (and publish-winner verify) falls back to a
+# read-only digest-verified lookup in quarantine, so a reader never sees
+# `missing` for an object GC moved and then restored. A reader may still get the
+# bytes of an object a later GC pass deletes; they are correct by content address.
 
 use std.common.hash.hash_policy_v1.{hash_policy_v1_supported, hash_policy_v1_digest}
 use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1,
@@ -66,6 +68,7 @@ val _ISV1_MAX_ROOT_BYTES: i64 = 4194304
 val _ISV1_MAX_REFS: i64 = 16384
 val _ISV1_MAX_ROOT_CLAIM_WALK: i64 = 4096
 val _ISV1_STAGING_MIN_AGE_SECS: i64 = 3600
+val _ISV1_MAX_QUARANTINE_DAYS: i64 = 4096
 
 fn _isv1_is_digit_byte(b: i64) -> bool:
     b >= 48 and b <= 57
@@ -388,6 +391,40 @@ fn _isv1_read_object_bytes(root: text, key: text) -> Result<[u8], text>:
     if not file_exists(path):
         return Err("object-missing")
     file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES)
+
+# Read-only lookup of a key GC moved to quarantine/<date>/<key>[_<n>].obj and may
+# yet restore. Moves nothing; a copy whose digest does not match the key is skipped.
+fn _isv1_quarantine_bytes(root: text, key: text) -> Result<[u8], text>:
+    val algorithm = _isv1_key_algorithm(key)
+    if not _isv1_key_valid(key) or not hash_policy_v1_supported(algorithm).value:
+        return Err("object-missing")
+    val qroot = _isv1_join(root, "quarantine")
+    val days = match dir_list_optional(qroot):
+        case Some(value): value
+        case None: return Err("object-missing")
+    var d: i64 = 0
+    while d < days.len() and d < _ISV1_MAX_QUARANTINE_DAYS:
+        val day = days[d].trim()
+        d = d + 1
+        if day == "" or day.starts_with("."):
+            continue
+        val day_dir = qroot + "/" + day
+        var n: i64 = 0
+        while n <= _ISV1_MAX_COLLISION_SCAN:
+            val name = if n == 0: key + ".obj" else: key + "_{n}.obj"
+            n = n + 1
+            val path = day_dir + "/" + name
+            if not file_exists(path):
+                continue
+            match file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES):
+                case Ok(bytes):
+                    val digest = hash_policy_v1_digest(algorithm, bytes)
+                    if digest.status == "ok" and digest.hex == _isv1_key_hex(key):
+                        return Ok(bytes)
+                case Err(_):
+                    pass
+    Err("object-missing")
+
 fn _isv1_object_matches(root: text, key: text, bytes: [u8]) -> bool:
     match _isv1_read_object_bytes(root, key):
         case Ok(existing_bytes):
@@ -505,8 +542,12 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
         val winner = match file_read_regular_no_follow_bounded_bytes(object_path, _ISV1_MAX_OBJECT_BYTES):
             case Ok(value): value
             case Err(_):
-                dir_remove_all(stage)
-                return _isv1_ingest_rejected("publish-winner-unreadable")
+                match _isv1_quarantine_bytes(root, key):
+                    case Ok(quarantined):
+                        quarantined
+                    case Err(_):
+                        dir_remove_all(stage)
+                        return _isv1_ingest_rejected("publish-winner-unreadable")
         dir_remove_all(stage)
         if winner == bytes:
             val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
@@ -663,6 +704,11 @@ pub fn immutable_store_v1_open(root: text, object_key: text) -> StoreOpenV1:
         return StoreOpenV1(status: "missing", reason: "object-key-invalid", bytes: [])
     val path = _isv1_object_path(root, object_key)
     if not file_exists(path):
+        match _isv1_quarantine_bytes(root, object_key):
+            case Ok(quarantined):
+                return StoreOpenV1(status: "ok", reason: "", bytes: quarantined)
+            case Err(_):
+                pass
         return StoreOpenV1(status: "missing", reason: "object-missing", bytes: [])
     val bytes = match file_read_regular_no_follow_bounded_bytes(path, _ISV1_MAX_OBJECT_BYTES):
         case Ok(value): value
