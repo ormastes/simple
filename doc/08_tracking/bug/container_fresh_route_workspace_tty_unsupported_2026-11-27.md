@@ -1,7 +1,7 @@
 # Container fresh route: no workspace bind or TTY through the shared API
 
-- **Status:** FIXED IN SOURCE (2026-11-27), unit-proven; live guest run pending and
-  blocked by a separate gap
+- **Status:** FIXED IN SOURCE (2026-11-27), unit-proven; live guest run pending. The
+  `wait`/`logs` gap that blocked it is fixed in source, also live-unverified
   (`container_fresh_route_wait_logs_unsupported_2026-11-27.md`)
 - **Component:** Simple Container shared API, Linux Podman fresh install route
   (`src/lib/nogc_async_mut/container/api_v2.spl`,
@@ -184,3 +184,10 @@ including the three that carried no known-gap comment. See
 skeleton in the QEMU wrapper is also still marked `AUTHOR_WITH_SIMPLE`
 (placeholder digests, `overlay`/`systemd` where the decoder requires
 `vfs`/`cgroupfs`), so it is not decoder-valid yet either.
+
+**Update (2026-11-27, later):** the `wait`/`logs` read now exists in source
+(named Inspect stages over the closed probe projection, no new profile key); see
+the "Fix" section of `container_fresh_route_wait_logs_unsupported_2026-11-27.md`.
+That record also names what may still stop these cases live: a fast-exit
+workload can be refused at `start` (`machine-fresh-workload-running-unproven`),
+and the guest profile skeleton above is unchanged.

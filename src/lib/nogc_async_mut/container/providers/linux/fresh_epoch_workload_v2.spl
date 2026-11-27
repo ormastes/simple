@@ -25,6 +25,7 @@ use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.common.contracts.container.runtime_v1.*
 use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_workload_wait_exit_code_v3
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
 use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.*
 use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.*
@@ -195,9 +196,33 @@ pub class LinuxFreshWorkloadOwnerV2:
         container_execution_stats_observation_validate_v1(observation)?
         Ok(observation)
 
+    # Bounded reads of this owner's own workload through the closed probe projection: `wait` is the engine's
+    # printed payload exit status, `logs` the retained stdout (64 KiB cap, refused rather than truncated).
+    # Each runs once under the request's own helper deadline and replays afterwards; `logs` needs a completed
+    # `wait`. The native id is the transfer's; the caller supplies only its original request.
+    fn observe_v3(action: text, request: ContainerExecutionRequestV2) -> Result<RuntimeOperationV1, text>:
+        val projected = self.project_v2(request)?
+        val record = self.transfer.request_v2()?
+        if record.request != request: return Err("machine-fresh-workload-request-changed")
+        if action == "logs" and not self.transfer.read_completed_v3("wait"):
+            return Err("linux-fresh-workload-logs-requires-completed-wait")
+        val waited = self.transfer.read_output_v3("wait")?
+        val code = linux_fresh_workload_wait_exit_code_v3(waited.output)?
+        var result = waited
+        if action == "logs": result = self.transfer.read_output_v3("logs")?
+        val identity = self.identity_v2(request)?
+        # As the OCI provider's native wait: the helper exit stays in exit_code, the workload exit in state.
+        Ok(RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action,
+            command: RuntimeCommandV1(action, result.program, result.arguments),
+            state: RuntimeStateV1(RUNTIME_PHASE_EXITED, identity, code, "exited"),
+            exit_code: result.exit_code, stdout: result.output, stderr: "", reason: "exited"))
+
     pub fn read_v2(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
         if action == "configuration" or action == "input-configuration":
             val observed = self.configuration_v2(action, request)
+            return if observed.is_ok(): observed.unwrap() else: self.refused_v2(action, observed.unwrap_err())
+        if action == "wait" or action == "logs":
+            val observed = self.observe_v3(action, request)
             return if observed.is_ok(): observed.unwrap() else: self.refused_v2(action, observed.unwrap_err())
         if action != "inspect": return self.refused_v2(action, "linux-fresh-workload-read-action-unsupported:" + action)
         val checked = self.project_v2(request)
