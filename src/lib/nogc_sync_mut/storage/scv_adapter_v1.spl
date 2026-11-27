@@ -10,8 +10,19 @@ use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_SHA256_LEGACY}
 use std.nogc_sync_mut.storage.immutable_store_v1.{StoreOpenV1, StoreFlagV1, StoreCountV1,
     immutable_store_v1_init, immutable_store_v1_ingest, immutable_store_v1_open,
     immutable_store_v1_pin, immutable_store_v1_release_pin}
-use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, dir_list_optional, secure_temp_dir_raw, dir_remove_all, is_dir}
+use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes, dir_list_optional, secure_temp_dir_raw, dir_remove_all, dir_create_all, is_dir, sosix_fs_write_file, file_delete}
+use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
 
+# Liveness of a `scv-gc:<nonce>` run: `<store>/run-live/<nonce>` holds the
+# unix-ms of the run's last refresh (written when the owner is minted, again at
+# pin_write start, every _SCVA1_LIVE_REFRESH_EVERY imports and per pin batch).
+# It is never removed by the run itself, so a record is only ever absent for a
+# run from before this signal existed (kept: fail closed). A later run may
+# reclaim an unmarked pin only when the record is older than the bound below,
+# measured from the last refresh, never from pin age.
+val _SCVA1_LIVE_DIR = "run-live"
+val _SCVA1_LIVE_STALE_MS: i64 = 86400000
+val _SCVA1_LIVE_REFRESH_EVERY: i64 = 64
 val _SCVA1_MAX_CHUNK_BYTES: i64 = 268435456
 val _SCVA1_MAX_PIN_REFS: i64 = 16384
 val _SCVA1_PIN_PREFIX = "scv-gc-"
@@ -122,6 +133,42 @@ fn _scva1_done_generation(name: text) -> i64:
         return -1
     generation
 
+# Nonce of a `scv-gc:<nonce>` owner, or "" when it is not one or is path-unsafe.
+fn _scva1_nonce(owner: text) -> text:
+    if not owner.starts_with(_SCVA1_RUN_OWNER_PREFIX):
+        return ""
+    val nonce = owner.substring(_SCVA1_RUN_OWNER_PREFIX.byte_len(), owner.byte_len())
+    if nonce == "" or nonce.contains("/") or nonce.contains("\\") or nonce.contains(".."):
+        return ""
+    nonce
+
+# Best-effort refresh: a failed write only makes this run look stale later.
+fn _scva1_live_refresh(root: text, owner: text):
+    val nonce = _scva1_nonce(owner)
+    val now = time_sample_unix_micros_or_failure()
+    if nonce == "" or now < 0:
+        return
+    val dir = "{root}/{_SCVA1_LIVE_DIR}"
+    if dir_create_all(dir) or is_dir(dir):
+        sosix_fs_write_file("{dir}/{nonce}", "{now / 1000}")
+
+# true = last refresh older than the bound (reclaimable); false = live or unknown.
+# Absent/unreadable/unparsable record, a failed clock, or a refresh in the
+# future all answer 0 (fail closed).
+fn _scva1_live_stale(root: text, nonce: text) -> bool:
+    if nonce == "":
+        return false
+    val now = time_sample_unix_micros_or_failure()
+    if now < 0:
+        return false
+    val text_ms = match file_read_regular_no_follow_bounded("{root}/{_SCVA1_LIVE_DIR}/{nonce}", 64):
+        case Ok(value): value.trim()
+        case Err(_): return false
+    val last = text_ms.to_i64() ?? -1
+    if last < 0 or "{last}" != text_ms:
+        return false
+    now / 1000 - last > _SCVA1_LIVE_STALE_MS
+
 # Unique owner for ONE gc run (`scv-gc:<nonce>`; nonce = a fresh staging temp
 # name), so a concurrent run's pins are told apart from this run's.
 pub fn scv_adapter_v1_run_owner(repo_root: text) -> text:
@@ -133,7 +180,9 @@ pub fn scv_adapter_v1_run_owner(repo_root: text) -> text:
         return ""
     val parts = tmp.replace("\\", "/").split("/")
     dir_remove_all(tmp)
-    "{_SCVA1_RUN_OWNER_PREFIX}{parts[parts.len() - 1]}"
+    val owner = "{_SCVA1_RUN_OWNER_PREFIX}{parts[parts.len() - 1]}"
+    _scva1_live_refresh(root, owner)
+    owner
 
 # Import every reachable on-disk `sha256_` chunk and pin the keys under
 # `scv-gc-<generation>-<n>` (<= 16384 refs each) for `owner`, then a
@@ -149,6 +198,7 @@ pub fn scv_adapter_v1_pin_write(repo_root: text, reachable: text, owner: text) -
     val init_reason = immutable_store_v1_init(root)
     if init_reason != "":
         return _scva1_pin_rejected(init_reason, 0, 0)
+    _scva1_live_refresh(root, owner)
     var keys: [text] = []
     var seen: Dict<text, bool> = {}
     var skipped: i64 = 0
@@ -164,6 +214,8 @@ pub fn scv_adapter_v1_pin_write(repo_root: text, reachable: text, owner: text) -
         if not file_exists(_scva1_chunk_path(repo_root, id)):
             skipped = skipped + 1
             continue
+        if keys.len() % _SCVA1_LIVE_REFRESH_EVERY == 0:
+            _scva1_live_refresh(root, owner)
         val imported = scv_adapter_v1_import_chunk(repo_root, id)
         if imported.status != "ok":
             # A corrupt blob is fsck's finding, not a store failure: leave it
@@ -196,6 +248,7 @@ pub fn scv_adapter_v1_pin_write(repo_root: text, reachable: text, owner: text) -
         var end = start + _SCVA1_MAX_PIN_REFS
         if end > keys.len():
             end = keys.len()
+        _scva1_live_refresh(root, owner)
         val reason = immutable_store_v1_pin(root, "{_SCVA1_PIN_PREFIX}{generation}-{batches}", owner, keys[start:end])
         if reason != "":
             return _scva1_pin_rejected(reason, start, skipped)
@@ -211,13 +264,34 @@ fn _scva1_pin_owner(pin_dir: text, fallback: text) -> text:
         case Ok(value): value
         case Err(_): fallback
 
+# Drop stale liveness records no remaining pin refers to (a record that a kept
+# pin still depends on is left, so that pin stays reclaimable later).
+fn _scva1_live_prune(root: text, pins_dir: text):
+    val live_dir = "{root}/{_SCVA1_LIVE_DIR}"
+    val records = match dir_list_optional(live_dir):
+        case Some(value): value
+        case None: return
+    val pins = match dir_list_optional(pins_dir):
+        case Some(value): value
+        case None: return
+    var held: Dict<text, bool> = {}
+    for pin in pins:
+        held[_scva1_nonce(_scva1_pin_owner("{pins_dir}/{pin.trim()}", ""))] = true
+    for record in records:
+        val nonce = record.trim()
+        if nonce != "" and not held.contains_key(nonce) and _scva1_live_stale(root, nonce):
+            file_delete("{live_dir}/{nonce}")
+
 # Release pins strictly below the newest COMPLETED generation (marker present).
 # A pin of a new-style run (`scv-gc:` owner) is released only when its own
 # marker exists, so a concurrent run's in-flight generation is never touched;
 # legacy/ownerless pins carry no marker and are released. Each pin is released
 # with the owner it was written under (release_pin rechecks it). Pin
 # generations before their marker, marker last, so a crash leaves a retryable
-# leak, never a lost pin.
+# leak, never a lost pin. A `scv-gc:` pin with no marker (crashed run, tolerated
+# pin-owner-changed) is also released once its owner is not the current run and
+# its liveness record (see _SCVA1_LIVE_DIR) was last refreshed more than
+# _SCVA1_LIVE_STALE_MS ago; unknown liveness keeps it.
 pub fn scv_adapter_v1_pin_release_older(repo_root: text, owner: text) -> text:
     val root = scv_adapter_v1_store_root(repo_root)
     val pins_dir = root + "/pins"
@@ -236,7 +310,8 @@ pub fn scv_adapter_v1_pin_release_older(repo_root: text, owner: text) -> text:
         if generation >= 0 and generation < newest:
             val pin_owner = _scva1_pin_owner(pins_dir + "/" + name, owner)
             val has_marker = is_dir("{pins_dir}/{_SCVA1_DONE_PREFIX}{generation}")
-            if has_marker or not pin_owner.starts_with(_SCVA1_RUN_OWNER_PREFIX):
+            val reclaim_dead = not has_marker and pin_owner != owner and _scva1_live_stale(root, _scva1_nonce(pin_owner))
+            if has_marker or reclaim_dead or not pin_owner.starts_with(_SCVA1_RUN_OWNER_PREFIX):
                 val released = immutable_store_v1_release_pin(root, name, pin_owner)
                 if released != "" and released != "pin-missing" and released != "pin-owner-changed":
                     return released
@@ -247,6 +322,7 @@ pub fn scv_adapter_v1_pin_release_older(repo_root: text, owner: text) -> text:
         val released = immutable_store_v1_release_pin(root, name, _scva1_pin_owner(pins_dir + "/" + name, owner))
         if released != "" and released != "pin-missing" and released != "pin-owner-changed":
             return released
+    _scva1_live_prune(root, pins_dir)
     ""
 
 pub fn scv_adapter_v1_pin_reachable(repo_root: text, reachable: text, owner: text) -> ScvPinV1:
