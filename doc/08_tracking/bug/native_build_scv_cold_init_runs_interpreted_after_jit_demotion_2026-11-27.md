@@ -255,3 +255,56 @@ instead of ~270 s), so each trace-point edit costs ~17 min before the worker sta
 Trace additions (kept): `log_phase` tee to `SIMPLE_BUILD_TRACE_FILE`; `driver:hir:streaming:prelude_done`,
 `driver:hir:streaming:visit_order n=`, and per-module `driver:hir:module:start pos= path=` in the streaming HIR loop
 (untested: HIR was not reached).
+
+## d29-f: the worker entry itself demotes to the interpreter (2026-11-27)
+
+Seed `simple-local-20261127r.exe`, `SIMPLE_EXECUTION_MODE=jit run src/app/cli/native_build_worker.spl --help`
+(the entry prints "internal entrypoint" and exits 1, so this isolates module load + JIT compile):
+
+- DEMOTED. `[engine-demotion] reason=jit-compile-error detail=HIR lowering error: ambiguous call to
+  llvm_int8_type_in_context: 2 co-compiled definitions (src/lib/nogc_async_mut/sffi/llvm_types.spl,
+  src/lib/nogc_sync_mut/sffi/llvm_types.spl) ... [compiler_cross_module_private_symbol_collision]`.
+  Raised for src/plugins/backend_llvm_lib/llvm_lib_type_mapper.spl, then llvm_lib_translate_expr.spl.
+  Cause: `use std.sffi.llvm.*` (also in llvm_lib_backend.spl, llvm_lib_translate.spl) resolves to both
+  lane copies, so every `llvm_*` call is ambiguous. Whole worker closure falls back to the interpreter
+  (2m04s to demote, then interpreted).
+- Fix: those four files now import `std.nogc_sync_mut.sffi.llvm.*` explicitly. After it,
+  the llvm ambiguity is gone, but a second jit-compile-error remained (see addendum below); after the addendum only `reason=hybrid-interp-splice` for `rt_*` externs
+  (cache_host/heap/sysctl/etc., expected on this seed) plus 7 CODEGEN-AMBIGUOUS-METHOD lines
+  (`CudaTypeMapper.map_tuple` bare `map`, 4 candidates) - not fixed here, separate shape.
+- Timings (--help, wall): JIT before fix 2m04 (demote + interp); JIT after fix 3m29 (full JIT compile of
+  the closure); forced interpret 1m22. So for this entry the interpreter is faster to first output;
+  JIT is not a win on cold start, and the >600 s silence after load_sources is not explained by this
+  demotion alone (the c27 stage trace owns that). Logs: scratchpad d29f/{jit,jit2,jit3,interp}.log.
+
+Worker mode (answer to the trace lane): native_build_main.spl:2794-2803 sets `SIMPLE_EXECUTION_MODE=jit`
+in the coordinator env when it is unset and the route is not a compiled bootstrap capsule, and the worker
+inherits it, so the worker REQUESTS jit. Before the fix above its closure then hit the
+`jit-compile-error` demotion and ran fully interpreted, which matches stage_parse at ~500 chars/s
+(interpreter speed) while the separately spawned parse shards (a different, smaller closure) stay on JIT
+at 0.2-0.4 s per file. Re-measure stage_parse in the real worker with this fix before concluding; the
+shards' front-end cache reuse by stage_parse was not investigated (time box).
+
+### d29-f addendum: second demotion, zero jit-compile-error after fix (2026-11-27)
+
+Correction: after the llvm import fix the worker STILL demoted (`CODEGEN-AMBIGUOUS-METHOD` in
+`CudaTypeMapper.map_tuple`, bare `map` on an untyped `elements.enumerate()` receiver, 4 candidates, then
+`jit-compile-error detail=src/app/cli/native_build_worker.spl` + "JIT compilation failed, falling back
+to interpreter"). Fixed by replacing that `.enumerate().map(...)` with an explicit typed loop in
+src/plugins/backend_cuda/cuda_type_mapper.spl. Demotion count (jit-compile-error / JIT compilation
+failed / CODEGEN-AMBIGUOUS): before any fix 1 / 1 / 0 (jit.log), after llvm fix only 1 / 1 / 7 (jit3.log),
+after cuda fix 0 / 0 / 0 (jit4.log). Remaining: `hybrid-interp-splice` for rt_* externs only (not an error).
+`--help` JIT wall 2m50. Spec stage3_explicit_owner_types_spec.spl 2/2 on seed r.
+The `[engine-demotion]` lines are printed by the Rust seed (src/compiler_rust/common/src/engine_receipt.rs
+and the driver), so teeing them into SIMPLE_BUILD_TRACE_FILE from Simple source is not possible; skipped.
+
+### d29-f correction (2026-11-27): "0/0/0" was vacuous
+
+The earlier "after cuda fix 0 / 0 / 0" run hard-failed before main with 140 `semantic: private fn ... is not
+visible` errors (the demotion counters were zero only because it never got that far). Fixed by making the
+cross-module-used fns `pub`: all `fn llvm_*` in src/lib/nogc_sync_mut/sffi/{llvm_types,llvm_codegen,
+llvm_target,llvm_loader}.spl, plus 16 compiler fns (auto_vectorize_codegen/analysis, module_lowering
+hir_module_surface_index, mir_lowering_stmts, mir_instruction_support, feature_caps_types). Genuine result
+(jit6.log): `SIMPLE_EXECUTION_MODE=jit run native_build_worker.spl --help` -> rc=1, last line
+`error: native_build_worker.spl is an internal entrypoint`, 0 "is not visible", 0 jit-compile-error /
+JIT compilation failed / CODEGEN-AMBIGUOUS; only `hybrid-interp-splice` (rt_* externs) remains.
