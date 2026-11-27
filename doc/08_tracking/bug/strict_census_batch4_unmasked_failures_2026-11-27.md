@@ -31,3 +31,26 @@ with the new `hal_smp_ipi_send` window (hart-id base plus mask). Broadcast shoul
 window computation.
 
 See also: `strict_use_default_blocked_by_unprovided_imports_2026-11-27.md`.
+
+## Resolution (2026-11-27, work/census4-unmasked-fixes-20261127)
+1. FIXED. `fe_to_bytes` and `fe_is_zero` now apply the constant-time `_fe_sub_p_once`
+   before serializing/comparing. fe_p256_full_spec 55/55, fe_p256_skeleton_spec 6/6.
+2. FIXED. (a) `riscv_noalloc_handoff` and `riscv_noalloc_handoff_with_layout` now call
+   `riscv_noalloc_dtb_capability_init(hart_id, dtb_addr)` right after pinning
+   `g_riscv_boot_dtb_addr` and before the RAM-base pin. (b) The "ISA without terminating
+   NUL" example was a spec bug: it poked `isa + 14` (alignment padding) but
+   "rv64gc_zicbom" is 13 chars so its NUL is at `isa + 13`; the production check was correct.
+   Now 25/25.
+3. NOT A CODE BUG - OPEN BY DESIGN. Root cause: `run_pattern_idiom_pass_x86`
+   (`src/compiler/60.mir_opt/mir_opt/pattern_dispatch.spl`) is an intentional identity since
+   f177c893a61 "quarantine unsupported pattern idioms" ("Preserve MIR while PatternIdiom lacks
+   complete backend parity"). The two failing examples assert Intrinsic rewrites with full caps,
+   which only `run_pattern_idiom_candidate_pass_x86` still performs (no spec calls it). The
+   other 10 examples pass vacuously on identity. Fix is an owner decision: either re-enable the
+   production pass when backend parity lands, or point these two examples at the candidate
+   pass. Left unchanged.
+4. FIXED (riscv64). `hal_smp_ipi_broadcast` now resolves each non-self logical hart to its
+   physical ID (DTB map, logical==physical fallback) and sends one SBI IPI per 64-hart window
+   via `hal_smp_ipi_window`; new helper `hal_smp_ipi_window_mask`, new hal_smp_spec case.
+   The riscv32 twin (`hal_smp32_ipi_broadcast`) has no window/base concept (32-bit mask,
+   logical==physical, no DTB map), so it is not affected by this defect.

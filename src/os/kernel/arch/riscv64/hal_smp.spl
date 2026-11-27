@@ -202,16 +202,42 @@ fn hal_smp_ipi_send(target: u32, vector: u32):
     val window = hal_smp_ipi_window(hart)
     sbi_probe_then_send_ipi(window.0, window.1)
 
+fn hal_smp_ipi_window_mask(harts: [u64; 8], count: u32, base: u64) -> u64:
+    """SBI hart_mask for the 64-hart window starting at base, over harts[0..count)."""
+    var mask: u64 = 0u64
+    var i: u32 = 0u32
+    while i < count:
+        val window = hal_smp_ipi_window(harts[i])
+        if window.1 == base: mask = mask | window.0
+        i = i + 1u32
+    mask
+
 fn hal_smp_ipi_broadcast(vector: u32):
-    """Broadcast IPI to all non-self harts (self = hart 0) via sbi_probe_then_send_ipi."""
+    """Broadcast IPI to all non-self harts (self = logical 0), one SBI call per 64-hart window.
+
+    Uses the same physical-hart window addressing as hal_smp_ipi_send, so sparse
+    DTB hart IDs (including IDs above 63) are targeted correctly.
+    """
     val self_id = 0u32
     val count = HAL_SMP_CPU_COUNT_STATE
+    var phys: [u64; 8] = [0u64; 8]
+    var n: u32 = 0u32
     var i: u32 = 0u32
-    var mask: u64 = 0u64
-    while i < count:
+    while i < count and n < MAX_HARTS:
         if i != self_id:
             HAL_SMP_PENDING_IPI[i] = vector
-            mask = mask | (1u64 << i as u64)
+            val target = hal_smp_hsm_target(i)
+            phys[n] = if target.0: target.1 else: i as u64
+            n = n + 1u32
         i = i + 1u32
-    if mask != 0u64:
-        sbi_probe_then_send_ipi(mask, 0u64)
+    var k: u32 = 0u32
+    while k < n:
+        val base = hal_smp_ipi_window(phys[k]).1
+        var seen = false
+        var j: u32 = 0u32
+        while j < k:
+            if hal_smp_ipi_window(phys[j]).1 == base: seen = true
+            j = j + 1u32
+        if not seen:
+            sbi_probe_then_send_ipi(hal_smp_ipi_window_mask(phys, n, base), base)
+        k = k + 1u32
