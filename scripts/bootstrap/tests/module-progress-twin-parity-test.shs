@@ -21,9 +21,15 @@ bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; }
 hash() { sha256sum "$1" | awk '{print $1}'; }
 py="$repo/scripts/bootstrap/bootstrap-module-progress.py"
 spl="$repo/scripts/bootstrap/bootstrap-module-progress.spl"
-pin="$tmp/provenance.env"
+# The pin must be <source-root>/.../stage3/<platform>/provenance.env; the
+# twin's source root is the repo holding the helper (build/ is gitignored).
+pin_dir="$repo/build/stage3/module-progress-parity-$$"
+trap 'rm -rf "$tmp" "$pin_dir"' EXIT HUP INT TERM
+mkdir -p "$pin_dir" "$pin_dir-wrong"
+pin="$pin_dir/provenance.env"
 printf '%s\n' schema=simple-bootstrap-stage3-provenance-v5 status=pass \
   artifact_kind=pure-simple-bootstrap-compiler "stage3_sha256=$(hash "$stage")" >"$pin"
+trap 'rm -rf "$tmp" "$pin_dir" "$pin_dir-wrong"' EXIT HUP INT TERM
 run_py() { "$python" -B "$py" "$@"; }
 run_spl() { SIMPLE_VERIFIED_STAGE_PIN=$pin "$stage" run "$spl" --stage-binary "$stage" "$@" 2>"$tmp/spl.err"; }
 same() {  # name file-a file-b
@@ -34,7 +40,7 @@ rc_pair() {  # name want-rc py-rc spl-rc
 }
 
 # Fixture: one x86_64 ET_REL object, one PASS row, one FAIL row, one pending.
-f="$tmp/fx"; mkdir -p "$f"
+f="$tmp/fx-é😀"; mkdir -p "$f"
 printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\076\000rest' >"$f/a.o"
 printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\001\000\267\000rest' >"$f/arm.o"
 printf 'not an object at all' >"$f/plain.o"
@@ -88,11 +94,14 @@ run_spl object "$f/arm.o" aarch64-unknown-linux-gnu; s=$?
 [ "$s" = 0 ] && ok "object-twin aarch64" || bad "object-twin aarch64: $s"
 
 # Trust anchor.
-printf 'stage3_sha256=%064d\n' 0 >"$tmp/wrong.env"
-SIMPLE_VERIFIED_STAGE_PIN="$tmp/wrong.env" "$stage" run "$spl" --stage-binary "$stage" object "$f/a.o" "$target" 2>/dev/null; s=$?
+printf 'stage3_sha256=%064d\n' 0 >"$pin_dir-wrong/provenance.env"
+SIMPLE_VERIFIED_STAGE_PIN="$pin_dir-wrong/provenance.env" "$stage" run "$spl" --stage-binary "$stage" object "$f/a.o" "$target" 2>/dev/null; s=$?
 [ "$s" = 2 ] && ok "anchor-mismatch (exit 2)" || bad "anchor-mismatch: $s"
 env -u SIMPLE_VERIFIED_STAGE_PIN "$stage" run "$spl" --stage-binary "$stage" object "$f/a.o" "$target" 2>/dev/null; s=$?
 [ "$s" = 2 ] && ok "anchor-no-pin (exit 2)" || bad "anchor-no-pin: $s"
+
+SIMPLE_VERIFIED_STAGE_PIN="$tmp/provenance.env" "$stage" run "$spl" --stage-binary "$stage" object "$f/a.o" "$target" 2>/dev/null; s=$?
+[ "$s" = 2 ] && ok "anchor-pin-outside-root (exit 2)" || bad "anchor-pin-outside-root: $s"
 
 printf 'module-progress twin parity: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ] && [ "$pass" -gt 0 ]

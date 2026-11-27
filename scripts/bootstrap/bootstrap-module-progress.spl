@@ -29,7 +29,6 @@ use std.nogc_sync_mut.sffi.io.{path_absolute}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.json.value.{JsonValue, json_parse_value, json_value_escape_string}
 use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_check, verified_stage_pin_recheck}
-use scripts.bootstrap.lib.running_stage_image.{running_stage_image}
 
 @unsafe(reason: "no-follow regular-file predicate; evidence must not be a link", capabilities: [ffi])
 extern fn rt_file_is_regular_no_follow(path: text) -> bool
@@ -307,11 +306,41 @@ fn select(full: text, selected: text, state: text, context: text, target: text, 
         refuse("cannot append summary: " + summary)
     failures > 0
 
+val HEX_DIGITS = "0123456789abcdef"
+
+fn hex4(n: i64) -> text:
+    var out = ""
+    var k = 12
+    while k >= 0:
+        val d = (n >> k) & 15
+        out = out + HEX_DIGITS.substring(d, d + 1)
+        k = k - 4
+    out
+
+fn uescape(cp: i64) -> text:
+    if cp >= 0x10000:
+        val v = cp - 0x10000
+        return "\\u" + hex4(0xd800 + (v >> 10)) + "\\u" + hex4(0xdc00 + (v & 0x3ff))
+    "\\u" + hex4(cp)
+
+# Python json.dumps(..., ensure_ascii=True) string literal: escapes " \\ \n
+# \r \t \b \f by name, other control and all non-ASCII as \\uXXXX
+# (UTF-16 surrogate pairs above the BMP), lowercase hex; DEL too.
 fn jstr(value: text) -> text:
-    for i in 0..value.byte_len():
-        if value.byte_at(i) >= 128:
-            refuse("non-ASCII seal field is outside the Simple twin's json layout")
-    "\"" + json_value_escape_string(value) + "\""
+    var out = "\""
+    for i in 0..value.len():
+        val c = value[i]
+        val cp = c.char_code_at(0)
+        if cp == 34: out = out + "\\\""
+        elif cp == 92: out = out + "\\\\"
+        elif cp == 10: out = out + "\\n"
+        elif cp == 13: out = out + "\\r"
+        elif cp == 9: out = out + "\\t"
+        elif cp == 8: out = out + "\\b"
+        elif cp == 12: out = out + "\\f"
+        elif cp < 32 or cp > 126: out = out + uescape(cp)
+        else: out = out + c
+    out + "\""
 
 fn publish(state: text, context: text, target: text, paths: [text]):
     for row_path in paths:
@@ -359,9 +388,11 @@ fn parse_int(value: text) -> i64:
 fn main():
     val argv = get_args()
     var start = 0
+    var self_path = ""
     for k in 0..argv.len():
         if start == 0 and argv[k].ends_with("bootstrap-module-progress.spl"):
             start = k + 1
+            self_path = argv[k]
     var stage_binary = env_get("SIMPLE_VERIFIED_STAGE_BINARY")
     var stage_pin = ""
     var args: [text] = []
@@ -379,8 +410,13 @@ fn main():
     # Trust anchor before any state is touched.
     val os = host_os()
     val linux = os == "linux"
-    stage_binary = running_stage_image(stage_binary, os)
-    val pin = match verified_stage_pin_check(stage_pin, stage_binary, linux):
+    val windows = os == "windows"
+    # The pin location guard needs the source root: this helper lives at
+    # <source-root>/scripts/bootstrap/bootstrap-module-progress.spl.
+    val self_norm = self_path.replace("\\", "/")
+    val bs_idx = self_norm.last_index_of("/scripts/bootstrap/")
+    val source_root = if bs_idx > 0: self_norm.substring(0, bs_idx) else: ""
+    val pin = match verified_stage_pin_check(stage_pin, source_root, stage_binary, linux, windows):
         case Ok(p): p
         case Err(e):
             eprint("FAIL: " + e)
@@ -409,7 +445,7 @@ fn main():
         machine(rest[0], rest[1])
     else:
         refuse("unknown progress operation")
-    match verified_stage_pin_recheck(pin, stage_binary, linux):
+    match verified_stage_pin_recheck(pin, linux, windows):
         case Ok(_): pass
         case Err(e):
             eprint("FAIL: " + e)
