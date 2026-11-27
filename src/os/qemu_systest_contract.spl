@@ -473,17 +473,41 @@ pub fn run_qemu_systest(
 # harden descriptor (x86_64 Alpine-class hardening probe)
 # ---------------------------------------------------------------------------
 
+pub fn harden_target_triple() -> text:
+    "x86_64-unknown-none"
+
+pub fn harden_entry_path() -> text:
+    "examples/09_embedded/simple_os/arch/x86_64/harden_probe_entry.spl"
+
+pub fn harden_linker_script_path() -> text:
+    "examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+
+pub fn harden_builder_script() -> text:
+    "scripts/check/build-simpleos-nvfs-positioned-qemu.shs"
+
+pub fn harden_builder_args() -> [text]:
+    ["--harden-probe"]
+
 pub fn harden_kernel_path() -> text:
     "build/os/simpleos_x86_64_harden_probe.elf"
 
 pub fn harden_image_path() -> text:
     "build/os/fat32-x86_64-harden.img"
 
+pub fn harden_payload_path() -> text:
+    "build/os/harden/fsexec_nonce_probe.elf"
+
+pub fn harden_payload_manifest_path() -> text:
+    "build/os/harden/fsexec_nonce_probe.manifest"
+
 pub fn harden_firmware_vars_path() -> text:
     "build/os/harden/firmware/OVMF_VARS_4M.fd"
 
 pub fn harden_firmware_esp_path() -> text:
     "build/os/harden/firmware/esp"
+
+pub fn harden_media_receipt_path(firmware_esp_path: text) -> text:
+    firmware_esp_path + "/../harden-media-receipt.env"
 
 pub fn harden_firmware_code_path() -> text:
     val configured = env_get("OVMF_CODE") ?? ""
@@ -524,6 +548,16 @@ pub fn harden_qemu_args_with_firmware(
 pub fn harden_timeout_ms() -> i64:
     default_qemu_timeout_ms()
 
+pub fn harden_media_receipt_format(
+    kernel_sha: text, firmware_efi_sha: text,
+    firmware_code_path: text, firmware_code_sha: text
+) -> text:
+    "schema=simpleos-harden-media-v1\n" +
+    "kernel_sha256={kernel_sha}\n" +
+    "firmware_efi_sha256={firmware_efi_sha}\n" +
+    "firmware_code_path={firmware_code_path}\n" +
+    "firmware_code_sha256={firmware_code_sha}\n"
+
 pub fn harden_media_receipt_error(
     receipt_path: text, kernel_path: text, firmware_efi_path: text,
     firmware_code_path: text
@@ -534,12 +568,8 @@ pub fn harden_media_receipt_error(
     val code_sha = file_hash_sha256_or_empty(firmware_code_path)
     if kernel_sha.len() != 64 or efi_sha.len() != 64 or code_sha.len() != 64:
         return "invalid-media-receipt:" + receipt_path
-    val expected = (
-        "schema=simpleos-harden-media-v1\n" +
-        "kernel_sha256={kernel_sha}\n" +
-        "firmware_efi_sha256={efi_sha}\n" +
-        "firmware_code_path={firmware_code_path}\n" +
-        "firmware_code_sha256={code_sha}\n")
+    val expected = harden_media_receipt_format(
+        kernel_sha, efi_sha, firmware_code_path, code_sha)
     if file_read(receipt_path) != expected:
         return "invalid-media-receipt:" + receipt_path
     ""
@@ -556,6 +586,35 @@ pub fn harden_media_first_missing_path(
     if not firmware_esp_boot_exists: return SYSTEST_PREFIX_MISSING_MEDIA + firmware_esp_boot_path
     ""
 
+pub fn run_harden_qemu_systest_with_firmware(
+    arch: text,
+    kernel_path: text,
+    image_path: text,
+    firmware_code_path: text,
+    firmware_vars_path: text,
+    firmware_esp_path: text,
+    markers: [text]
+) -> text:
+    """Fail closed unless every UEFI harden-probe artifact and receipt exists before QEMU."""
+    val firmware_esp_boot_path = firmware_esp_path + "/EFI/BOOT/BOOTX64.EFI"
+    val missing = harden_media_first_missing_path(
+        kernel_path, file_exists(kernel_path), image_path, file_exists(image_path),
+        firmware_vars_path, file_exists(firmware_vars_path), firmware_esp_boot_path,
+        file_exists(firmware_esp_boot_path))
+    if missing.len() != 0:
+        return missing
+    if not file_exists(firmware_code_path):
+        return SYSTEST_PREFIX_MISSING_MEDIA + firmware_code_path
+    val receipt_error = harden_media_receipt_error(
+        harden_media_receipt_path(firmware_esp_path), kernel_path,
+        firmware_esp_boot_path, firmware_code_path)
+    if receipt_error.len() != 0: return receipt_error
+    run_qemu_systest(
+        arch, kernel_path, image_path, harden_qemu_bin(),
+        harden_qemu_args_with_firmware(
+            image_path, firmware_code_path, firmware_vars_path, firmware_esp_path),
+        markers, harden_timeout_ms())
+
 pub fn run_harden_qemu_systest_with_media(
     arch: text,
     kernel_path: text,
@@ -569,23 +628,9 @@ pub fn run_harden_qemu_systest_with_media(
     The generic runner only knows a kernel and a data image. This wrapper owns
     the additional UEFI NVRAM and ESP media required by the harden descriptor.
     """
-    val firmware_esp_boot_path = firmware_esp_path + "/EFI/BOOT/BOOTX64.EFI"
-    val firmware_code_path = harden_firmware_code_path()
-    val missing = harden_media_first_missing_path(
-        kernel_path, file_exists(kernel_path), image_path, file_exists(image_path),
-        firmware_vars_path, file_exists(firmware_vars_path), firmware_esp_boot_path,
-        file_exists(firmware_esp_boot_path))
-    if missing.len() != 0:
-        return missing
-    val receipt_error = harden_media_receipt_error(
-        firmware_esp_path + "/../harden-media-receipt.env", kernel_path,
-        firmware_esp_boot_path, firmware_code_path)
-    if receipt_error.len() != 0: return receipt_error
-    run_qemu_systest(
-        arch, kernel_path, image_path, harden_qemu_bin(),
-        harden_qemu_args_with_firmware(
-            image_path, firmware_code_path, firmware_vars_path, firmware_esp_path),
-        markers, harden_timeout_ms())
+    run_harden_qemu_systest_with_firmware(
+        arch, kernel_path, image_path, harden_firmware_code_path(),
+        firmware_vars_path, firmware_esp_path, markers)
 
 pub fn run_harden_qemu_systest(arch: text, markers: [text]) -> text:
     run_harden_qemu_systest_with_media(
