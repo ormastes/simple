@@ -1,0 +1,102 @@
+# Writes the Enrolled Linux Host signed fixtures that the canonical encoders can produce without a live Host.
+# Run in the guest as root with the self-hosted binary (check-linux-orchestrator-host-qemu.shs --run-specs):
+#   SIMPLE_ORCH_FIXTURE_KEY_STORE=<dir> SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT=<dir> SIMPLE_ORCH_FIXTURE_HOST_ROOT=<dir> \
+#   SIMPLE_ORCH_FIXTURE_MACHINE_PARENT=<dir> SIMPLE_ORCH_FIXTURE_INPUT_DIR=<dir> \
+#   SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST=<sha256 hex> [SIMPLE_ORCH_FIXTURE_CARET_REQUEST=<file>] \
+#     bin/simple run test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl
+# Optional: SIMPLE_ORCH_FIXTURE_CONTROLLER (fixture-controller), SIMPLE_ORCH_FIXTURE_APPROVER (fixture-approver),
+# SIMPLE_ORCH_FIXTURE_HOST_ID (simple-orch-host), SIMPLE_ORCH_FIXTURE_SCOPE (fixture-scope),
+# SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE (/etc/machine-id), SIMPLE_ORCH_FIXTURE_CARET_CONTROLLER (ctrl-qual).
+# Each produced class prints `FIXTURE OK <class> <path>`; a class whose inputs are absent prints
+# `FIXTURE BLOCKED <class>: <reason>`; a refusal prints `FIXTURE ERROR <class>: <reason>`.
+# Keys are fresh OS-entropy seeds on every run. Existing dispatch files with different bytes are refused,
+# never replaced, so re-running over a used guest overlay reports ERROR instead of rotating keys silently.
+use std.nogc_sync_mut.io_runtime.{env_get, file_write_exact}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_encode_v3
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.controller_dispatch_grant_clock_v1
+use test.fixtures.orchestrator.enrolled_host_signed_fixture_v1.*
+
+fn gen_env_v1(key: text, fallback: text) -> text:
+    val value = env_get(key)
+    if value == "": fallback else: value
+
+fn gen_machine_id_v1(path: text) -> Result<text, text>:
+    val source = file_read_regular_no_follow_bounded(path, 4096)?
+    var line = source
+    if line.ends_with("\n"): line = line.substring(0, line.len() - 1)
+    if line == "": return Err("empty machine id at " + path)
+    Ok(line)
+
+fn gen_inputs_v1() -> Result<EnrolledFixtureInputsV1, text>:
+    for key in ["SIMPLE_ORCH_FIXTURE_KEY_STORE", "SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT", "SIMPLE_ORCH_FIXTURE_HOST_ROOT",
+            "SIMPLE_ORCH_FIXTURE_MACHINE_PARENT", "SIMPLE_ORCH_FIXTURE_INPUT_DIR", "SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST"]:
+        if env_get(key) == "": return Err(key + " unset")
+    val now = controller_dispatch_grant_clock_v1()?
+    val machine_id = gen_machine_id_v1(gen_env_v1("SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE", "/etc/machine-id"))?
+    Ok(EnrolledFixtureInputsV1(controller_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_CONTROLLER", "fixture-controller"),
+        approver_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_APPROVER", "fixture-approver"),
+        principal: "fixture-operator", project: "fixture-project",
+        physical_host_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_HOST_ID", "simple-orch-host"),
+        service_scope_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_SCOPE", "fixture-scope"), native_machine_id: machine_id,
+        provider_identity_digest: env_get("SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST"),
+        machine_parent: env_get("SIMPLE_ORCH_FIXTURE_MACHINE_PARENT"), host_root: env_get("SIMPLE_ORCH_FIXTURE_HOST_ROOT"),
+        physical_cpu_millis: 8000, physical_memory_bytes: 8589934592, reserved_cpu_millis: 1000,
+        reserved_memory_bytes: 1073741824, now_ms: now))
+
+fn gen_authority_v1(inputs: EnrolledFixtureInputsV1) -> Result<EnrolledFixtureAuthorityV1, text>:
+    val authority = enrolled_fixture_authority_v1(inputs)?
+    val store = env_get("SIMPLE_ORCH_FIXTURE_KEY_STORE")
+    val issuer_path = enrolled_fixture_write_key_v1(store, authority.issuer_key, authority.issuer.file)?
+    val approver_path = enrolled_fixture_write_key_v1(store, authority.approver_key, authority.approver.file)?
+    print "FIXTURE OK key " + issuer_path
+    print "FIXTURE OK key " + approver_path
+    val context = enrolled_fixture_dispatch_install_v1(env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT"), inputs,
+        authority.policy_bytes)?
+    print "FIXTURE OK dispatch " + env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT")
+    val parent_policy = inputs.machine_parent + "/authority-policy.sdn"
+    if not file_atomic_write_mode(parent_policy, authority.policy_bytes, 0o600): return Err("cannot write " + parent_policy)
+    print "FIXTURE OK authority " + parent_policy
+    Ok(authority)
+
+fn gen_binding_v1(inputs: EnrolledFixtureInputsV1, authority: EnrolledFixtureAuthorityV1):
+    val dir = env_get("SIMPLE_ORCH_FIXTURE_INPUT_DIR")
+    val pins = enrolled_fixture_pins_v1(dir)
+    if pins.is_err():
+        print "FIXTURE BLOCKED binding: " + pins.unwrap_err() + " (the five pinned inputs have no in-repo producer yet)"
+        return
+    match enrolled_fixture_binding_v1(inputs, authority.policy_bytes, pins.unwrap()):
+        case Ok(binding):
+            val bytes = host_linux_service_enrollment_encode_v3(binding)
+            if bytes.is_err():
+                print "FIXTURE ERROR binding: " + bytes.unwrap_err()
+                return
+            if not file_write_exact(dir + "/binding.sdn", bytes.unwrap()):
+                print "FIXTURE ERROR binding: cannot write " + dir + "/binding.sdn"
+                return
+            print "FIXTURE OK binding " + dir + "/binding.sdn"
+        case Err(reason): print "FIXTURE ERROR binding: " + reason
+
+fn gen_caret_request_v1():
+    val path = env_get("SIMPLE_ORCH_FIXTURE_CARET_REQUEST")
+    if path == "": return
+    match enrolled_fixture_gateway_inspect_v1(gen_env_v1("SIMPLE_ORCH_FIXTURE_CARET_CONTROLLER", "ctrl-qual"), "req-qual-1"):
+        case Ok(source):
+            if file_atomic_write_mode(path, source, 0o600): print "FIXTURE OK caret-request " + path
+            else: print "FIXTURE ERROR caret-request: cannot write " + path
+        case Err(reason): print "FIXTURE ERROR caret-request: " + reason
+
+fn gen_main_v1():
+    gen_caret_request_v1()
+    match gen_inputs_v1():
+        case Ok(inputs):
+            match gen_authority_v1(inputs):
+                case Ok(authority): gen_binding_v1(inputs, authority)
+                case Err(reason): print "FIXTURE ERROR authority: " + reason
+        case Err(reason): print "FIXTURE BLOCKED authority: " + reason
+    print "FIXTURE BLOCKED v6-requests: attach/invoke/detach need the live Host association, plan and pane binding"
+    print "FIXTURE BLOCKED installer-parent: needs the live native machine identity owners"
+    print "FIXTURE BLOCKED profiles: digests pin the installed machine policy, provider policy and broker executable"
+
+gen_main_v1()

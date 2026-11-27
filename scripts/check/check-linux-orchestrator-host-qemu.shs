@@ -7,7 +7,7 @@ set -eu
 #   sh scripts/check/check-linux-orchestrator-host-qemu.shs --smoke            # boot + SSH + arch/firmware proof
 #   sh scripts/check/check-linux-orchestrator-host-qemu.shs --provision        # podman, systemd unit, fixture state (idempotent)
 #   sh scripts/check/check-linux-orchestrator-host-qemu.shs --prove            # print the fixture proof as root
-#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs BIN    # copy BIN + source, run the 4 specs as root
+#   sh scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs BIN    # copy BIN + source, generate signed fixtures, run the 6 specs as root
 #   sh scripts/check/check-linux-orchestrator-host-qemu.shs --ssh CMD...
 #   sh scripts/check/check-linux-orchestrator-host-qemu.shs --stop
 #
@@ -230,15 +230,10 @@ install -d -o root -g "$SVC" -m 0750 "$F/attach-v6" "$F/caret-ssh"
 install -d -o root -g "$SVC" -m 0750 "$F/key-store"
 install -d -o "$SVC" -g "$SVC" -m 0700 "$F/output-store" "$F/output-store/journal"
 
-# Protected signing keys, generated in the guest; private halves 0600.
-for role in issuer approver; do
-    if [ ! -f "$F/key-store/${role}.ed25519.pem" ]; then
-        openssl genpkey -algorithm ed25519 -out "$F/key-store/${role}.ed25519.pem"
-        openssl pkey -in "$F/key-store/${role}.ed25519.pem" -pubout -out "$F/key-store/${role}.ed25519.pub.pem"
-    fi
-done
-chown root:"$SVC" "$F"/key-store/*; chmod 0640 "$F"/key-store/*.pem; chmod 0600 "$F"/key-store/*.ed25519.pem
-chmod 0644 "$F"/key-store/*.pub.pem
+# Protected signing keys are NOT made here. host-linux-enrollment-issue reads OpenSSH Ed25519 private
+# files at controller_authority_key_leaf_v1 names (dir 0700, files 0600), not openssl PKCS#8 PEM, so
+# --run-specs writes them with the canonical encoder
+# (test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl) on every fresh run overlay.
 
 MID=$(cat /etc/machine-id)
 PODMAN=$(command -v podman); PODMAN_SHA=$(sha256sum "$PODMAN" | awk '{print $1}')
@@ -380,7 +375,7 @@ head -5 /etc/simple/container/machine-policy.sdn
 echo "== unit"; systemctl cat simple-orchestrator-host.service | grep -E '^(User|Group|Delegate|EnvironmentFile)='
 echo "unit Delegate property: $(systemctl show -p Delegate simple-orchestrator-host.service)"
 echo "masked: podman.socket=$(systemctl is-enabled podman.socket 2>&1) user@950=$(systemctl is-enabled user@950.service 2>&1)"
-echo "== stores"; stat -c '%n %U:%G %a' /srv/simple-fixture/key-store /srv/simple-fixture/key-store/issuer.ed25519.pem /srv/simple-fixture/output-store/journal
+echo "== stores"; stat -c '%n %U:%G %a' /srv/simple-fixture/key-store /srv/simple-fixture/output-store/journal
 echo "== podman"; podman --version; podman run --rm docker.io/library/busybox:1.36 true && echo "podman run --rm busybox:1.36 true: rc=0"
 echo "== env file $(stat -c '%U:%G %a' /etc/simple/orchestrator-host.env)"; cat /etc/simple/orchestrator-host.env
 echo "== podman-live env"; cat /etc/simple/podman-live-spec.env
@@ -425,7 +420,8 @@ do_prove() {
     [ "$started" -eq 0 ] || do_stop
 }
 
-SPECS="test/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.spl
+SPECS="test/03_system/app/orchestrator/feature/enrolled_host_signed_fixture_spec.spl
+test/03_system/app/orchestrator/feature/host_linux_provision_startup_v3_spec.spl
 test/03_system/app/container/feature/podman_shared_api_live_spec.spl
 test/03_system/app/orchestrator/feature/linux_agent_attachment_v6_spec.spl
 test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl
@@ -505,6 +501,30 @@ do_run_specs() {
         printf '%s\n' "$tpl_out" | grep -q '^TEMPLATE OK ' || printf '# template-gen: no TEMPLATE OK line; podman live spec will report BLOCKED\n' >> "$RUN_OUT"
     fi
     printf '# template: %s\n' "$(ssh_vm 'ls -l /etc/simple/podman-live-launch-template.sdn 2>&1')" >> "$RUN_OUT"
+    # Signed fixtures from the canonical encoders (todos 481-487): OpenSSH issuer/approver keys at their
+    # protected leaf names, the authority policy, the installed dispatch root, binding.sdn when its five
+    # pinned inputs exist, and the Caret inspection request. They replace the provision-time placeholders
+    # (the PKCS#8 .pem keys are removed first: host-linux-enrollment-issue reads OpenSSH files only).
+    # `FIXTURE ERROR` is a canonical-encoder refusal and counts as FAIL; `FIXTURE BLOCKED` is reported
+    # on its own and leaves the consuming spec's fixture unset, so that spec reports BLOCKED.
+    gen_fail=0
+    sgen=test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl
+    if git -C "$ROOT_DIR" cat-file -e "${src_sha}:$sgen" 2>/dev/null; then
+        sgen_out=$(ssh_vm "sudo sh -c 'F=/srv/simple-fixture; rm -f \$F/key-store/*.pem; \
+            install -d -o root -g root -m 0700 \$F/host-root; \
+            cd /opt/simple/src && SIMPLE_ORCH_FIXTURE_KEY_STORE=\$F/key-store \
+            SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT=\$F/machine-parent/dispatch SIMPLE_ORCH_FIXTURE_HOST_ROOT=\$F/host-root \
+            SIMPLE_ORCH_FIXTURE_MACHINE_PARENT=\$F/machine-parent SIMPLE_ORCH_FIXTURE_INPUT_DIR=\$F/input \
+            SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST=\$(sha256sum \$(command -v podman) | cut -d\" \" -f1) \
+            SIMPLE_ORCH_FIXTURE_CARET_REQUEST=\$F/caret-ssh/request.sdn \
+            timeout 600 bin/simple run $sgen 2>&1'" || true)
+        printf '%s\n' "$sgen_out" | grep '^FIXTURE ' | sed 's/^/# signed-fixture-gen: /' >> "$RUN_OUT"
+        printf '%s\n' "$sgen_out" | grep '^FIXTURE BLOCKED ' | sed 's/^FIXTURE BLOCKED /BLOCKED signed-fixture /' | tee -a "$RUN_OUT"
+        gen_fail=$(printf '%s\n' "$sgen_out" | grep -c '^FIXTURE ERROR ' || true)
+        printf '%s\n' "$sgen_out" | grep '^FIXTURE ERROR ' | sed 's/^FIXTURE ERROR /FAIL signed-fixture /' | tee -a "$RUN_OUT"
+        printf '%s\n' "$sgen_out" | grep -q '^FIXTURE ' || {
+            printf 'FAIL signed-fixture generator printed no FIXTURE line\n' | tee -a "$RUN_OUT"; gen_fail=1; }
+    fi
     # Export a path variable only when its fixture content exists (file present
     # or directory non-empty), so a spec whose signed fixture is not yet
     # authored reports BLOCKED (pending) instead of a misleading FAIL.
@@ -514,7 +534,7 @@ do_run_specs() {
         || run_error "guest env assembly failed"
     ssh_vm "sudo cat $GUEST_ENV.run" | sed 's/^/# env: /' >> "$RUN_OUT"
     logs="${VM_DIR}/last-run-logs"; rm -rf "$logs"; mkdir -p "$logs"
-    nfail=0; nerr=0; nblock=0; npass=0
+    nfail=$gen_fail; nerr=0; nblock=0; npass=0
     for spec in $SPECS; do
         name=$(basename "$spec" .spl); glog="/var/log/simple-spec-${name}.log"
         if ! git -C "$ROOT_DIR" cat-file -e "${src_sha}:$spec" 2>/dev/null; then
