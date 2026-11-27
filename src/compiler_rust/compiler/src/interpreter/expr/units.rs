@@ -196,48 +196,28 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
         BinOp::Div => match (left, right) {
             (Value::Int(l), Value::Int(r)) => {
                 if *r == 0 {
-                    // E3001 - Division By Zero
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::DIVISION_BY_ZERO)
-                        .with_help("cannot divide by zero")
-                        .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                    Err(super::ops::division_by_zero_error("division by zero", "cannot divide by zero"))
                 } else {
                     Ok(Value::Int(l / r))
                 }
             }
             (Value::Float(l), Value::Float(r)) => {
                 if *r == 0.0 {
-                    // E3001 - Division By Zero
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::DIVISION_BY_ZERO)
-                        .with_help("cannot divide by zero")
-                        .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                    Err(super::ops::division_by_zero_error("division by zero", "cannot divide by zero"))
                 } else {
                     Ok(Value::Float(l / r))
                 }
             }
             (Value::Int(l), Value::Float(r)) => {
                 if *r == 0.0 {
-                    // E3001 - Division By Zero
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::DIVISION_BY_ZERO)
-                        .with_help("cannot divide by zero")
-                        .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                    Err(super::ops::division_by_zero_error("division by zero", "cannot divide by zero"))
                 } else {
                     Ok(Value::Float(*l as f64 / r))
                 }
             }
             (Value::Float(l), Value::Int(r)) => {
                 if *r == 0 {
-                    // E3001 - Division By Zero
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::DIVISION_BY_ZERO)
-                        .with_help("cannot divide by zero")
-                        .with_note("check that the divisor is not zero before division");
-                    Err(CompileError::semantic_with_context("division by zero".to_string(), ctx))
+                    Err(super::ops::division_by_zero_error("division by zero", "cannot divide by zero"))
                 } else {
                     Ok(Value::Float(l / *r as f64))
                 }
@@ -260,11 +240,7 @@ pub(super) fn evaluate_unit_binary_inner(left: &Value, right: &Value, op: BinOp)
             (Value::Int(l), Value::Int(r)) => {
                 if *r == 0 {
                     // E3001 - Division By Zero (includes modulo)
-                    let ctx = ErrorContext::new()
-                        .with_code(codes::DIVISION_BY_ZERO)
-                        .with_help("cannot perform modulo by zero")
-                        .with_note("check that the divisor is not zero before modulo operation");
-                    Err(CompileError::semantic_with_context("modulo by zero".to_string(), ctx))
+                    Err(super::ops::division_by_zero_error("modulo by zero", "cannot perform modulo by zero"))
                 } else {
                     Ok(Value::Int(l % r))
                 }

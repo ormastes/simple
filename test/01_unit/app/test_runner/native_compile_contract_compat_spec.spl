@@ -5,12 +5,19 @@
 
 use std.spec.{describe, it, expect}
 use std.test_runner.native_compile_contract.{native_test_request_error, native_test_compile_threads,
-    native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt}
+    native_test_compile_args, native_test_compile_args_with_threads, native_test_invocation_receipt,
+    native_test_shared_artifact_key_v1, native_test_shared_artifact_path_v1,
+    NATIVE_SHARED_ARTIFACT_MIN_BYTES, NATIVE_SHARED_ARTIFACT_READY_SUFFIX, NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX}
 use std.test_runner.test_runner_execute.{native_test_request_error as legacy_request_error,
     native_test_compile_threads as legacy_compile_threads,
     native_test_compile_args as legacy_compile_args,
     native_test_compile_args_with_threads as legacy_compile_args_with_threads,
-    native_test_invocation_receipt as legacy_invocation_receipt}
+    native_test_invocation_receipt as legacy_invocation_receipt,
+    native_test_shared_artifact_key_v1 as legacy_shared_artifact_key,
+    native_test_shared_artifact_path_v1 as legacy_shared_artifact_path,
+    NATIVE_SHARED_ARTIFACT_MIN_BYTES as LEGACY_SHARED_MIN_BYTES,
+    NATIVE_SHARED_ARTIFACT_READY_SUFFIX as LEGACY_SHARED_READY_SUFFIX,
+    NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX as LEGACY_SHARED_MCDC_SUFFIX}
 
 describe "lightweight native compile contract compatibility":
     it "keeps both native backends and the empty legacy request behavior":
@@ -54,3 +61,76 @@ describe "lightweight native compile contract compatibility":
         expect(receipt).to_contain("owner\\nfile.spl")
         expect(legacy_invocation_receipt("llvm", "producer", "owner\nfile.spl",
             "/private/artifact.exe", "/pinned/compiler", args)).to_equal(receipt)
+
+describe "shared native artifact cache contract":
+    """Pins the compile-cost fix for bug sffi_manifest_signature_native_test_compile_cost_2026-08-21:
+    the native lane names one shared slot per unchanged closure, so a focused
+    leaf spec (the executable manifest signature verifier) is compiled once and
+    reused across admissions instead of recompiling its whole closure per run."""
+
+    it "names one stable slot per closure so repeated admissions reuse it":
+        val spec = "test/01_unit/os/kernel/loader/executable_manifest_signature_verifier_spec.spl"
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val first = native_test_shared_artifact_path_v1("/private/tmp", spec, digest,
+            "llvm", "producer-a", ["src/lib"], "", "", "")
+        val second = native_test_shared_artifact_path_v1("/private/tmp", spec, digest,
+            "llvm", "producer-a", ["src/lib"], "", "", "")
+        expect(first).to_equal(second)
+        expect(legacy_shared_artifact_path("/private/tmp", spec, digest,
+            "llvm", "producer-a", ["src/lib"], "", "", "")).to_equal(first)
+        expect(first).to_start_with("/private/tmp/native-shared-")
+        expect(first).to_end_with(".exe")
+        # Single path component with the native- prefix and .exe suffix: the
+        # private-cache cleanup contract's no-subdir leaf check must keep
+        # applying to shared slots.
+        val leaf = first.substring("/private/tmp/".len(), first.len())
+        expect(leaf.contains("/")).to_equal(false)
+        expect(leaf.starts_with("native-shared-")).to_equal(true)
+        # No timestamp/PID/nonce component: the name after the prefix is the
+        # pure content digest, so nothing about an invocation leaks into it.
+        val name = leaf.substring("native-shared-".len(), leaf.len() - ".exe".len())
+        expect(name.len()).to_equal(64)
+        var hex_only = true
+        for ch in name:
+            val is_digit = ch >= "0" and ch <= "9"
+            val is_lower = ch >= "a" and ch <= "f"
+            if not is_digit and not is_lower: hex_only = false
+        expect(hex_only).to_equal(true)
+        expect(name).to_equal(native_test_shared_artifact_key_v1(spec, digest,
+            "llvm", "producer-a", ["src/lib"], "", "", ""))
+
+    it "invalidates the slot when any byte-relevant input changes":
+        val spec = "test/01_unit/os/kernel/loader/executable_manifest_signature_verifier_spec.spl"
+        val digest_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val digest_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val baseline = native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-a", ["src/lib"], "", "", "")
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_b,
+            "llvm", "producer-a", ["src/lib"], "", "", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "cranelift", "producer-a", ["src/lib"], "", "", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-b", ["src/lib"], "", "", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-a", ["src/lib", "test"], "", "", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-a", ["src"], "", "", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-a", ["src/lib"], "nogc-sync-mut", "", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-a", ["src/lib"], "", "/other/runtime", "")).to_not_equal(baseline)
+        expect(native_test_shared_artifact_path_v1("/private/tmp", spec, digest_a,
+            "llvm", "producer-a", ["src/lib"], "", "", "src-other")).to_not_equal(baseline)
+        expect(legacy_shared_artifact_key(spec, digest_a, "llvm", "producer-a",
+            ["src/lib"], "", "", "")).to_equal(
+            native_test_shared_artifact_key_v1(spec, digest_a, "llvm", "producer-a",
+                ["src/lib"], "", "", ""))
+
+    it "keeps the shared slot markers and parity through the legacy export":
+        expect(NATIVE_SHARED_ARTIFACT_MIN_BYTES).to_be_greater_than(0)
+        expect(LEGACY_SHARED_MIN_BYTES).to_equal(NATIVE_SHARED_ARTIFACT_MIN_BYTES)
+        expect(LEGACY_SHARED_READY_SUFFIX).to_equal(NATIVE_SHARED_ARTIFACT_READY_SUFFIX)
+        expect(LEGACY_SHARED_MCDC_SUFFIX).to_equal(NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX)
+        expect(NATIVE_SHARED_ARTIFACT_READY_SUFFIX).to_equal(".ready")
+        expect(NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX).to_equal(".mcdc")
+        expect(NATIVE_SHARED_ARTIFACT_READY_SUFFIX).to_not_equal(NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX)

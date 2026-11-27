@@ -1,0 +1,94 @@
+# Bug: engine_specs_spec_runner_interpreter_divergence_2026-09-16 (shape 4)
+#
+# An f64 initializer bound to a val/var DECLARED with an integer type must
+# convert exactly like the explicit `as iN`/`as uN` cast in both engines:
+# truncate toward zero, then SATURATE to the declared width (`300.0 as i8`
+# is 127, not 44; `-5.5 as u8` is 0). The interpreter used to let the RHS
+# type win, so `var i: i64 = 0.0` stayed f64 and `arr[i]` failed with
+# "semantic: cannot index array with type 'f64'" while the same program ran
+# under `simple run` (JIT); the JIT used to store the raw float value and
+# the binding read back 0 (`val m: i64 = 7.9` printed 0, and the renderer's
+# `var ix0: i64 = min_x` rasterized with a zeroed origin).
+#
+# In-process pins run in the spec-runner interpreter; the differential
+# examples spawn the same binary under SIMPLE_EXECUTION_MODE=interpreter and
+# =jit and require byte-identical output.
+#
+# Patch-only seed fix (src/compiler_rust): interpreter binding coercion in
+# interpreter/node_exec.rs (coerce_to_declared_signed/unsigned) and a HIR
+# cast wrap in hir/lower/stmt_lowering.rs. The committed seed binaries are
+# NOT rebuilt; re-verify with a seed built from this tree:
+#   cd src/compiler_rust && CC=$HOME/.simple/toolchains/llvm-mingw-*/bin/clang.exe \
+#     CARGO_TARGET_DIR=<repo>/build/p3cache/engspec/cargo-target \
+#     cargo build --release -p simple-driver
+#   SIMPLE_BINARY=<repo>/build/p3cache/engspec/cargo-target/release/simple.exe \
+#     bin/simple test test/01_unit/compiler/95.interp/interpreter/annotated_local_float_init_coerces_spec.spl --mode=interpreter
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn run_src(tag: text, src: text, mode: text) -> (text, i64):
+    val file = get_temp_dir().replace("\\", "/") + "/annot_float_" + tag + ".spl"
+    val _w = write_file(file, src)
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    (out + err, rc)
+
+# The whole pinned program as one main: annotated float initializers feed an
+# array index, arithmetic, and width narrowing; output must be identical on
+# both engines. 300.0 -> i8/u8 saturates to 127/255, exactly like `as`.
+val PROBE = "fn main():\n" +
+    "    var arr: [i64] = [10, 20, 30]\n" +
+    "    var i: i64 = 0.0\n" +
+    "    print(arr[i])\n" +
+    "    val w: f64 = 5.0\n" +
+    "    val j: i64 = w - 3.0\n" +
+    "    print(j)\n" +
+    "    val t: i64 = 7.9\n" +
+    "    print(t)\n" +
+    "    val n: i64 = -7.9\n" +
+    "    print(n)\n" +
+    "    val b: i8 = 300.0\n" +
+    "    print(b as i64)\n" +
+    "    val u: u32 = 7.9\n" +
+    "    print(u as i64)\n" +
+    "    val big: u8 = 300.0\n" +
+    "    print(big as i64)\n" +
+    "main()\n"
+
+describe "annotated local with an f64 initializer":
+    it "converts at the binding: the annotated type wins, not the RHS":
+        var arr: [i64] = [10, 20, 30]
+        var i: i64 = 0.0
+        expect(arr[i]).to_equal(10)
+        val w: f64 = 5.0
+        val j: i64 = w - 3.0
+        expect(j).to_equal(2)
+    it "truncates toward zero for signed widths":
+        val t: i64 = 7.9
+        expect(t).to_equal(7)
+        val n: i64 = -7.9
+        expect(n).to_equal(-7)
+        # 300.0 -> i8 saturates, exactly like the explicit `as` cast
+        val b: i8 = 300.0
+        expect(b as i64).to_equal(127)
+    it "converts and saturates to the declared unsigned width":
+        val u: u32 = 7.9
+        expect(u as i64).to_equal(7)
+        val big: u8 = 300.0
+        expect(big as i64).to_equal(255)
+
+describe "interpreter and JIT agree on annotated float initializers":
+    it "prints identical output under both execution modes":
+        val (oi, rci) = run_src("p", PROBE, "interpreter")
+        val (oj, rcj) = run_src("p", PROBE, "jit")
+        expect(rci).to_equal(0)
+        expect(rcj).to_equal(0)
+        expect(oi).to_equal(oj)

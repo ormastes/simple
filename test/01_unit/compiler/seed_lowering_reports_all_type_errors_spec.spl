@@ -1,0 +1,86 @@
+# Seed HIR-lowering diagnostic completeness: a module with two independent
+# E1003-class type errors must report BOTH before the compile fails, not stop
+# at the first one.
+#
+# Bug row: doc/08_tracking/bug/db/seed_lowering_reports_only_first_type_error_2026-11-26.sdn
+# The defect is in the Rust seed's lowering
+# (src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs),
+# so this spec drives the seed binary's CLI rather than the in-process
+# pure-Simple lowering.
+#
+# Re-verification after the next seed deploy:
+#   bin/simple test test/01_unit/compiler/seed_lowering_reports_all_type_errors_spec.spl
+# (direct run works too: bin/simple run test/01_unit/compiler/seed_lowering_reports_all_type_errors_spec.spl)
+# The default binary path below is the deployed bootstrap seed. While the fix
+# is still a scratch build, override the path, e.g.:
+#   SIMPLE_DIAGNOSTIC_SEED_BIN=$PWD/build/p3cache/firsterr/cargo-target/release/simple.exe \
+#     bin/simple run test/01_unit/compiler/seed_lowering_reports_all_type_errors_spec.spl
+
+use std.spec.{describe, it, expect, skip}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows, get_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_exists}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.env.variables.{env_get}
+
+val CLI_RUN_TIMEOUT_MS: i64 = 120000
+val CLI_RUN_MAX_OUT: i64 = 16777216
+
+fn _repo_root() -> text:
+    cwd().replace("\\", "/")
+
+val SEED_BIN_DEFAULT = _repo_root() + "/src/compiler_rust/target/bootstrap/simple" + (if is_windows(): ".exe" else: "")
+# Scratch builds (pre-deploy verification) point here instead of the
+# not-yet-deployed bootstrap seed.
+val SEED_BIN = env_get("SIMPLE_DIAGNOSTIC_SEED_BIN") ?? SEED_BIN_DEFAULT
+
+fn _seed_it(name: text, block: fn()):
+    if file_exists(SEED_BIN):
+        it(name, block)
+    else:
+        skip(name, "seed binary not built at " + SEED_BIN + " (set SIMPLE_DIAGNOSTIC_SEED_BIN to override)")
+
+val FIXTURE_DIR = get_temp_dir().replace("\\", "/") + "/simple_seed_lowering_all_e1003_fixture"
+val FIXTURE_SRC = FIXTURE_DIR + "/two_errs.spl"
+val FIXTURE_OUT = FIXTURE_DIR + "/two_errs.out"
+
+fn _setup_fixture():
+    val _removed = dir_remove_all(FIXTURE_DIR)
+    if not dir_create_all(FIXTURE_DIR):
+        fail("could not create fixture dir " + FIXTURE_DIR)
+    # Two INDEPENDENT E1003-class errors, one per function (explicit `return`
+    # type mismatches), plus a clean main so only diagnostic completeness is
+    # under test.
+    val source = "fn first_bad() -> i64: return 1.5\n"
+        + "\n"
+        + "fn second_bad(d: Dict<text, text>) -> text: return d.get(\"k\")\n"
+        + "\n"
+        + "fn main() -> i64:\n"
+        + "    return 0\n"
+    if not file_create_exclusive(FIXTURE_SRC, source):
+        fail("could not write fixture file " + FIXTURE_SRC)
+
+fn _run_seed_compile() -> (text, text, i64):
+    val repo = _repo_root()
+    val cmd = SEED_BIN + " compile " + FIXTURE_SRC + " -o " + FIXTURE_OUT
+    # The seed resolves its surroundings relative to the repo, so run from the
+    # repo root exactly like the operator workflow does.
+    val (shell, shell_args) = if is_windows():
+        val sh = env_get("ComSpec") ?? "cmd.exe"
+        (sh, ["/d", "/c", "cd /d " + repo + " && " + cmd])
+    else:
+        ("/bin/sh", ["-c", "cd \"" + repo + "\" && \"" + SEED_BIN + "\" compile \"" + FIXTURE_SRC + "\" -o \"" + FIXTURE_OUT + "\""])
+    process_run_bounded(shell, shell_args, CLI_RUN_TIMEOUT_MS, CLI_RUN_MAX_OUT)
+
+describe "seed lowering reports every independent E1003":
+    _seed_it "reports both type errors before failing":
+        step("compile a probe with two independent E1003 functions")
+        _setup_fixture()
+        val (_out, err, code) = _run_seed_compile()
+        step("verify: the compile fails (first error still wins)")
+        expect(code).to_equal(1)
+        step("verify: the first function's E1003 is the primary diagnostic")
+        expect(err).to_contain("error[E1003] type mismatch: `first_bad` is declared to return `i64`")
+        step("verify: the later independent E1003 is reported too (regression)")
+        expect(err).to_contain("error[E1003] type mismatch: `second_bad` is declared to return `text`")

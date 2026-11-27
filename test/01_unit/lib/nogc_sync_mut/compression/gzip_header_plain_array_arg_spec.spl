@@ -1,0 +1,48 @@
+# Regression: gzip_header_parse_at(data: [u8]?) used `val input = data?`.
+# A caller passing a plain [u8] (every in-tree caller: decompress.spl, the
+# common facade) hit "? operator requires Result or Option type, got array",
+# so std.common.compress.gzip.gzip_decompress returned [] for valid input.
+# Surfaced by test/01_unit/compiler/common/di_spec.spl "gzip compression roundtrip".
+use std.spec.step
+use std.spec.*
+use std.nogc_sync_mut.compression.gzip.header.{gzip_header_parse, gzip_header_parse_at, gzip_footer_parse}
+use std.nogc_sync_mut.compression.gzip.decompress.{gzip_decompress as owned_decompress}
+use std.common.compress.gzip.{gzip_compress, gzip_decompress}
+
+val _abc_member: [u8] = [31,139,8,0,0,0,0,0,0,3, 1,3,0,252,255,97,98,99, 194,65,36,53,3,0,0,0]
+
+fn _no_bytes() -> [u8]?:
+    None
+
+describe "gzip header parse accepts a plain [u8] argument":
+    it "parses a header from a non-optional array at offset 0":
+        step("parses a header from a non-optional array at offset 0")
+        val info = gzip_header_parse(_abc_member) ?? []
+        expect(info.len() > 0).to_equal(true)
+        # last element is the absolute offset after the 10-byte fixed header
+        expect(info[info.len() - 1]).to_equal(10)
+
+    it "parses a header from a non-optional array at a member offset":
+        step("parses a header from a non-optional array at a member offset")
+        var two: [u8] = []
+        for b in _abc_member:
+            two.push(b)
+        for b in _abc_member:
+            two.push(b)
+        val info = gzip_header_parse_at(two, _abc_member.len()) ?? []
+        expect(info[info.len() - 1]).to_equal(_abc_member.len() + 10)
+
+    it "returns None for a None argument instead of failing":
+        step("returns None for a None argument instead of failing")
+        expect((gzip_header_parse(_no_bytes()) ?? [-1])[0]).to_equal(-1)
+        expect((gzip_footer_parse(_no_bytes(), 0) ?? [-1])[0]).to_equal(-1)
+
+    it "decodes through the owner API and the common facade":
+        step("decodes through the owner API and the common facade")
+        expect(owned_decompress(_abc_member) ?? []).to_equal([97u8, 98u8, 99u8])
+        expect(gzip_decompress(_abc_member)).to_equal([97u8, 98u8, 99u8])
+
+    it "round-trips through the common facade":
+        step("round-trips through the common facade")
+        val data = "hello hello hello hello".bytes()
+        expect(gzip_decompress(gzip_compress(data))).to_equal(data)

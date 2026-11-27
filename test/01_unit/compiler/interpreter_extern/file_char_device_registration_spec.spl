@@ -24,6 +24,7 @@ describe "rt_file_is_char_device seed/JIT registration":
         step("keeps the canonical (ptr, len) ABI with no stale C copy in the gpu stub")
         val stub = rt_file_read_text("src/runtime/runtime_native_gpu_stub.c") ?? ""
         val runtime_c = rt_file_read_text("src/runtime/runtime.c") ?? ""
+        val stat_impl = rt_file_read_text("src/runtime/runtime_file_stat_impl.h") ?? ""
         val mod_rs = rt_file_read_text("src/compiler_rust/compiler/src/interpreter_extern/mod.rs") ?? ""
         # The gpu stub must document the removal and must NOT define the symbol.
         expect(stub).to_contain("do not")
@@ -31,6 +32,13 @@ describe "rt_file_is_char_device seed/JIT registration":
         assert_false(stub.contains("int rt_file_is_char_device(const char* path)"))
         # The canonical C runtime definition uses the two-argument (ptr, len) ABI.
         expect(runtime_c).to_contain("int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len)")
-        expect(runtime_c).to_contain("S_ISCHR(st.st_mode)")
+        # Updated 2026-11-28: the C dedup moved the stat(2) body into the one
+        # shared header (also included by runtime_native.c); runtime.c's
+        # definition delegates to it, and the header does the S_ISCHR probe
+        # over the same (ptr, len) ABI.
+        expect(runtime_c).to_contain("#include \"runtime_file_stat_impl.h\"")
+        expect(runtime_c).to_contain("return rt_file_is_char_device_impl(path_ptr, path_len);")
+        expect(stat_impl).to_contain("static int rt_file_is_char_device_impl(const uint8_t* path_ptr, uint64_t path_len)")
+        expect(stat_impl).to_contain("S_ISCHR(st.st_mode)")
         # The interpreter extern table registers the name.
         expect(mod_rs).to_contain("\"rt_file_is_char_device\"")

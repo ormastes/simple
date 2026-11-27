@@ -1,0 +1,328 @@
+# ============================================================================
+# common/search/chunk.spl — chunk/snippet document model (context-mode gap 1)
+#
+# Closes the chunking half of
+# doc/08_tracking/bug/spipe_lacks_context_mode_chunking_and_surfaces_2026-08-31.md:
+# the lexical pipeline ranked whole documents only, so a caller had to read an
+# entire file per hit. context-mode's token-reduction mechanism is chunk-level
+# addressing — a source appears once per matching chunk, each chunk under a
+# stable chunk id — plus a bounded snippet so the caller never materializes
+# the whole file. Gap-1 acceptance from the doc: "a chunk id in the SPipe
+# document model and a snippet field on SearchHit" (the latter lives in
+# document.spl next to SearchHit; this module owns the chunk model and the
+# selection/extraction seams).
+#
+# Layers:
+#   * SearchChunk + ChunkBudget + chunk_document_v1: split a SearchDocument
+#     into deterministic byte-budgeted chunks snapped to line boundaries.
+#   * SnippetBudget + snippet_for_chunk_v1: extract a bounded excerpt window
+#     centred on the first query-term occurrence (chunk head as fallback).
+#   * attach_document_snippets_v1: the provider surface — ranked SearchHits
+#     in, identical ranks with the best-matching chunk's snippet attached out.
+#
+# Deliberately NOT in scope (doc triage 2026-11-11): Porter stemming and the
+# trigram fallback ship as analyzer `-v2`; sandboxed execute surfaces and
+# savings accounting are separately scoped. The frozen §14.11/§14.12 wire hit
+# shape is untouched — snippets surface through this library, not the wire.
+#
+# Budget semantics mirror std.common.token_budget: a non-positive snippet
+# budget is disabled (whole chunk), never an error; a non-positive chunk
+# budget is rejected, because silently indexing nothing would drop the
+# document. UNIT PITFALL: text.len() counts CODEPOINTS while text.slice /
+# text.index_of / text.bytes() are BYTE-based (probed 2026-11-27: "é".len()
+# is 1, its slice offsets are bytes) — every budget comparison below goes
+# through bytes().len(), never len(). (common/token_budget.spl's "len() is
+# BYTES" comment is wrong; its inputs are ASCII so the bug never fires.)
+# ============================================================================
+
+use std.common.search.document.{SearchDocument, SearchHit, SearchSnippet}
+use std.common.search.query.{SearchQuery}
+use std.common.search.analyzer.{analyze_text}
+use std.common.search.generated.unicode_17_0_0.{unicode_default_lowercase}
+
+# ----------------------------------------------------------------------------
+# SearchChunk -- one addressable region of a document field
+# ----------------------------------------------------------------------------
+struct SearchChunk:
+    """A chunk of one document field. `chunk_id` is deterministic —
+    `<document_id>/<field_name>#<ordinal>` with a 1-based ordinal per field —
+    so callers can address, cite, and cache a chunk without re-reading the
+    whole document."""
+
+    chunk_id: text
+    document_id: text
+    field_name: text
+    ordinal: i64
+    body: text
+
+impl SearchChunk:
+    static fn of(chunk_id: text, document_id: text, field_name: text, ordinal: i64, body: text) -> SearchChunk:
+        SearchChunk(chunk_id: chunk_id, document_id: document_id, field_name: field_name, ordinal: ordinal, body: body)
+
+    fn equals(other: SearchChunk) -> bool:
+        self.chunk_id == other.chunk_id and self.document_id == other.document_id and
+            self.field_name == other.field_name and self.ordinal == other.ordinal and
+            self.body == other.body
+
+# ----------------------------------------------------------------------------
+# ChunkBudget / SnippetBudget -- closed capacity records
+# ----------------------------------------------------------------------------
+struct ChunkBudget:
+    """Capacity for chunk_document_v1: at most `max_chunk_bytes` per chunk
+    body and at most `max_chunks` chunks per document. The chunk count is a
+    fail-closed ceiling: exceeding it returns an error rather than silently
+    dropping the document's tail."""
+
+    max_chunk_bytes: i64
+    max_chunks: i64
+
+impl ChunkBudget:
+    static fn of(max_chunk_bytes: i64, max_chunks: i64) -> ChunkBudget:
+        ChunkBudget(max_chunk_bytes: max_chunk_bytes, max_chunks: max_chunks)
+
+    static fn default() -> ChunkBudget:
+        """Roomy default: 4 KiB per chunk, 256 chunks per document."""
+        ChunkBudget(max_chunk_bytes: 4096, max_chunks: 256)
+
+struct SnippetBudget:
+    """Byte ceiling for one excerpt. Non-positive means disabled: the excerpt
+    is the whole chunk body (mirrors token_budget's disabled-budget rule)."""
+
+    excerpt_bytes: i64
+
+impl SnippetBudget:
+    static fn of(excerpt_bytes: i64) -> SnippetBudget:
+        SnippetBudget(excerpt_bytes: excerpt_bytes)
+
+    static fn default() -> SnippetBudget:
+        SnippetBudget(excerpt_bytes: 240)
+
+# ----------------------------------------------------------------------------
+# Splitting helpers (private; byte-oriented, UTF-8 boundary safe)
+# ----------------------------------------------------------------------------
+
+# text.slice() bounded to whole UTF-8 sequences. `from` skips stray
+# continuation bytes (128..=191) forward; `to` extends forward while the
+# next byte is a continuation, so a piece that would cut a multi-byte
+# sequence absorbs it whole instead. A piece may exceed `length` by at most
+# 3 bytes (UTF-8 sequences span at most 4 bytes); it never splits one.
+fn _utf8_snapped_slice(body: text, start: i64, length: i64) -> text:
+    val data = body.bytes()
+    var from = start
+    var to = start + length
+    if from < 0: from = 0
+    if to > data.len(): to = data.len()
+    while from < to and data[from].to_i64() >= 128 and data[from].to_i64() <= 191:
+        from = from + 1
+    while to < data.len() and data[to].to_i64() >= 128 and data[to].to_i64() <= 191:
+        to = to + 1
+    body.slice(from, to)
+
+# First index of `needle` in `hay` under ASCII case folding, or -1. ASCII
+# folding preserves byte length, so the index is always a valid offset into
+# the ORIGINAL text — a Unicode-lowercase index could drift when folding
+# changes byte length before the match. Query terms from analyze_text are
+# already lowercase, so only the haystack needs folding.
+fn _ascii_index_of(hay: text, needle: text) -> i64:
+    val h = hay.bytes()
+    val n = needle.bytes()
+    if n.len() == 0: return 0
+    if n.len() > h.len(): return 0 - 1
+    var i = 0
+    while i <= h.len() - n.len():
+        var j = 0
+        var matched = true
+        while j < n.len():
+            var hb = h[i + j].to_i64()
+            if hb >= 65 and hb <= 90: hb = hb + 32
+            if hb != n[j].to_i64(): matched = false
+            j = j + 1
+        if matched: return i
+        i = i + 1
+    0 - 1
+
+# First occurrence of a query term in `body`, or -1. ASCII-folded scan first;
+# a non-ASCII term additionally tries the Unicode-lowercased index, which is
+# only trusted when lowercasing preserved the byte length (otherwise the
+# index would not line up with `body`).
+fn _term_anchor(body: text, term: text) -> i64:
+    val at = _ascii_index_of(body, term)
+    if at >= 0: return at
+    val bytes = term.bytes()
+    var i = 0
+    while i < bytes.len():
+        if bytes[i].to_i64() >= 128:
+            val lowered = unicode_default_lowercase(body)
+            if lowered.len() == body.len():
+                return lowered.index_of(term)
+            return 0 - 1
+        i = i + 1
+    0 - 1
+
+# ----------------------------------------------------------------------------
+# chunk_document_v1 -- document -> deterministic chunks
+# ----------------------------------------------------------------------------
+
+# Pure chunk constructor; the deterministic chunk id is derived here so every
+# call site formats it identically.
+fn _make_chunk(document_id: text, field_name: text, ordinal: i64, body: text) -> SearchChunk:
+    SearchChunk.of(document_id + "/" + field_name + "#" + str(ordinal),
+        document_id, field_name, ordinal, body)
+
+pub fn chunk_document_v1(document: SearchDocument, budget: ChunkBudget) -> Result<[SearchChunk], text>:
+    """Split every non-empty field value into chunks of at most
+    `budget.max_chunk_bytes` bytes (a hard-split piece may exceed the budget
+    by up to 3 bytes to keep a multi-byte sequence whole), snapped to "\n"
+    line boundaries. A single line longer than the budget is hard-split into
+    consecutive UTF-8-snapped pieces, so concatenating all chunk bodies of a
+    field reproduces the value (with "\n" rejoins only at line boundaries).
+    Ordinals are 1-based per field and chunk ids are deterministic. Empty
+    documents chunk to [].
+
+    The byte budget must be >= 4: UTF-8 sequences span at most 4 bytes, so a
+    smaller budget could not promise split-free pieces."""
+    if budget.max_chunk_bytes < 4 or budget.max_chunks < 1:
+        return Err("invalid_chunk_budget")
+    var out: [SearchChunk] = []
+    var f = 0
+    while f < document.fields.len():
+        val field = document.fields[f]
+        if field.value.len() > 0:
+            val lines = field.value.split("\n")
+            var pending: [text] = []
+            var pending_bytes: i64 = 0
+            var ordinal: i64 = 1
+            var i = 0
+            while i < lines.len():
+                val line = lines[i]
+                val cost = line.bytes().len()
+                if pending.len() > 0 and pending_bytes + 1 + cost > budget.max_chunk_bytes:
+                    if out.len() >= budget.max_chunks:
+                        return Err("chunk_budget_exceeded")
+                    out.push(_make_chunk(document.id, field.name, ordinal,
+                        pending.join("\n")))
+                    ordinal = ordinal + 1
+                    pending = []
+                    pending_bytes = 0
+                if cost > budget.max_chunk_bytes:
+                    # One line over budget: consecutive hard pieces, each
+                    # snapped so no piece splits a multi-byte sequence.
+                    val line_bytes = line.bytes().len()
+                    var at = 0
+                    while at < line_bytes:
+                        var piece_len = budget.max_chunk_bytes
+                        if piece_len > line_bytes - at: piece_len = line_bytes - at
+                        val piece = _utf8_snapped_slice(line, at, piece_len)
+                        if piece.len() == 0:
+                            # Unreachable with budgets >= 4; guards the loop.
+                            return Err("invalid_chunk_budget")
+                        if out.len() >= budget.max_chunks:
+                            return Err("chunk_budget_exceeded")
+                        out.push(_make_chunk(document.id, field.name, ordinal, piece))
+                        ordinal = ordinal + 1
+                        at = at + piece.bytes().len()
+                else:
+                    pending.push(line)
+                    if pending.len() == 1:
+                        pending_bytes = cost
+                    else:
+                        pending_bytes = pending_bytes + 1 + cost
+                i = i + 1
+            if pending.len() > 0:
+                if out.len() >= budget.max_chunks:
+                    return Err("chunk_budget_exceeded")
+                out.push(_make_chunk(document.id, field.name, ordinal,
+                    pending.join("\n")))
+        f = f + 1
+    Ok(out)
+
+# ----------------------------------------------------------------------------
+# snippet_for_chunk_v1 -- chunk -> bounded excerpt
+# ----------------------------------------------------------------------------
+
+pub fn snippet_for_chunk_v1(chunk: SearchChunk, query: SearchQuery, budget: SnippetBudget) -> Result<SearchSnippet, text>:
+    """Extract a bounded excerpt of `chunk` for `query`. Chunks inside the
+    budget return whole. Larger chunks return a window centred on the first
+    query-term occurrence, falling back to the chunk head when no term
+    occurs. The window never splits a multi-byte sequence."""
+    val cap = budget.excerpt_bytes
+    val body_bytes = chunk.body.bytes().len()
+    if cap <= 0 or body_bytes <= cap:
+        return Ok(SearchSnippet.of(chunk.chunk_id, chunk.body))
+    val terms = analyze_text(query.text_value)
+    var anchor = 0 - 1
+    var t = 0
+    while t < terms.len():
+        val at = _term_anchor(chunk.body, terms[t])
+        if at >= 0 and (anchor < 0 or at < anchor): anchor = at
+        t = t + 1
+    var start = 0
+    if anchor >= 0:
+        start = anchor - cap / 2
+        if start < 0: start = 0
+    if start + cap > body_bytes: start = body_bytes - cap
+    Ok(SearchSnippet.of(chunk.chunk_id, _utf8_snapped_slice(chunk.body, start, cap)))
+
+# ----------------------------------------------------------------------------
+# attach_document_snippets_v1 -- ranked hits -> snippet-carrying hits
+# ----------------------------------------------------------------------------
+
+fn _chunk_match_count(body: text, terms: [text]) -> i64:
+    """Total occurrences of any query term in the chunk's analyzed tokens."""
+    val tokens = analyze_text(body)
+    var count = 0
+    var t = 0
+    while t < terms.len():
+        var k = 0
+        while k < tokens.len():
+            if tokens[k] == terms[t]: count = count + 1
+            k = k + 1
+        t = t + 1
+    count
+
+# Highest-overlap chunk wins; ties keep the earliest ordinal. When no chunk
+# matches any term the first chunk is used, so the hit still previews its
+# head instead of nothing.
+fn _best_matching_chunk(chunks: [SearchChunk], query: SearchQuery) -> Result<SearchChunk, text>:
+    if chunks.len() == 0: return Err("no_chunks")
+    val terms = analyze_text(query.text_value)
+    var best = 0
+    var best_count = 0 - 1
+    var i = 0
+    while i < chunks.len():
+        val count = _chunk_match_count(chunks[i].body, terms)
+        if count > best_count:
+            best_count = count
+            best = i
+        i = i + 1
+    Ok(chunks[best])
+
+pub fn attach_document_snippets_v1(hits: [SearchHit], documents: [SearchDocument],
+                                   query: SearchQuery, chunking: ChunkBudget,
+                                   snippet: SnippetBudget) -> Result<[SearchHit], text>:
+    """The provider surface for gap 1: for every ranked hit, chunk its
+    document, pick the chunk with the highest query-term overlap, and return
+    the same hit (document_id/score/rank preserved) carrying that chunk's
+    snippet. Hits whose document is absent from `documents` or has no
+    chunkable content pass through unchanged with no snippet."""
+    var out: [SearchHit] = []
+    var h = 0
+    while h < hits.len():
+        var document_index = 0 - 1
+        var d = 0
+        while d < documents.len():
+            if documents[d].id == hits[h].document_id: document_index = d
+            d = d + 1
+        if document_index < 0:
+            out.push(hits[h])
+        else:
+            val chunks = chunk_document_v1(documents[document_index], chunking)?
+            if chunks.len() == 0:
+                out.push(hits[h])
+            else:
+                val best = _best_matching_chunk(chunks, query)?
+                val made = snippet_for_chunk_v1(best, query, snippet)?
+                out.push(SearchHit.of_snippet(hits[h].document_id, hits[h].score,
+                    hits[h].rank, made))
+        h = h + 1
+    Ok(out)
