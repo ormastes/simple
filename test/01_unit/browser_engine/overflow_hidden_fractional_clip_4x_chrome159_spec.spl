@@ -1,0 +1,46 @@
+"""
+## Purpose and audience
+Purpose: pin Chrome 159's 4x (384 dpi) clip of an `overflow:hidden` box whose
+CSS size is fractional, so the device-px clip edge of a non-textarea box has an
+oracle. Audience: maintainers of block layout fractional sizes and the
+device-px clip edges (`_html_draw_ir_device_clip`).
+
+Chrome oracle (Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4`, window
+400x300): `.o{margin:10px 0 0 10px;width:100.25px;height:10.5px;
+overflow:hidden;background:#dde}` holding a 40px `#c00` child. The child is
+clipped at device row 82 and column 441 (k x 10.5 = 42 rows from top 40,
+k x 100.25 = 401 columns from left 40): rows 80-81 and column 440 are
+(204,0,0), row 82 and column 441 are white.
+
+Gap (in development): Simple drops the fraction in layout, so the box itself
+is 100x10 CSS px and the clip ends at device row 80 / column 440 (base
+e1e040faccd and the textarea-clip lane alike). The textarea-clip lane keeps its
+device clip-edge shift to textarea owners because of this.
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CONTROL-TEXT-PEN-001 -- device-px clip edge of a fractional overflow box.
+"""
+# @tag: unit, browser_engine, chrome159
+# @tag:in-development
+# Tracks: overflow_hidden_fractional_clip_4x_drops_fraction_2026-11-27
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val K: i32 = 4
+val STRIDE: i32 = 400 * 4
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}} .o{{margin:10px 0 0 10px;width:100.25px;height:10.5px;overflow:hidden;background:#dde}} .c{{height:40px;background:#c00}}</style></head><body><div class=\"o\"><div class=\"c\"></div></div></body></html>"
+
+fn _px(px: [u32], x: i32, y: i32) -> text:
+    val p = px[y * STRIDE + x]
+    "({(p >> 16u32) & 255u32},{(p >> 8u32) & 255u32},{p & 255u32})"
+
+describe "overflow:hidden box of fractional size at 4x (Chrome 159)":
+    it "AC-1: clips its child at the device-px box edge":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, 400, 300, K, "cpu_simd")
+        val got = "r81c240={_px(px, 240, 81)} r82c240={_px(px, 240, 82)} r75c440={_px(px, 440, 75)} r75c441={_px(px, 441, 75)}"
+        expect(got).to_equal("r81c240=(204,0,0) r82c240=(255,255,255) r75c440=(204,0,0) r75c441=(255,255,255)")
