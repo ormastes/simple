@@ -65,13 +65,16 @@ pub class LinuxFreshWorkloadOwnerV2:
 
     pub fn project_v2(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
         if self.workspace_root.is_some(): return self.transfer.project_workspace_request_v3(request)
-        val decoded = machine_fresh_workload_request_v2(self.scope_v2()?, request)?
+        # Build roots and a TTY are projected only under the installed profile's
+        # admission; without it this is the historical first-profile refusal.
+        val decoded = machine_fresh_workload_request_admitted_v2(self.scope_v2()?, request,
+            self.transfer.workload_admission_v2()?)?
         val retained = self.transfer.request_v2()
         if retained.is_ok() and retained.unwrap().request != request: return Err("machine-fresh-workload-request-changed")
         Ok(ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
             operation_id: decoded.operation_id, request_digest: request.plan.request_digest,
             cpu_millis: decoded.cpu_limit_millis, memory_bytes: decoded.memory_limit_bytes,
-            timeout_ms: decoded.timeout_ms, has_devices: false, has_workspace: false))
+            timeout_ms: decoded.timeout_ms, has_devices: false, has_workspace: decoded.build_input_root != ""))
 
     fn identity_v2(request: ContainerExecutionRequestV2) -> Result<RuntimeIdentityV1, text>:
         val projected = self.project_v2(request)?

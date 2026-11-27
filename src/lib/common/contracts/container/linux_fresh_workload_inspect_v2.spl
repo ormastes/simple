@@ -76,6 +76,62 @@ fn workload_empty_array_v2(value: JsonValue, key: text) -> Result<(), text>:
         case _: return Err("fresh-workload-inspect-array-type")
     Ok(())
 
+fn workload_mount_options_v2(values: [text], binds: bool, writable: bool) -> Result<(), text>:
+    if values.len() > 8: return Err("fresh-workload-mount-options-bound")
+    var seen: [text] = []
+    for value in values:
+        if seen.contains(value) or not ["rw", "ro", "rprivate", "rbind", "bind", "nosuid", "nodev", "noexec"].contains(value):
+            return Err("fresh-workload-mount-option-unsupported")
+        # Podman reports access mode and propagation as their own inspect fields.
+        if not binds and (value == "rw" or value == "ro" or value == "rprivate"): return Err("fresh-workload-inspect-mount-option-shape")
+        seen.push(value)
+    if not seen.contains("bind") and not seen.contains("rbind"): return Err("fresh-workload-bind-option-required")
+    if not seen.contains("nosuid") or not seen.contains("nodev"): return Err("fresh-workload-nosuid-nodev-required")
+    if binds and (not seen.contains("rprivate") or seen.contains("rw") == seen.contains("ro") or seen.contains("rw") != writable):
+        return Err("fresh-workload-private-bind-access-required")
+    Ok(())
+
+# Exactly the two requested build binds: the input read-only, the output
+# writable, both private nosuid/nodev, with one corresponding HostConfig bind each.
+fn workload_build_mounts_v2(command: LinuxFreshWorkloadCommandV2, value: JsonValue) -> Result<(), text>:
+    val values = match linux_fresh_workload_inspect_member_v2(value, "mounts")?:
+        case JsonValue.Array(found): found
+        case _: return Err("fresh-workload-build-mount-array-required")
+    val binds = linux_fresh_workload_inspect_strings_v2(value, "binds", 2)?
+    if values.len() != 2 or binds.len() != 2: return Err("fresh-workload-two-build-mounts-required")
+    for pair in [(command.build_input_root, LINUX_FRESH_WORKLOAD_BUILD_INPUT_GUEST_V2, false),
+            (command.build_output_root, LINUX_FRESH_WORKLOAD_BUILD_OUTPUT_GUEST_V2, true)]:
+        var matched = 0
+        for mount in values:
+            val keys = json_value_keys(mount)
+            if keys.len() != 8 and keys.len() != 9: return Err("fresh-workload-created-mount-fields")
+            for key in ["Type", "Source", "Destination", "Driver", "Mode", "Options", "RW", "Propagation"]:
+                if not keys.contains(key): return Err("fresh-workload-created-mount-fields")
+            if keys.len() == 9 and (not keys.contains("Name") or linux_fresh_workload_inspect_text_v2(mount, "Name")? != ""):
+                return Err("fresh-workload-named-volume-unavailable")
+            if linux_fresh_workload_inspect_text_v2(mount, "Destination")? != pair.1: continue
+            for field in [("Type", "bind"), ("Source", pair.0), ("Driver", ""), ("Mode", ""), ("Propagation", "rprivate")]:
+                if linux_fresh_workload_inspect_text_v2(mount, field.0)? != field.1: return Err("fresh-workload-created-mount-mapping")
+            if linux_fresh_workload_inspect_member_v2(mount, "RW")? != JsonValue.Bool(pair.2):
+                return Err("fresh-workload-created-mount-access")
+            val options = linux_fresh_workload_inspect_strings_v2(mount, "Options", 8)?
+            workload_mount_options_v2(options, false, pair.2)?
+            var bound = 0
+            for bind in binds:
+                val fields = bind.split(":")
+                if fields.len() != 3: return Err("fresh-workload-bind-mapping")
+                if fields[0] != pair.0 or fields[1] != pair.1: continue
+                val bind_options = fields[2].split(",")
+                workload_mount_options_v2(bind_options, true, pair.2)?
+                if bind_options.len() != options.len() + 2: return Err("fresh-workload-bind-option-correspondence")
+                for option in options:
+                    if not bind_options.contains(option): return Err("fresh-workload-bind-option-correspondence")
+                bound = bound + 1
+            if bound != 1: return Err("fresh-workload-bind-mapping")
+            matched = matched + 1
+        if matched != 1: return Err("fresh-workload-created-mount-mapping")
+    Ok(())
+
 fn workload_annotations_v2(value: JsonValue, key: text) -> Result<(), text>:
     val member = linux_fresh_workload_inspect_member_v2(value, key)?
     match member:
@@ -159,7 +215,11 @@ pub fn linux_fresh_workload_created_config_validate_v2(command: LinuxFreshWorklo
     if created.len() < 1: return Err("fresh-workload-created-command-unavailable")
     val parent = linux_fresh_workload_inspect_text_v2(value, "cgroup_parent")?
     if parent == "" or not parent.starts_with("/"): return Err("fresh-workload-created-parent-unavailable")
-    for key in ["mounts", "binds", "volumes_from"]: workload_empty_array_v2(value, key)?
+    if command.build_input_root == "":
+        for key in ["mounts", "binds", "volumes_from"]: workload_empty_array_v2(value, key)?
+    else:
+        workload_empty_array_v2(value, "volumes_from")?
+        workload_build_mounts_v2(command, value)?
     val tmpfs = linux_fresh_workload_inspect_member_v2(value, "tmpfs")?
     match tmpfs:
         case JsonValue.Null: pass

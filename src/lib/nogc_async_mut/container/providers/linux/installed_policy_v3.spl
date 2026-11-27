@@ -15,6 +15,9 @@ pub struct LinuxOciInstalledPolicyV3:
     socket_path: text
     expected_service_uid: i64
     api_version: text
+    # Installed admission for a finite detached TTY exec. "none" (default)
+    # refuses and is never serialized, keeping historical bytes and digest.
+    exec_terminal_mode: text = "none"
 
 pub fn linux_oci_installed_policy_error_v3(policy: LinuxOciInstalledPolicyV3) -> text:
     val cli_error = linux_oci_engine_policy_error_v1(policy.cli_policy)
@@ -23,6 +26,8 @@ pub fn linux_oci_installed_policy_error_v3(policy: LinuxOciInstalledPolicyV3) ->
             policy.expected_service_uid != policy.cli_policy.expected_uid):
         return "installed-policy-service-uid-mismatch"
     if policy.api_version != "5.2.5": return "installed-policy-api-version-unsupported"
+    if policy.exec_terminal_mode != "none" and policy.exec_terminal_mode != "tty":
+        return "installed-policy-exec-terminal-mode-invalid"
     val path = policy.socket_path
     if (not path.starts_with("/") or path == "/" or str_len(path) > 4095 or
             path.ends_with("/") or path.contains("//")):
@@ -39,11 +44,12 @@ pub fn linux_oci_installed_policy_error_v3(policy: LinuxOciInstalledPolicyV3) ->
 pub fn linux_oci_installed_policy_encode_v3(policy: LinuxOciInstalledPolicyV3) -> Result<text, text>:
     val error = linux_oci_installed_policy_error_v3(policy)
     if error != "": return Err(error)
-    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-installed-policy"), "version": SdnValue.Int(3),
+    var fields: Dict<text, SdnValue> = {"kind": SdnValue.String("linux-oci-installed-policy"), "version": SdnValue.Int(3),
         "cliPolicy": SdnValue.String(linux_oci_engine_policy_encode_v1(policy.cli_policy)?),
         "cliPolicyDigest": SdnValue.String(linux_oci_engine_policy_digest_v1(policy.cli_policy)?),
         "socketPath": SdnValue.String(policy.socket_path), "expectedServiceUid": SdnValue.Int(policy.expected_service_uid),
         "apiVersion": SdnValue.String(policy.api_version)}
+    if policy.exec_terminal_mode == "tty": fields["execTerminalMode"] = SdnValue.String("tty")
     val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
     if str_len(source) > 1048576: return Err("installed-policy-source-bound")
     Ok(source)
@@ -63,7 +69,13 @@ pub fn linux_oci_installed_policy_decode_v3(source: text) -> Result<LinuxOciInst
         case SdnValue.Dict(value): value
         case _: return Err("installed-policy-object-required")
     val names = ["kind", "version", "cliPolicy", "cliPolicyDigest", "socketPath", "expectedServiceUid", "apiVersion"]
-    if fields.len() != names.len(): return Err("installed-policy-fields")
+    # Optional admission key; only the admitting value "tty" is ever written.
+    var exec_terminal_mode = "none"
+    if fields.contains_key("execTerminalMode"):
+        if fields.len() != names.len() + 1 or installed_policy_text_v3(fields, "execTerminalMode")? != "tty":
+            return Err("installed-policy-exec-terminal-mode-invalid")
+        exec_terminal_mode = "tty"
+    elif fields.len() != names.len(): return Err("installed-policy-fields")
     for key in names:
         if not fields.contains_key(key): return Err("installed-policy-fields")
     if installed_policy_text_v3(fields, "kind")? != "linux-oci-installed-policy":
@@ -80,7 +92,8 @@ pub fn linux_oci_installed_policy_decode_v3(source: text) -> Result<LinuxOciInst
     if linux_oci_engine_policy_digest_v1(cli)? != installed_policy_text_v3(fields, "cliPolicyDigest")?:
         return Err("installed-policy-cli-digest-mismatch")
     val policy = LinuxOciInstalledPolicyV3(cli_policy: cli, socket_path: installed_policy_text_v3(fields, "socketPath")?,
-        expected_service_uid: uid, api_version: installed_policy_text_v3(fields, "apiVersion")?)
+        expected_service_uid: uid, api_version: installed_policy_text_v3(fields, "apiVersion")?,
+        exec_terminal_mode: exec_terminal_mode)
     if linux_oci_installed_policy_encode_v3(policy)? != source: return Err("installed-policy-noncanonical")
     Ok(policy)
 
