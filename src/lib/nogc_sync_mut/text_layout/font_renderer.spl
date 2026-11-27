@@ -993,6 +993,22 @@ val _WM_TRACE: bool = (env_get("SIMPLE_WM_TRACE") ?? "") == "1"
 var _vec_atlas_probe_count: i32 = 0
 var _vec_glyph_probe_count: i32 = 0
 
+# Atlas word of a gray (non-LCD) cell pixel by coverage: `(v << 24) | 0x00FFFFFF`.
+# A table read per pixel replaces a conversion, a shift and an or on the
+# interpreter lane (gray cells above the LCD cutoff are ~1500 px each).
+var _gray_atlas_words: [u32] = []
+
+fn _gray_atlas_word_table() -> [u32]:
+    if _gray_atlas_words.len() == 256:
+        return _gray_atlas_words
+    var words: [u32] = [0u32; 256]
+    var v: i64 = 0
+    while v < 256:
+        words[v] = ((v as u32) << 24) | 0x00FFFFFFu32
+        v = v + 1
+    _gray_atlas_words = words
+    words
+
 # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md:
 # FontRenderBatch.transform_identity's class-field default reads back empty
 # on freestanding native-build, which fails material_supported() and blocks
@@ -3379,6 +3395,7 @@ class FontRenderer:
         var atlas = self.atlas_pixels
         self.atlas_pixels = []
         var line: [u32] = [0u32; gw]
+        val gray_words = _gray_atlas_word_table()
         var row: i64 = 0
         while row < gh:
             var col: i64 = 0
@@ -3392,8 +3409,17 @@ class FontRenderer:
                         (subpixels[sub + 1].to_u32() << 8) | subpixels[sub + 2].to_u32()
                     col = col + 1
             else:
+                # Four pixels a step: the loop test and the increment were a
+                # third of this per-pixel table read on the interpreter lane.
+                val gw4 = gw - 3
+                while col < gw4:
+                    line[col] = gray_words[gray[base + col] as i64]
+                    line[col + 1] = gray_words[gray[base + col + 1] as i64]
+                    line[col + 2] = gray_words[gray[base + col + 2] as i64]
+                    line[col + 3] = gray_words[gray[base + col + 3] as i64]
+                    col = col + 4
                 while col < gw:
-                    line[col] = (gray[base + col].to_u32() << 24) | 0x00FFFFFFu32
+                    line[col] = gray_words[gray[base + col] as i64]
                     col = col + 1
             if _VEC_ATLAS_PROBE:
                 var pc: i64 = 0

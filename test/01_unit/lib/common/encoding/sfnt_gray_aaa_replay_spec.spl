@@ -1,0 +1,78 @@
+# @tag: unit, text, sfnt, gray
+# @cover src/lib/common/encoding/sfnt_glyf.spl 2%
+#
+# Gray glyphs above the LCD cutoff are filled by the Skia AAA walker at one
+# sample per pixel. The first quarter phase drawn records its trapezoid rows
+# through `_aaa_trap_row_gray` (a line-for-line copy of `_aaa_trap_row`
+# without the mask plane); the other phases replay the record shifted
+# (`_gray_aaa_replay`). The oracle is a direct fill with no record, which
+# runs the unspecialised `_aaa_trap_row`: every byte of every phase must
+# match, both for the recording pass and for the replays, so the copy and
+# the replay cannot drift from the walker.
+
+use std.spec.*
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, sfnt_gray_glyph_outline,
+    sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdOutline, _lcd_aaa_mask}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+
+# Bytes of `got` that differ from the direct, record-free fill at `phase_q`;
+# -1 when the frames disagree.
+fn direct_mismatch(outline: SfntLcdOutline, phase_q: i64, got: [u8]) -> i64:
+    val frame = sfnt_gray_outline_frame(outline, phase_q)
+    val width = frame[0]
+    val height = frame[1]
+    if got.len() != width * height: return -1
+    val mask = _lcd_aaa_mask(outline.slo_commands, outline.slo_scale, phase_q as f64 / 4.0, frame[2],
+        0.0 - outline.slo_raster_top, width, height, 1, [])
+    var bad: i64 = 0
+    var y: i64 = 0
+    while y < height:
+        var x: i64 = 0
+        while x < width:
+            if (got[y * width + x] as i64) != mask[mask[7] + y * (width + 32) + x]:
+                bad = bad + 1
+            x = x + 1
+        y = y + 1
+    bad
+
+# Sum of mismatching bytes over `glyphs`: phase `first` is drawn first (it
+# records), then all four phases (every one a replay, `first` at shift 0).
+fn replay_mismatch(blob: [u8], size_px: i64, glyphs: text, first: i64) -> i64:
+    var bad: i64 = 0
+    var inked: i64 = 0
+    var i: i64 = 0
+    while i < glyphs.len():
+        val name = glyphs.substring(i, i + 1)
+        val cp = name.char_code_at(0)
+        match sfnt_gray_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, cp, size_px, size_px * 1000):
+            Some(outline):
+                match sfnt_gray_outline_raster(outline, first):
+                    Some(g):
+                        val d = direct_mismatch(outline, first, g.slg_gray)
+                        bad = bad + (if d < 0: 100000 else: d)
+                        inked = inked + 1
+                    None: bad = bad + 100000
+                var ph: i64 = 0
+                while ph < 4:
+                    match sfnt_gray_outline_raster(outline, ph):
+                        Some(g):
+                            val d = direct_mismatch(outline, ph, g.slg_gray)
+                            bad = bad + (if d < 0: 100000 else: d)
+                        None: bad = bad + 100000
+                    ph = ph + 1
+            None: bad = bad + 100000
+        i = i + 1
+    if inked != glyphs.len(): return 100000
+    bad
+
+describe "Gray AAA phase record and replay":
+    it "matches the direct unspecialised fill at 64 px, record taken at phase 0":
+        val blob = file_read_bytes(FONT_PATH)
+        expect(blob.len() > 1000).to_equal(true)
+        expect(replay_mismatch(blob, 64, "oeaSg8&@mR", 0)).to_equal(0)
+
+    it "matches the direct unspecialised fill at 72 px, record taken at phase 3":
+        val blob = file_read_bytes(FONT_PATH)
+        expect(replay_mismatch(blob, 72, "QBjy%Wk5", 3)).to_equal(0)

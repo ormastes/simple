@@ -6114,3 +6114,93 @@ pins the border-box form, the default-UA gap is unfiled.
   0.30 -> 0.36, css-paint 0.41 -> 0.44, animation 0.37 -> 0.41): there the run starts on a whole
   px and the snapped lead breaks the rounding tie Chrome's way. So the exact lead is `k > 1`
   only; k=1 keeps #12215's pen byte for byte. Run BOTH catalogs for any pen-carry change.
+
+## 2026-11-27 — gray glyphs above 48 device px: Skia analytic AA at one sample per pixel (`work/webrender-glyph-coverage-20261127`)
+
+- **Premise check.** "Simple text is lighter than Chrome" is not a global ink
+  deficit: total darkness Simple/Chrome is 1.001..1.005 on every catalog page at
+  1x and 4x. At 4x the mismatching px lean lighter (60/40) because round
+  shoulders lose ink while counters gain it. Gamma, preblend and stem darkening
+  were NOT touched (each would move total ink the wrong way).
+- **Root cause (4x, all body text: 16px x k4 = 64 device px, gray).** Chrome
+  fills a gray glyph's path with `SkScan_AAAPath` exactly like its LCD glyphs,
+  minus the 4x horizontal scale and the FIR (`GenerateImageFromPath`, A8:
+  translate by the mask origin). `sfnt_gray_outline_raster` used the float
+  exact-area accumulator (`_area_cells(.., 1)`).
+- **Proof (libskia harness, 13 glyphs `o e a s c g 8 S O R m n H`, 16px k4,
+  tolerance 8):** engine vs Chrome 454 px; libskia AAA of the engine's OWN gray
+  outline at the same quarter phase vs Chrome **0 px**; engine vs libskia 1815.
+  So outline, phase and bearing were already right; only the fill differed.
+- **Trap — "exact area" is not Chrome.** The true-curve exact area (no snapping,
+  finer chords) is FURTHER from Chrome: 1167..1628 px on the same fixture
+  (engine vs libskia 4710..6519). Skia's quad edges (forward differencing,
+  quarter-row snaps, few chords) bulge outside the true curve; only a port of
+  the walker reproduces it. Do not "improve" the fill toward the ideal area.
+- **Fix (`sfnt_glyf.spl`).** `_lcd_aaa_mask(.., per_px, rec)`: per_px 4 = LCD
+  (unchanged), per_px 1 = gray (`x' = (x*scale + phase) - x0`).
+  `sfnt_gray_outline_raster` reads that mask. Byte-exact against libskia:
+  1312 masks (Liberation Sans 64, Sans Bold 72, Serif 96, DejaVu Sans Mono 56;
+  41 glyphs x 4 phases x 2 record orders), max delta 0.
+- **Phase replay (perf).** At one sample per pixel a quarter phase is a
+  sub-sample shift, so the LCD phase-0 mask memo does not carry over. The WALK
+  does: a phase moves every x by one fixed amount and leaves strips, edge order
+  and y alone. The first phase drawn records each trapezoid row raw and
+  unclamped (`_gray_aaa_recs`, by `slo_key`); other phases replay them shifted
+  (`_gray_aaa_replay`) and redo only the clip clamps, the previous-span right
+  end, the real-blitter test `nrb` and the per-pixel coverage.
+  - Trap: record UNCLAMPED x. A clamped left edge replayed at another phase
+    put `&` phase 3 column 0 at 255 instead of 247.
+  - Only the non-convex SafeRLE walk records. Rect, convex and mask-plane
+    (`irw <= 32` and area <= 1024) routes stay direct; the replay re-checks the
+    mask-plane rule at its own phase.
+- **Same-pipeline perf work (pixels identical).** Cell copy mask -> `[u8]` as
+  one native `write_span` per row (the per-pixel copy was a fifth of a cold
+  cell); `_aaa_flush` skips untouched samples four at a time;
+  `_insert_font_atlas_glyph` reads gray atlas words from a 256-entry table,
+  four pixels a step. Tried, no gain: `fill_span` for whole-pixel runs.
+- **Interpreter cost of a cold 64 px cell:** exact-area 5.4 ms; AAA direct
+  ~12.5 ms (walk 5.2, trapezoid rows 3.8, flush 1.2, record 0.8, build 0.8);
+  AAA replay ~6.8 ms. A 4x catalog page draws ~180..195 gray cells from
+  ~83..96 outlines (2.2 phases per outline).
+- **1x residual is not this (catalog only).** The catalog has no k=1 text above
+  48 CSS px, so its 1x frames are byte-identical base vs head. Any k=1 text
+  above 48 px (a 64px heading) DOES take this gray path and changes. Catalog
+  1x body text is LCD (<= 48 device px) and its
+  mask is already byte-exact libskia for the engine's outline; 1x PPMs are
+  byte-identical base vs head on all 8 pages. What is left at 1x is the slight
+  autohinter's outline (see the lcdround entry), layout and box AA.
+- **Tools kept in the lane scratch (not in git):** `skgray.cpp` (libskia A8
+  path fill of a dumped outline), `graydump.spl`, `cm.c` (mask vs mask, mask
+  vs Chrome crop with phase and offset search).
+- **Perf follow-up (2026-11-27/28, owner: specialise first).**
+  - Quiet-host split (css-paint 4x, load 7-8, in-process timers): gray raster
+    0.96 -> 1.64 s, atlas insert 0.34 -> 0.185 s; the whole-run CPU delta
+    matches it. Earlier +6..13 % rounds were load 16-20 noise, not GC or atlas
+    growth.
+  - Where it goes: the FIRST phase of each outline (83 of 181 cells) pays the
+    walk: per 64 px glyph 86 strips for ~46 rows, 268 edge steps, 24 quad
+    updates, 103 trapezoid rows. No allocation or f64 in the hot loop; it is
+    interpreter statement count. Strip count is Skia's quarter-row stepping
+    and cannot drop without losing byte-exactness.
+  - `_aaa_trap_row_gray`: `_aaa_trap_row` without the mask-plane block and the
+    convex accumulate branch, the row check hoisted to one test per call.
+    Used by the recording walk and by `_gray_aaa_replay`; derived line for
+    line, so a change to one must be made in both. A record is taken only on
+    the non-convex walk (`convex` paths never record).
+  - The walker itself was NOT duplicated: its clip clamps are live (edge x
+    between strips goes 1/65536 px outside the frame), so a copy would only
+    drop the `rec_on` tests, ~2 of ~22 statements per edge step.
+  - Also: `_aaa_flush` walks a touched run without the group test, the
+    saturation test is hoisted out of the interior loop, replay updates
+    `prev_rite` on whole-row strips only.
+  - If more is needed: the walker as a seed kernel (like the blend spans), or
+    measure on the JIT lane once a JIT seed can load the tree.
+  - Guard: `sfnt_gray_aaa_replay_spec` pins the recording pass and every
+    replayed phase byte-equal to a record-free fill through the unspecialised
+    `_aaa_trap_row` (no libskia needed). `_gray_aaa_recs` is bounded by 512
+    outlines and by `_GRAY_AAA_REC_SLOT_BUDGET` (2,000,000 i64 slots).
+  - Final quiet-host A/B (load < 8 at each pair, 4 alternated rounds, seed
+    fb80903917d6): css-paint 4x -0.4 / +2.0 / +2.8 / +2.5 % (mean +1.7 %),
+    html 4x +3.2 / +1.7 / +1.9 / +8.9 % (mean +3.9 %, median ~+2.5 %).
+    In-process on css-paint: gray raster 0.97 -> 1.61 s, atlas insert
+    0.34 -> 0.19 s, net +0.48 s (~2.4 %). Still at or just over the 2 % line.
