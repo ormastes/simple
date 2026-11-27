@@ -79,3 +79,15 @@ plan's documented one-worker route. Not exercised in this investigation.
 1. Narrow `leak_check/external_runner.spl` so it does not import `driver_api_codegen_backends`
    for `aot_c_file`, for example by moving the helper to a leaf module.
 2. Have the file-worker planner bound or split a unit whose HIR closure is more than about 2× the usual maximum.
+
+## First-run fix (2026-11-27)
+`scripts/bootstrap/lib/product-frontend-policy.shs` priced a Linux HIR worker at
+9 GB (`SIMPLE_HIR_SHARD_WORKER_KB=9000000`), but `compiler_cli_build` HIR workers
+measured 18–30 GiB. The Linux branch now prices HIR at the measured 30 GiB
+(`31457280` KiB), just as parse was already repriced to 24 GiB. Under the 60 GiB cap,
+that is above the half-budget line (30553426 KiB), so the pool admits one HIR
+worker even on a pin's first run, when there is no peak record yet. Policy output on
+this Linux host: `SIMPLE_HIR_SHARD_WORKER_KB` was 9000000 and is now 31457280.
+The bootstrap policy tests `product-frontend-policy-test` and
+`phase-c-frontend-policy-test` already fail on Linux before this change,
+because they expect the Windows values.
