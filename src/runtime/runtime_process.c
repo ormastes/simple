@@ -1663,7 +1663,7 @@ int64_t simple_piped_owner_stream_state_v1(int64_t pid, int64_t stream) {
     struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
     int64_t state = -1;
     if (slot && !slot->closing) {
-        if (stream == 1) state = slot->stdout_state;
+        if (stream == 1) state = slot->stdout_tail.len && slot->stdout_state == 1 ? 0 : slot->stdout_state;
         else if (!slot->stderr_read) state = -2;
         else state = slot->stderr_tail.len && slot->stderr_state == 1 ? 0 : slot->stderr_state;
     }
@@ -3576,7 +3576,7 @@ int64_t simple_piped_owner_stream_state_v1(int64_t pid, int64_t stream) {
     struct RtProcSlot* slot = proc_find((pid_t)pid);
     int64_t state = -1;
     if (slot && !slot->closing && !slot->stream_ticket) {
-        if (stream == 1) state = slot->stdout_state;
+        if (stream == 1) state = slot->stdout_tail.len && slot->stdout_state == 1 ? 0 : slot->stdout_state;
         else if (slot->stderr_fd < 0) state = -2;
         else state = slot->stderr_tail.len && slot->stderr_state == 1 ? 0 : slot->stderr_state;
     }
@@ -5515,7 +5515,8 @@ int64_t rt_process_spawn_async_env_v1(const char* cmd, SplArray* args,
  *   - a byte read returns at most min(max_bytes, PIPED_BYTES_CAP_V1) bytes and
  *     an empty array when nothing is buffered (state tells EOF from "not yet");
  *   - a byte write takes [u8] at an explicit offset and returns the count
- *     accepted (0 = pipe full / overlapped write still pending), -1 on error. */
+ *     accepted (0 = pipe full / overlapped write still pending), -1 on error.
+ *     Retry a pending write with the same offset and max_bytes. */
 #define PIPED_BYTES_CAP_V1 65536
 #define PIPED_WRITE_CHUNK_V1 4096
 
@@ -5538,7 +5539,7 @@ int64_t rt_process_spawn_piped_split_v1(const char* cmd, int64_t cmd_len, SplArr
 
 static SplArray* piped_read_bytes_export_v1(int64_t pid, int64_t stream, int64_t max_bytes) {
     uint8_t buffer[PIPED_BYTES_CAP_V1];
-    int64_t cap = max_bytes < PIPED_BYTES_CAP_V1 ? max_bytes : PIPED_BYTES_CAP_V1;
+    int64_t cap = max_bytes <= 0 ? 0 : (max_bytes < PIPED_BYTES_CAP_V1 ? max_bytes : PIPED_BYTES_CAP_V1);
     int64_t count = pid > 0 && cap > 0 ? simple_piped_owner_read_v1(pid, stream, buffer, cap) : -1;
     return simple_piped_bytes_new_v1(buffer, count > 0 ? count : 0);
 }
