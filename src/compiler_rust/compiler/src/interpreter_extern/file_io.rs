@@ -773,6 +773,52 @@ pub fn rt_file_read_regular_no_follow_bounded(args: &[Value]) -> Result<Value, C
     }
 }
 
+/// Decode a raw `(ptr, len)` argument pair (the low-level sffi tier,
+/// `src/compiler/70.backend/sffi_minimal.spl`) into an owned UTF-8 string.
+/// Rejects a null pointer, a negative length and invalid UTF-8 rather than
+/// guessing.
+pub(crate) fn raw_ptr_len_text(args: &[Value], index: usize, name: &str) -> Result<String, CompileError> {
+    let ptr = match args.get(index) {
+        Some(value) => value.as_int()?,
+        None => return Err(CompileError::runtime(format!("{name} requires (ptr, len) arguments"))),
+    };
+    let len = match args.get(index + 1) {
+        Some(value) => value.as_int()?,
+        None => return Err(CompileError::runtime(format!("{name} requires (ptr, len) arguments"))),
+    };
+    if len < 0 || (ptr == 0 && len != 0) {
+        return Err(CompileError::runtime(format!(
+            "{name} requires a nonnull pointer and nonnegative length"
+        )));
+    }
+    if len == 0 {
+        return Ok(String::new());
+    }
+    // SAFETY: the raw sffi tier's contract is that (ptr, len) names a live,
+    // borrowed byte range for the duration of the call (same as the runtime's
+    // own `rt_file_read_text(path_ptr, path_len)`).
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Ok(text.to_string()),
+        Err(_) => Err(CompileError::runtime(format!("{name}: argument is not valid UTF-8"))),
+    }
+}
+
+/// `extern fn rt_file_read_text_raw(path_ptr: i64, path_len: i64) -> i64?`:
+/// raw-ABI twin of [`rt_file_read_text`]; identical result for the same path.
+pub fn rt_file_read_text_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let path = raw_ptr_len_text(args, 0, "rt_file_read_text_raw")?;
+    rt_file_read_text(&[Value::text(path)])
+}
+
+/// `extern fn rt_file_read_regular_no_follow_bounded_raw(path_ptr, path_len, max_bytes) -> i64?`:
+/// raw-ABI twin of [`rt_file_read_regular_no_follow_bounded`].
+pub fn rt_file_read_regular_no_follow_bounded_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let path = raw_ptr_len_text(args, 0, "rt_file_read_regular_no_follow_bounded_raw")?;
+    let max_bytes = args.get(2).cloned().unwrap_or(Value::Nil);
+    rt_file_read_regular_no_follow_bounded(&[Value::text(path), max_bytes])
+}
+
 /// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
 /// payloads (images, archives). Identical admission arms and bound; the
 /// content is returned as a `[u8]` value instead of being UTF-8 decoded,

@@ -15487,6 +15487,20 @@ int64_t rt_file_read_regular_no_follow_bounded(
     return result;
 }
 
+/* Raw pointer/length ABI twins for the low-level sffi tier
+ * (src/compiler/70.backend/sffi_minimal.spl): same behaviour, distinct names,
+ * so the raw `(ptr, len) -> i64?` view never shares a name with the typed
+ * `(text) -> text?` view (seed extern return types are keyed by bare name).
+ * See doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+int64_t rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_read_text(path_ptr, path_len);
+}
+
+int64_t rt_file_read_regular_no_follow_bounded_raw(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    return rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes);
+}
+
 /* Binary sibling; both result forms share the same handle admission and read
  * ceiling, including growth after stat and the one-byte oversize sentinel. */
 int64_t rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
@@ -17065,6 +17079,16 @@ int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
     int64_t result = rt_env_get_cstr(key);
     free(key);
     return result;
+}
+
+/* Raw pointer/length ABI twin of rt_env_get for the deliberately low-level
+ * sffi tier (src/compiler/70.backend/sffi_minimal.spl). Distinct NAME, same
+ * symbol semantics: the seed resolves extern return types by bare name, so the
+ * raw `(ptr, len) -> i64?` view must not share a name with the typed
+ * `(text) -> text?` view. See
+ * doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+int64_t rt_env_get_raw(const uint8_t* key_ptr, uint64_t key_len) {
+    return rt_env_get(key_ptr, key_len);
 }
 
 int64_t rt_env_get_value(int64_t key) {
