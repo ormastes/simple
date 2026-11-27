@@ -327,3 +327,22 @@ imported by `src/compiler/60.mir_opt/mir_opt/_AutoVectorize/rewrite.spl:50`. Eve
 origin/release/1.0.0 is identical there, so this is a tree defect that the now-compiling worker surfaces (previously the demoted
 interpreter did not enforce it). stage_parse was therefore NOT reached and no per-file parse timing was measured. Next: make the
 imported fns of auto_vectorize_codegen.spl `pub` (or fix the import), then rerun; expect ~25 min per attempt (cold init).
+
+## Run with d29-f 0e506dcf40e: worker is JIT, frontend+HIR+MIR in 79 s; new blocker at backend session open (2026-11-27, seed r)
+
+Base cc85cd23dda + d29-f commits (llvm pin, map_tuple, pub visibility). Final worker timeline (ms from worker start):
+
+| phase | before (interpreted) | now (JIT) |
+|---|---|---|
+| worker start -> compile:start | 161-334 s | 22.9 s |
+| load_sources bulk closure (192 sources) | 181-233 s | 1.9 s |
+| stage_parse (93 modules) | est. ~1 h (io_runtime.spl 101.8 s) | 25.5 s (io_runtime.spl 0.47 s, process_ops.spl 195 KB 2.1 s) |
+| HIR (phase3) | never reached | 51.4 -> 70.4 s (19 s) |
+| MIR + mir_verify (8 modules, 227 fns) | never reached | to 78.6 s |
+| aot:native_session_open | - | rc=70 `Runtime error: unresolved symbol -- ... code-generation dispatch gap`, at 78.9 s |
+
+So the stage_parse blocker is fixed (interpreter demotion was the cause; ~200x faster). The worker now dies in
+`BackendSessionOwnedLeaseV2.open(request)` (`driver_aot_native_output.spl:2498`) with an unresolved symbol (name not printed by the
+seed's `error_handling.rs` message; the worker's own stderr tail ends right after `mir_verify` idx=8). No exe; todo 478 and the plan
+STILL OWED stay open. Next: find the unresolved callee in the backend-session open path (run the worker under SIMPLE_EXECUTION_MODE=jit
+with a seed that names the symbol, or bisect `BackendSessionOwnedLeaseV2.open`), then rerun; coordinator part (cold init) took 1435 s.
