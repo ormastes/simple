@@ -13,7 +13,7 @@
 #   * --prior-interpreter-evidence reuse fails closed (not ported).
 #   * Darwin native lanes fail closed until the capture proxy twin is verified
 #     on a macOS host (pure Darwin logic lives in lib/hello_matrix_darwin.spl).
-use std.nogc_sync_mut.io_runtime.{file_exists, file_read, get_args, exit, host_os, is_dir, dir_create_all, process_run, env_get, list_dir}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read, get_args, exit, host_os, is_dir, dir_create_all, process_run, env_get, list_dir, cwd}
 use scripts.bootstrap.lib.hello_matrix_lane.{compile}
 use std.nogc_sync_mut.io.env_ops.{env_vars}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -98,18 +98,26 @@ fn _int(a: Args, key: text, default_value: text) -> i64:
 fn _abs(path: text, windows: bool) -> text:
     var p = path
     val absolute = p.starts_with("/") or (p.len() > 1 and p.substring(1, 2) == ":")
-    if not absolute: p = env_get("PWD") + "/" + p
+    while p.starts_with("./") or p.starts_with(".\\"): p = p.substring(2, p.len())
+    if not absolute: p = if p == "." or p == "": cwd() else: cwd() + "/" + p
+    while p.len() > 3 and (p.ends_with("/.") or p.ends_with("\.")): p = p.substring(0, p.len() - 2)
     if windows: p.replace("/", "\\") else: p
 
 fn runtime_identity(root: text) -> [EnvPair]:
     var out: [EnvPair] = []
     for child in list_dir(root):
         var leaf = child
-        val slash = child.last_index_of("/") ?? (child.last_index_of("\\") ?? -1)
+        val fwd = child.last_index_of("/") ?? -1
+        val back = child.last_index_of("\\") ?? -1
+        val slash = if fwd > back: fwd else: back
         if slash >= 0: leaf = child.substring(slash + 1, child.len())
         if runtime_identity_member(leaf):
             out = env_put(out, leaf, digest(join(root, leaf)))
     out
+
+fn _pin_arg(a: Args, windows: bool) -> text:
+    val raw = arg_get(a, "--stage-pin", env_get("SIMPLE_VERIFIED_STAGE_PIN"))
+    if raw == "": "" else: _abs(raw, windows)
 
 fn main_matrix() -> i64:
     var argv = get_args()
@@ -131,9 +139,11 @@ fn main_matrix() -> i64:
     if jobs != 0 and jobs != 1: usage_error("argument --jobs: invalid choice: '{jobs}' (choose from 0, 1)")
     _choice(a, "--memory-policy", "enforce", ["enforce", "monitor"])
     if route == "positional": usage_error("positional diagnostic route is qualified only for phase 2")
-    val br = [arg_get(a, "--buildrunner-manager", ""), arg_get(a, "--buildrunner-manifest-writer", ""), arg_get(a, "--buildrunner-template", ""), arg_get(a, "--buildrunner-target", "")]
+    val br_raw = [arg_get(a, "--buildrunner-manager", ""), arg_get(a, "--buildrunner-manifest-writer", ""), arg_get(a, "--buildrunner-template", ""), arg_get(a, "--buildrunner-target", "")]
+    val br_win = os == "windows"
+    val br = if br_raw[0] != "" and br_raw[1] != "" and br_raw[2] != "" and br_raw[3] != "": [_abs(br_raw[0], br_win), _abs(br_raw[1], br_win), _abs(br_raw[2], br_win), br_raw[3]] else: br_raw
     var br_count = 0
-    for v in br:
+    for v in br_raw:
         if v != "": br_count = br_count + 1
     if br_count > 0 and br_count < 4: usage_error("BuildRunner requires manager, manifest writer, template, and target together")
     for i in 0..a.lanes.len():
@@ -154,7 +164,7 @@ fn main_matrix() -> i64:
         if which_in(tool, path_env, windows) == "": usage_error("missing required tool: " + tool)
     # Trust anchor before any work.
     val stage_binary = arg_get(a, "--stage-binary", env_get("SIMPLE_VERIFIED_STAGE_BINARY"))
-    val pin = match verified_stage_pin_check(arg_get(a, "--stage-pin", ""), stage_binary, linux):
+    val pin = match verified_stage_pin_check(_pin_arg(a, windows), _abs(arg_get(a, "--source-root", ""), windows), stage_binary, linux, windows):
         case Ok(p): p
         case Err(e):
             eprint("FAIL: " + e)
@@ -196,13 +206,17 @@ fn main_matrix() -> i64:
     for p in kept: base = env_put(base, p.key, p.value)
     val linker_dir = linker.substring(0, (linker.last_index_of(if windows: "\\" else: "/") ?? 0))
     base = env_put(base, "PATH", linker_dir + (if windows: ";" else: ":") + env_value(base, "PATH"))
-    val ctx = MatrixContext(root: root, out: out, script: "", stage_binary: stage_binary, compiler: compiler, sha: digest(compiler), runtime: runtime, runtime_hashes: hashes, linker: linker, linker_sha: digest(linker), windows: windows, darwin: false, driver: "", driver_sha: "", sdk: "", base: base, phase: phase, backend: backend, compile_route: route, timeout_seconds: timeout, max_rss_kib: rss, min_free_disk_bytes: disk, max_log_bytes: log_bytes, windows_abi: abi, trace_stages: a.trace, target: arg_get(a, "--target", ""), jobs: jobs)
-    if file_exists(out) or is_dir(out):
-        eprint("FAIL: [Errno 17] File exists: '" + out + "'")
-        return 1
-    dir_create_all(out)
+    val ctx = MatrixContext(root: root, out: out, script: "", stage_binary: stage_binary, compiler: compiler, sha: digest(compiler), runtime: runtime, runtime_hashes: hashes, linker: linker, linker_sha: digest(linker), windows: windows, darwin: false, driver: "", driver_sha: "", sdk: "", base: base, phase: phase, backend: backend, compile_route: route, timeout_seconds: timeout, max_rss_kib: rss, min_free_disk_bytes: disk, max_log_bytes: log_bytes, windows_abi: abi, trace_stages: a.trace, target: "", jobs: jobs)
+    val out_sep = if windows: "\\" else: "/"
+    val out_parent = out.substring(0, (out.last_index_of(out_sep) ?? 0))
+    if out_parent != "": dir_create_all(out_parent)
+    match mkdir_exclusive(out):
+        case Err(e):
+            eprint("FAIL: " + e)
+            return 1
+        case Ok(_): ()
     val code = execute(ctx, a, br, pin)
-    match verified_stage_pin_recheck(pin, stage_binary, linux):
+    match verified_stage_pin_recheck(pin, linux, windows):
         case Ok(_): code
         case Err(e):
             write_sdn(ctx, join(out, "result.sdn"), [sdn_i("phase", phase), sdn_s("status", "FAIL"), sdn_s("reason", e), sdn_b("admitted", false)])

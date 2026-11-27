@@ -29,14 +29,21 @@ while [ "$i" -lt "$count" ]; do
   set -- "$@" "$arg"
 done
 [ "$seen" -eq 1 ] || exit 125
+# argv[0] containing "=" would be read by env as an assignment.
+case "${1-}" in *=*|"") exit 125 ;; esac
 cd "$cwd" || exit 125
+perl_bin=$(command -v perl) || exit 125
+# A failed `exec >file` makes sh exit 2 before `||` runs; probe in a subshell
+# so a refused (existing) log file reports the launcher refusal code.
 set -C
-if [ "$out" != "-" ]; then exec >"$out" || exit 125; fi
-if [ "$err" != "-" ]; then exec 2>"$err" || exit 125; fi
+if [ "$out" != "-" ]; then ( : >"$out" ) 2>/dev/null || exit 125; fi
+if [ "$err" != "-" ]; then ( : >"$err" ) 2>/dev/null || exit 125; fi
 set +C
+if [ "$out" != "-" ]; then exec >>"$out"; fi
+if [ "$err" != "-" ]; then exec 2>>"$err"; fi
 case "$session" in
-  new) exec perl -MPOSIX -e 'POSIX::setsid() > 0 or exit 125; exec { $ARGV[0] } @ARGV; exit 127' env -i "$@" ;;
-  group) exec perl -MPOSIX -e 'POSIX::setpgid(0, 0) or exit 125; exec { $ARGV[0] } @ARGV; exit 127' env -i "$@" ;;
+  new) exec "$perl_bin" -MPOSIX -e 'POSIX::setsid() > 0 or exit 125; exec { $ARGV[0] } @ARGV; exit 127' env -i "$@" ;;
+  group) exec "$perl_bin" -MPOSIX -e 'POSIX::setpgid(0, 0) or exit 125; exec { $ARGV[0] } @ARGV; exit 127' env -i "$@" ;;
   none) exec env -i "$@" ;;
   *) exit 125 ;;
 esac

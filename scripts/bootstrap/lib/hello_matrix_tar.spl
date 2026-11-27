@@ -41,12 +41,20 @@ pub fn tar_members(archive: [u8]) -> Result<[TarMember], text>:
     var out: [TarMember] = []
     var at = 0
     var pax_name = ""
+    var ended = false
     while at + 512 <= archive.len():
-        if archive[at] == 0u8:
-            break
+        if _zero_block(archive, at):
+            if at + 1024 <= archive.len() and _zero_block(archive, at + 512):
+                ended = true
+                break
+            return Err("truncated linker reproduction archive")
+        if not _checksum_ok(archive, at):
+            return Err("linker reproduction header checksum mismatch")
         val size = _octal(archive, at + 124, 12)
         val kind = archive[at + 156] as i64
         val body = at + 512
+        if size < 0 or body + size > archive.len():
+            return Err("truncated linker reproduction archive")
         var name = _cstr(archive, at, 100)
         val prefix = _cstr(archive, at + 345, 155)
         if prefix != "": name = prefix + "/" + name
@@ -61,9 +69,24 @@ pub fn tar_members(archive: [u8]) -> Result<[TarMember], text>:
         else:
             return Err("nonregular linker reproduction member")
         at = body + ((size + 511) / 512) * 512
+    if not ended:
+        return Err("truncated linker reproduction archive")
     Ok(out)
 
+pub fn _zero_block(b: [u8], at: i64) -> bool:
+    for i in at..(at + 512):
+        if b[i] != 0u8: return false
+    true
+
+# ustar checksum: byte sum of the header with the checksum field as spaces.
+pub fn _checksum_ok(b: [u8], at: i64) -> bool:
+    var sum = 0
+    for i in 0..512:
+        sum = sum + (if i >= 148 and i < 156: 32 else: b[at + i] as i64)
+    sum == _octal(b, at + 148, 8)
+
 pub fn _safe(name: text) -> bool:
+    if name == "": return false
     if name.starts_with("/") or name.starts_with("\\") or name.contains(":"):
         return false
     for part in name.replace("\\", "/").split("/"):

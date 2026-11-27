@@ -14,7 +14,7 @@ for %%A in (%*) do (
 if not "!phase!"=="3" goto py_owner
 if not defined SIMPLE_VERIFIED_STAGE_BINARY goto no_stage
 if not exist "%SIMPLE_VERIFIED_STAGE_BINARY%" goto no_stage
-"%SIMPLE_VERIFIED_STAGE_BINARY%" run "%~dp0hello-sanity-matrix.spl" --stage-binary "%SIMPLE_VERIFIED_STAGE_BINARY%" %*
+"%SIMPLE_VERIFIED_STAGE_BINARY%" run "%~dp0hello-sanity-matrix.spl" %* --stage-binary "%SIMPLE_VERIFIED_STAGE_BINARY%"
 exit /b %errorlevel%
 :no_stage
 echo ERROR: phase 3 requires SIMPLE_VERIFIED_STAGE_BINARY (verified stage binary); no Python fallback 1>&2

@@ -1,6 +1,6 @@
 # Trust anchor + reproduction-archive admission of the phase-3 Hello matrix twin.
 use std.spec
-use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_decide}
+use scripts.bootstrap.lib.verified_stage_pin.{verified_stage_pin_decide, verified_stage_pin_location_ok}
 use scripts.bootstrap.lib.hello_matrix_tar.{tar_members, _safe}
 
 val GOOD = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -24,6 +24,20 @@ fn header(name: text, kind: u8) -> [u8]:
     for i in 0..name.len(): block[i] = name.char_code_at(i) as u8
     for i in 0..11: block[124 + i] = 48u8
     block[156] = kind
+    var sum = 0
+    for i in 0..512:
+        sum = sum + (if i >= 148 and i < 156: 32 else: block[i] as i64)
+    var digits = ""
+    var v = sum
+    for i in 0..6:
+        digits = "{v % 8}" + digits
+        v = v / 8
+    for i in 0..6: block[148 + i] = digits.char_code_at(i) as u8
+    block
+
+fn end_blocks() -> [u8]:
+    var block: [u8] = []
+    for i in 0..1024: block.push(0u8)
     block
 
 describe "verified stage pin":
@@ -38,15 +52,32 @@ describe "verified stage pin":
         expect(decided(admitted(GOOD) + "stage3_sha256=" + GOOD + "\n", GOOD)).to_equal(false)
         expect(decided(admitted(GOOD.upper()), GOOD.upper())).to_equal(false)
 
+    it "accepts a pin record only at <source-root>/.../stage3/<platform>/provenance.env":
+        expect(verified_stage_pin_location_ok("C:/r/build/bootstrap/stage3/x86_64-pc-windows-gnu/provenance.env", "C:/r")).to_equal(true)
+        expect(verified_stage_pin_location_ok("C:\r\build\stage3\linux\provenance.env", "C:\r")).to_equal(true)
+        expect(verified_stage_pin_location_ok("C:/tmp/stage3/linux/provenance.env", "C:/r")).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/../../tmp/stage3/linux/provenance.env", "C:/r")).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/stage3/linux/pin.env", "C:/r")).to_equal(false)
+        expect(verified_stage_pin_location_ok("C:/r/build/stage2/linux/provenance.env", "C:/r")).to_equal(false)
+
 describe "reproduction archive admission":
     it "admits regular files and directories and refuses other members or escapes":
-        val ok = header("repro/", 53u8) + header("repro/response.txt", 48u8)
+        val ok = header("repro/", 53u8) + header("repro/response.txt", 48u8) + end_blocks()
         match tar_members(ok):
             case Ok(m): expect(m.len()).to_equal(2)
             case Err(e): expect(e).to_equal("")
-        match tar_members(header("repro/link", 50u8)):
+        match tar_members(header("repro/link", 50u8) + end_blocks()):
             case Ok(_): expect("admitted").to_equal("refused")
             case Err(e): expect(e).to_equal("nonregular linker reproduction member")
+        match tar_members(header("repro/response.txt", 48u8)):
+            case Ok(_): expect("admitted").to_equal("refused")
+            case Err(e): expect(e).to_equal("truncated linker reproduction archive")
+        var bad = header("repro/response.txt", 48u8)
+        bad[0] = 120u8
+        match tar_members(bad + end_blocks()):
+            case Ok(_): expect("admitted").to_equal("refused")
+            case Err(e): expect(e).to_equal("linker reproduction header checksum mismatch")
+        expect(_safe("")).to_equal(false)
         expect(_safe("repro/a.o")).to_equal(true)
         expect(_safe("../a.o")).to_equal(false)
         expect(_safe("/etc/passwd")).to_equal(false)
