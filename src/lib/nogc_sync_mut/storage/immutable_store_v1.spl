@@ -1250,7 +1250,8 @@ pub fn immutable_store_v1_pin(root: text, pin_id: text, owner: text, refs: [text
 # to a fresh unique path under staging/ first (nothing is replaced), so ownership of the release is
 # decided among concurrent releasers by that one rename (the owner check before it is still raceable across owners): a concurrent releaser sees `pin-missing`, and
 # GC/readers never see a half-deleted pin (the tombstone is outside pins/, which
-# GC scans, and is deleted afterwards). Usage contract: a lane must not release
+# GC scans, and is deleted afterwards; the one exception is a keep-marked tomb,
+# whose refs GC reads via `_isv1_tomb_pin_keys`). Usage contract: a lane must not release
 # a pin it still ingests into; `ingest_pinned` re-checks its ref after the write
 # and returns `pin-released` if the pin went away meanwhile.
 pub fn immutable_store_v1_release_pin(root: text, pin_id: text, owner: text) -> text:
@@ -1462,6 +1463,15 @@ fn _isv1_collect_root_keys(store_root: text) -> Result<[text], text>:
 # an owner file but no refs directory pins nothing, which is fine.
 fn _isv1_collect_pin_keys(store_root: text) -> Result<[text], text>:
     var out: [text] = []
+    # Keep-marked tombs hold a foreign pin that could not be restored; its refs
+    # stay retained until the owner reclaims or releases it. Scanned before pins/:
+    # that closes only the reclaim direction (tomb -> pins/). The release direction
+    # (pins/ -> tomb) is covered by the GC step (4) re-check, not by this ordering.
+    match _isv1_tomb_pin_keys(store_root):
+        case Ok(keys):
+            for k in keys:
+                out.push(k)
+        case Err(reason): return Err(reason)
     val dir = _isv1_join(store_root, "pins")
     val entries = match _isv1_list_fail_closed(dir):
         case Ok(value): value
@@ -1480,14 +1490,6 @@ fn _isv1_collect_pin_keys(store_root: text) -> Result<[text], text>:
                 for k in keys:
                     out.push(k)
             case Err(reason): return Err(reason)
-    # Keep-marked tombs hold a foreign pin that could not be restored; its refs
-    # stay retained until the owner reclaims or releases it. Read before pins/
-    # (a reclaim renames tomb -> pins/, so this order never misses a moving pin).
-    match _isv1_tomb_pin_keys(store_root):
-        case Ok(keys):
-            for k in keys:
-                out.push(k)
-        case Err(reason): return Err(reason)
     Ok(out)
 
 # The ref keys under one pin directory (`<pin_dir>/refs/<key>`); none when it has no refs dir.
@@ -1611,7 +1613,7 @@ pub fn immutable_store_v1_sweep_staging(root: text, min_age_secs: StoreCountV1) 
             continue
         # A keep tomb holding a pin is never swept; one with no pin was leaked by a
         # crash between reclaim's restore rename and its cleanup and ages out.
-        if file_exists(path + "/keep") and is_dir(path + "/pin"):
+        if file_exists(path + "/keep") and (is_dir(path + "/pin") or file_exists(path + "/pin")):
             continue
         val mtime = file_modified_time(path)
         if mtime <= 0 or now - mtime < min_age_secs.value:
