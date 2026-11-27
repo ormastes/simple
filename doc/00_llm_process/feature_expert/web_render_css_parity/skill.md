@@ -5917,3 +5917,22 @@ pins the border-box form, the default-UA gap is unfiled.
   `calc(5 / 1vw)` are still dropped (Chrome 159 keeps the UA 16px on a <p>).
   `_css_number_scaled_at` stops multiplying at `limit / 10`; it used to wrap
   so `calc(1e13px)` read 1 px.
+
+## 2026-11-27 (follow-up) — 4x animation 0.14 -> 0.15 was a real regression (svg viewport clip)
+- Not a capture flake: Chrome's `animation` PNG hashed identically in every
+  run and Simple's frame is byte-identical per sha. Raw mismatch 15997 px at
+  fc31db2cc8d (#11961, the commit that set the 0.14 row) vs 16795 px at
+  current base: a 798 px move. The % is TRUNCATED (pixel_diff.spl
+  `mismatch * 10000 / n`, n = 3600x3040), so 0.14 = 15322..16415 px and
+  0.15 starts at 16416; old sits mid-band, new is 380 px past it.
+- First-parent bisect: #12165 (`ed7d786ee15`). It made
+  `_html_draw_ir_device_clip` return unless `clip_cache.has_node_clips`, so
+  on a page with no overflow box the svg viewport clip (the command's own
+  box, which moves with the shifted svg) stayed k x its whole-CSS-px box: the
+  svg rect lost its right two device columns and top row.
+- Fix: the pass also runs when any box is device-shifted (the pre-#12165
+  condition), alongside `has_node_clips`. Spec:
+  `test/01_unit/browser_engine/svg_viewport_clip_no_overflow_box_4x_chrome159_spec.spl`.
+- Method trap: compare RAW `mismatch_px` (pixel_diff.spl prints it; the
+  catalog script prints only the rounded %), and hash the frames, before
+  calling a 0.01 move noise.
