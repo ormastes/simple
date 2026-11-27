@@ -167,6 +167,22 @@ pub(super) fn add_builtin_types(env: &mut Env) {
     );
 }
 
+/// Identity of a class `name` declared by a lazily evaluated module: its bare
+/// name, unless another module already declared a class of that name -- then
+/// the owner-exact symbol the flattened lanes use (owner decision 2026-11-27:
+/// a class is identified by its owner module). The module's own table keeps
+/// the bare key, so its code still names the class `name`; instances, exports
+/// and the global tables carry the identity.
+fn lazy_class_identity(name: &str, module_ident: Option<&Arc<str>>) -> String {
+    match module_ident {
+        Some(owner) if crate::interpreter::class_name_owned_elsewhere(name, owner) => {
+            crate::interpreter::note_renamed_class();
+            crate::interpreter::flatten_owner_mangled_name(owner, name)
+        }
+        _ => name.to_string(),
+    }
+}
+
 /// First pass: register functions and types
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(super) fn register_definitions(
@@ -213,20 +229,22 @@ pub(super) fn register_definitions(
             Node::Class(c) => {
                 let mut class = c.clone();
                 tag_methods_owner(&mut class.methods, module_ident.as_ref());
+                let identity = lazy_class_identity(&c.name, module_ident.as_ref());
+                class.name = identity.clone();
                 let arc_c = Arc::new(class);
                 local_classes.insert(c.name.clone(), Arc::clone(&arc_c));
-                global_classes.insert(c.name.clone(), Arc::clone(&arc_c));
+                global_classes.insert(identity.clone(), Arc::clone(&arc_c));
                 exports.insert(
                     c.name.clone(),
                     Value::Constructor {
-                        class_name: c.name.clone(),
+                        class_name: identity.clone(),
                     },
                 );
                 // Register static methods as mangled free functions (ClassName__method)
                 for method in &arc_c.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
-                        let mangled = format!("{}__{}", c.name, method.name);
+                        let mangled = format!("{}__{}", identity, method.name);
                         let arc_method = Arc::new(method.clone());
                         record_function_owner(&arc_method, module_ident.as_ref());
                         local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
@@ -247,20 +265,22 @@ pub(super) fn register_definitions(
                 // Include struct methods so they're available for method calls
                 let mut class_def = crate::interpreter::core_types::struct_def_to_class_def(s);
                 tag_methods_owner(&mut class_def.methods, module_ident.as_ref());
+                let identity = lazy_class_identity(&s.name, module_ident.as_ref());
+                class_def.name = identity.clone();
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
-                global_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
+                global_classes.insert(identity.clone(), Arc::clone(&arc_class_def));
                 exports.insert(
                     s.name.clone(),
                     Value::Constructor {
-                        class_name: s.name.clone(),
+                        class_name: identity.clone(),
                     },
                 );
                 // Register static methods as mangled free functions (StructName__method)
                 for method in &arc_class_def.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
-                        let mangled = format!("{}__{}", s.name, method.name);
+                        let mangled = format!("{}__{}", identity, method.name);
                         let arc_method = Arc::new(method.clone());
                         record_function_owner(&arc_method, module_ident.as_ref());
                         local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
@@ -287,6 +307,13 @@ pub(super) fn register_definitions(
                         }
                         method
                     };
+                    // A class this module declares under an owner-exact identity
+                    // (`lazy_class_identity`) is keyed by that identity in the
+                    // global tables.
+                    let global_type_name = local_classes
+                        .get(&type_name)
+                        .map(|class_def| class_def.name.clone())
+                        .unwrap_or_else(|| type_name.clone());
                     let mut methods_to_register: Vec<FunctionDef> =
                         impl_block.methods.iter().map(tagged_method).collect();
                     if let Some(ref trait_name) = impl_block.trait_name {
@@ -304,7 +331,7 @@ pub(super) fn register_definitions(
                             methods_to_register.iter().cloned().map(Arc::new).collect();
                         TRAIT_IMPLS.with(|cell| {
                             cell.borrow_mut()
-                                .insert((trait_name.clone(), type_name.clone()), trait_arcs);
+                                .insert((trait_name.clone(), global_type_name.clone()), trait_arcs);
                         });
                     }
                     // Handle classes
@@ -313,8 +340,8 @@ pub(super) fn register_definitions(
                             .methods
                             .extend(methods_to_register.iter().cloned());
                     }
-                    let prior_global_class = global_classes.get(&type_name).cloned();
-                    if let Some(class_def) = global_classes.get_mut(&type_name) {
+                    let prior_global_class = global_classes.get(&global_type_name).cloned();
+                    if let Some(class_def) = global_classes.get_mut(&global_type_name) {
                         Arc::make_mut(class_def)
                             .methods
                             .extend(methods_to_register.iter().cloned());
@@ -334,7 +361,7 @@ pub(super) fn register_definitions(
                     for method in &methods_to_register {
                         let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                         if is_static {
-                            let mangled = format!("{}__{}", type_name, method.name);
+                            let mangled = format!("{}__{}", global_type_name, method.name);
                             let arc_method = Arc::new(method.clone());
                             record_function_owner(&arc_method, module_ident.as_ref());
                             local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
@@ -353,7 +380,7 @@ pub(super) fn register_definitions(
                     // (mirrors GLOBAL_ENUMS pattern for enum definitions)
                     GLOBAL_IMPL_METHODS.with(|cell| {
                         let mut global_impls = cell.borrow_mut();
-                        let methods = global_impls.entry(type_name.clone()).or_default();
+                        let methods = global_impls.entry(global_type_name.clone()).or_default();
                         methods.extend(methods_to_register.into_iter().map(Arc::new));
                     });
                     // Point the owner-keyed slots that held the PRE-enrichment
@@ -361,7 +388,7 @@ pub(super) fn register_definitions(
                     // class another module declares). Keyed by allocation, not
                     // by bare name: module A's cached `Config` must survive
                     // module B's `impl Config:`.
-                    if let (Some(prior), Some(enriched)) = (prior_global_class.as_ref(), global_classes.get(&type_name)) {
+                    if let (Some(prior), Some(enriched)) = (prior_global_class.as_ref(), global_classes.get(&global_type_name)) {
                         crate::interpreter::refresh_cached_class(prior, enriched);
                     }
                 }

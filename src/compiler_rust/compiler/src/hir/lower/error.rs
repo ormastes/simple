@@ -76,7 +76,8 @@ pub enum LowerError {
     // message byte-for-byte. See
     // doc/08_tracking/bug/test_runner_jit_fallback_functionoutline_type_params_2026-08-17.md
     #[error(
-        "Cannot infer field type: struct '{struct_name}' field '{field}'{}",
+        "Cannot infer field type: struct '{}' field '{field}'{}",
+        crate::interpreter::flatten_owner_source_name(struct_name),
         fmt_available_fields(available_fields)
     )]
     CannotInferFieldType {

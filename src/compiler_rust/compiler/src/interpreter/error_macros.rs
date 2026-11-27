@@ -100,7 +100,11 @@ macro_rules! bail_unknown_method {
         }
 
         return Err(crate::error::CompileError::semantic_with_context(
-            format!("method `{}` not found on type `{}`", $method, $type_name),
+            format!(
+                "method `{}` not found on type `{}`",
+                $method,
+                crate::interpreter::flatten_owner_source_name(&$type_name.to_string())
+            ),
             ctx,
         ));
     }};

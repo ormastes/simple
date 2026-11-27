@@ -1131,6 +1131,18 @@ pub fn cache_module_definitions(
     }
 }
 
+/// Key a module's class `name` is merged into an importer's flat class table
+/// under: its owner-exact identity when the declaring module gave it one
+/// (a second module declaring that class name), else `name`. The bare slot
+/// of the importer is never overwritten by another owner's class.
+pub fn class_slot_key(name: &str, class_def: &ClassDef) -> String {
+    if class_def.name != name && class_def.name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX) {
+        class_def.name.clone()
+    } else {
+        name.to_string()
+    }
+}
+
 /// Get cached module definitions and merge them into the provided HashMaps.
 /// Functions are `Arc<FunctionDef>` -- cloning is a cheap reference-count bump.
 /// Returns true if definitions were found and merged, false otherwise.
@@ -1146,7 +1158,7 @@ pub fn merge_cached_module_definitions(
     MODULE_CLASSES_CACHE.with(|cache| {
         if let Some(cached_classes) = cache.borrow().get(&key) {
             for (name, class_def) in cached_classes {
-                classes.insert(name.clone(), class_def.clone());
+                classes.insert(class_slot_key(name, class_def), class_def.clone());
             }
             found = true;
         }
@@ -1810,6 +1822,12 @@ fn class_name_is_shared(name: &str) -> bool {
     CLASS_NAME_OWNERS.with(|t| t.borrow().get(name).is_some_and(|owners| owners.len() > 1))
 }
 
+/// Whether a module other than `owner` already declared a class named `name`
+/// (the lazily evaluated module is then the second owner of that name).
+pub(crate) fn class_name_owned_elsewhere(name: &str, owner: &str) -> bool {
+    CLASS_NAME_OWNERS.with(|t| t.borrow().get(name).is_some_and(|owners| owners.iter().any(|o| **o != *owner)))
+}
+
 /// Drop every owner for which `keep` is false (mirrors a selective cache clear).
 fn retain_class_owners(keep: impl Fn(&str) -> bool) {
     CLASS_NAME_OWNERS.with(|t| {
@@ -1884,12 +1902,17 @@ pub fn record_flattened_owner_class(class_def: &Arc<ClassDef>) {
 
 fn record_owner_class(owner: Arc<str>, class_def: &Arc<ClassDef>) {
     bump_registry_generation();
-    note_class_owner(&class_def.name, &owner);
+    // A class renamed to its owner-exact symbol (same-named classes of
+    // several flattened modules) is still written by its own module under the
+    // source name, so the owner walk indexes it by that name and hands back
+    // the renamed definition.
+    let source_name = crate::interpreter::flatten_owner_source_name(&class_def.name);
+    note_class_owner(source_name, &owner);
     FLATTEN_OWNER_CLASSES.with(|t| {
         t.borrow_mut()
             .entry(owner)
             .or_default()
-            .insert(class_def.name.clone(), Arc::clone(class_def));
+            .insert(source_name.to_string(), Arc::clone(class_def));
     });
 }
 
@@ -1958,7 +1981,7 @@ pub fn refresh_cached_class(prior: &Arc<ClassDef>, enriched: &Arc<ClassDef>) {
     });
     FLATTEN_OWNER_CLASSES.with(|t| {
         for owner_classes in t.borrow_mut().values_mut() {
-            if let Some(slot) = owner_classes.get_mut(&enriched.name) {
+            if let Some(slot) = owner_classes.get_mut(crate::interpreter::flatten_owner_source_name(&enriched.name)) {
                 if Arc::ptr_eq(slot, prior) {
                     *slot = Arc::clone(enriched);
                 }
@@ -2076,6 +2099,128 @@ fn scoped_walk(owner: &Arc<str>, name: &str) -> Option<Arc<ClassDef>> {
     answer
 }
 
+thread_local! {
+    /// Set once a flattened unit renamed same-named classes to owner-exact
+    /// symbols (`interpreter_eval::evaluate_module_items`); gates the
+    /// identifier / namespace-member probes below so units without such a
+    /// collision pay one `Cell` load.
+    static OWNER_QUALIFIED_CLASSES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set once ANY class got an owner-exact identity (flattened census or a
+    /// lazily loaded second owner); gates the per-call owner-exact checks.
+    static RENAMED_CLASSES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whole-module imports of the flattened unit: importer owner -> local
+    /// namespace name -> source owner (`__simple_flatten_module_namespace__=`).
+    static FLATTEN_MODULE_NAMESPACES: RefCell<HashMap<Arc<str>, HashMap<String, Arc<str>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Arm the owner-qualified class probes and record the unit's whole-module
+/// import namespaces (`(importer, local, source_owner)`).
+pub(crate) fn enable_owner_qualified_classes<'a>(namespaces: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>) {
+    OWNER_QUALIFIED_CLASSES.with(|flag| flag.set(true));
+    note_renamed_class();
+    FLATTEN_MODULE_NAMESPACES.with(|table| {
+        let mut table = table.borrow_mut();
+        for (importer, local, source) in namespaces {
+            // Marker owners are already `normalize_path_key` strings (or `<entry>`).
+            table.entry(Arc::<str>::from(importer)).or_default().insert(local.to_string(), Arc::<str>::from(source));
+        }
+    });
+}
+
+/// Whether any flattened unit renamed a class for a same-name collision (the
+/// identifier hooks are skipped entirely otherwise).
+#[inline]
+pub fn owner_qualified_classes_enabled() -> bool {
+    OWNER_QUALIFIED_CLASSES.with(|flag| flag.get())
+}
+
+/// Record that a class got an owner-exact identity.
+pub(crate) fn note_renamed_class() {
+    RENAMED_CLASSES.with(|flag| flag.set(true));
+}
+
+/// Whether any class got an owner-exact identity in this process (monotonic:
+/// lazily loaded modules outlive `clear_interpreter_state`).
+#[inline]
+pub(crate) fn renamed_classes_present() -> bool {
+    RENAMED_CLASSES.with(|flag| flag.get())
+}
+
+/// Forget the owner-qualified class state (a fresh interpreter run).
+pub(crate) fn clear_owner_qualified_classes() {
+    OWNER_QUALIFIED_CLASSES.with(|flag| flag.set(false));
+    FLATTEN_MODULE_NAMESPACES.with(|table| table.borrow_mut().clear());
+}
+
+fn owner_qualified_symbol(def: &ClassDef, local: &str) -> Option<String> {
+    (def.name != local && def.name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX)).then(|| def.name.clone())
+}
+
+/// Owner-exact class symbol a bare (or aliased) name denotes in the executing
+/// module, when that class was renamed for a same-name collision. A local
+/// name such as `Legacy` in `use pb.Thing as Legacy` is otherwise bound to the
+/// source module's bare `Thing` constructor, which the scope walk would then
+/// re-resolve from the importer (owner decision 2026-11-27: classes are
+/// identified by their owner module).
+pub fn owner_qualified_class_symbol(name: &str) -> Option<String> {
+    if !OWNER_QUALIFIED_CLASSES.with(|flag| flag.get()) {
+        return None;
+    }
+    let owner = current_owner();
+    scoped_walk(&owner, name).and_then(|def| owner_qualified_symbol(&def, name))
+}
+
+/// Whether a value whose class identity is `instance` is an instance of the
+/// type spelled `type_name` in the executing module (patterns, typed match
+/// arms, overload scoring). An owner-exact identity (`__spl_flat_...__Thing`)
+/// satisfies `Thing` -- or a local alias of it -- when that name denotes
+/// exactly this class in the executing module's scope; with no scope answer
+/// the source name decides.
+pub fn class_identity_matches(instance: &str, type_name: &str) -> bool {
+    if instance == type_name {
+        // A bare identity is this module's `type_name` only when the name has
+        // one owner, or the scope resolves it to the bare (unrenamed) class --
+        // never when the scope denotes another module's renamed class.
+        if !class_name_is_shared(type_name) {
+            return true;
+        }
+        return scoped_walk(&current_owner(), type_name).is_none_or(|def| def.name == type_name);
+    }
+    if !instance.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX) {
+        return false;
+    }
+    let source = crate::interpreter::flatten_owner_source_name(instance);
+    match scoped_walk(&current_owner(), type_name) {
+        Some(def) => def.name == instance,
+        None => source == type_name,
+    }
+}
+
+/// Run `f` with `owner` as the executing module (the declaring module of a
+/// candidate whose parameter types are being scored).
+pub(crate) fn with_exec_owner<R>(owner: Option<Arc<str>>, f: impl FnOnce() -> R) -> R {
+    let Some(owner) = owner else {
+        return f();
+    };
+    let saved = crate::interpreter::CURRENT_EXEC_MODULE.with(|c| c.replace(Some(owner)));
+    let result = f();
+    crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = saved);
+    result
+}
+
+/// Owner-exact class symbol for `ns.Name` where `ns` is a whole-module
+/// import of the executing module and `Name` a renamed class of that module.
+pub fn owner_qualified_namespace_class_symbol(namespace: &str, name: &str) -> Option<String> {
+    if !OWNER_QUALIFIED_CLASSES.with(|flag| flag.get()) {
+        return None;
+    }
+    let owner = current_owner();
+    let source = FLATTEN_MODULE_NAMESPACES.with(|table| table.borrow().get(&owner)?.get(namespace).cloned())?;
+    let def = FLATTEN_OWNER_CLASSES.with(|t| t.borrow().get(&source).and_then(|m| m.get(name).cloned()))?;
+    owner_qualified_symbol(&def, name)
+}
+
 /// Resolve a bare class name the way the SOURCE module sees it:
 ///
 /// 1. the executing module's own definition, or the one its `use m.{Name}`
@@ -2140,8 +2285,21 @@ pub fn resolve_class_for_instance<V>(
     name: &str,
     fields: &HashMap<String, V>,
 ) -> Option<Arc<ClassDef>> {
+    // An instance carries its class IDENTITY. An owner-exact identity
+    // (`__spl_flat_...`) names exactly one definition; a bare-named instance
+    // is never an instance of a definition that has an owner-exact identity.
+    if name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX) {
+        return classes.get(name).cloned().or_else(|| {
+            let source = crate::interpreter::flatten_owner_source_name(name);
+            owned_class_candidates(source)
+                .iter()
+                .find(|(_, d)| d.name == name)
+                .map(|(_, d)| Arc::clone(d))
+        });
+    }
     let owner = current_owner();
-    let walked = scoped_walk(&owner, name);
+    let same_identity = |def: &Arc<ClassDef>| !def.name.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX);
+    let walked = scoped_walk(&owner, name).filter(same_identity);
     if !class_name_is_shared(name) {
         return walked.or_else(|| classes.get(name).cloned());
     }
@@ -2151,15 +2309,16 @@ pub fn resolve_class_for_instance<V>(
     if let Some(def) = walked.as_ref().filter(|d| fields_match(d)) {
         return Some(Arc::clone(def));
     }
-    let flat = classes.get(name).cloned();
+    let flat = classes.get(name).cloned().filter(same_identity);
     if let Some(def) = flat.as_ref().filter(|d| fields_match(d)) {
         return Some(Arc::clone(def));
     }
     let candidates = owned_class_candidates(name);
-    if let Some((_, def)) = candidates.iter().find(|(_, d)| fields_match(d)) {
+    let mut same = candidates.iter().filter(|(_, d)| same_identity(d));
+    if let Some((_, def)) = same.clone().find(|(_, d)| fields_match(d)) {
         return Some(Arc::clone(def));
     }
-    walked.or(flat).or_else(|| candidates.first().map(|(_, d)| Arc::clone(d)))
+    walked.or(flat).or_else(|| same.next().map(|(_, d)| Arc::clone(d)))
 }
 
 /// [`resolve_class_for_instance`] for a method receiver's `self` table. A
