@@ -63,6 +63,7 @@ mod enum_import_scope_tests;
 mod enum_discriminant_owner_tests;
 mod fn_alias_import_scope_tests;
 mod same_named_trait_default_tests;
+mod same_named_type_self_tests;
 mod callable_assert_tests;
 mod trait_field_receiver_tests;
 mod unit_value_field_tests;

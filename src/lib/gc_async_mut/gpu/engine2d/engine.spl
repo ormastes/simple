@@ -177,6 +177,23 @@ fn engine2d_platform_allows_hosted_gpu_probes(platform: text) -> bool:
     val canonical = platform.trim().lower()
     not canonical.contains("baremetal") and not canonical.contains("simpleos")
 
+fn engine2d_is_hosted_hardware_backend(canonical: text) -> bool:
+    if canonical == "baremetal" or canonical == "virtio_gpu":
+        return false
+    backend_is_hardware(canonical) or canonical == "directx-on-vulkan" or canonical == "metal-on-vulkan"
+
+pub fn engine2d_baremetal_hardware_refusal(backend_name: text, platform: text) -> BackendProbeResult?:
+    """Fail closed before hardware probe/create when hosted GPU probes are disallowed."""
+    val canonical = backend_canonical_name(backend_name)
+    if engine2d_platform_allows_hosted_gpu_probes(platform):
+        return None
+    if not engine2d_is_hosted_hardware_backend(canonical):
+        return None
+    Some(BackendProbeResult.unavailable(
+        canonical,
+        "Hosted GPU backend '" + canonical + "' disabled on baremetal/SimpleOS platform: " + platform
+    ))
+
 fn engine2d_hosted_backend_probes_available() -> bool:
     engine2d_platform_allows_hosted_gpu_probes(platform_name())
 
@@ -1587,6 +1604,9 @@ class Engine2D with DrawIrRenderTarget:
         create_with_backend() path for them — correct, but not accelerated.
         """
         val requested_backend = backend_canonical_name(backend_name)
+        val baremetal_refusal = engine2d_baremetal_hardware_refusal(requested_backend, platform_name())
+        if baremetal_refusal.is_some():
+            return Engine2D.create_with_backend(width, height, backend_name)
         if requested_backend == "metal":
             var metal = MetalBackend.create()
             if metal.init(width, height):
@@ -1729,6 +1749,9 @@ class Engine2D with DrawIrRenderTarget:
         val requested_backend = backend_canonical_name(backend_name)
         if engine2d_injected_create_fault(requested_backend):
             return Err("injected create fault (SIMPLE_2D_CREATE_FAULT) for " + requested_backend)
+        val baremetal_refusal = engine2d_baremetal_hardware_refusal(requested_backend, platform_name())
+        if baremetal_refusal.?:
+            return Err(baremetal_refusal.unwrap().reason)
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
@@ -2010,6 +2033,9 @@ class Engine2D with DrawIrRenderTarget:
         val requested_backend = backend_canonical_name(backend_name)
         if engine2d_injected_probe_fault(requested_backend):
             return BackendProbeResult.unavailable(requested_backend, "injected probe fault (SIMPLE_2D_PROBE_FAULT)")
+        val baremetal_refusal = engine2d_baremetal_hardware_refusal(requested_backend, platform_name())
+        if baremetal_refusal.?:
+            return baremetal_refusal.unwrap()
         if requested_backend == "cuda":
             var b = CudaBackend.create()
             if b.init(width, height):

@@ -1,0 +1,466 @@
+# @platform: linux
+# @req ORCH-02 HOST-02
+# LIVE Linux Podman route through the ONE shared Simple Container API
+# (`SimpleContainerOwnerV2`, `std.nogc_async_mut.container.api_v2`). Every case
+# opens the genuine installed fresh owner (`simple_container_open_fresh_v2`),
+# drives prepare/create/start/wait/logs/destroy through `simple_container_*_v2`,
+# and asserts real effects inside the container or on the host engine, never
+# argv. No scripted provider, fake owner or fabricated policy.
+#
+# Unattended configuration (no interactive step). Each key is read from the
+# process environment first, then from ONE documented env file, then a default:
+#   env file: $SIMPLE_PODMAN_LIVE_ENV_FILE, default
+#             /etc/simple/podman-live-spec.env (KEY=VALUE lines, # comments)
+#   SIMPLE_PODMAN_SMOKE=1          opt-in (same key as podman_session_live_spec); no default
+#   SIMPLE_PODMAN_LIVE_IMAGE       default: first RepoDigest of local busybox:1.36
+#                                  (`podman image inspect`); the fresh route needs a
+#                                  registry-qualified pin (docker.io/library/busybox@sha256:..)
+#                                  and runs its own PullImage action, so the guest needs that
+#                                  registry reachable. A `podman load`ed image has no RepoDigest.
+#   SIMPLE_PODMAN_LIVE_TEMPLATE    default /etc/simple/podman-live-launch-template.sdn
+#                                  (group-process-stream v3 launch template for the fresh owner)
+#   SIMPLE_PODMAN_LIVE_WORK_ROOT   default /var/tmp (per-run workspace roots)
+#
+# Prerequisites, checked in this order; the first missing one reports
+# `pending("BLOCKED: ...")` (exit 6) and touches nothing native:
+#   1. administrator-installed machine policy: `/etc/simple/container` and
+#      `/var/lib/simple/container` exist and `linux_machine_policy_open_v1()`
+#      returns Ready (run as the dedicated service principal, normally root);
+#   2. SIMPLE_PODMAN_SMOKE=1; 3. a digest-pinned local image; 4. the template.
+#
+# Guest wrapper setup (unattended, as root, once per provisioned VM):
+#   install -m 0644 test/fixtures/container/podman_live_spec.env /etc/simple/podman-live-spec.env
+#   podman pull docker.io/library/busybox:1.36      # gives the default RepoDigest
+#   SIMPLE_PODMAN_LIVE_RUN_ROOT=<runRoot of the installed fresh-epoch profile> \
+#     bin/simple run test/fixtures/container/podman_live_launch_template_gen.spl
+#   (writes /etc/simple/podman-live-launch-template.sdn; prints "TEMPLATE OK <path>")
+# Run (inside the provisioned guest VM, as root, self-hosted binary):
+#   bin/simple test test/03_system/app/container/feature/podman_shared_api_live_spec.spl
+#
+# Known API gaps (named, not papered over; record: doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md). The installed fresh route's first
+# profile (`machine_fresh_workload_request_v2`) refuses build roots, mounts,
+# terminal modes, environment, cwd, non-`none` network and timeout > 30000 ms
+# with `machine-fresh-workload-profile-unsupported` / `-bounds`. Therefore:
+#   - the WORKSPACE case attempts the build bind (`build_input_root` ro at
+#     /simple-build/inputs, `build_output_root` rw at /simple-build/outputs) and
+#     is EXPECTED TO FAIL at prepare until a workspace is reachable through the
+#     shared API without an admin-signed manifest (today it needs
+#     `simple_container_open_lent_v4` + `simple_container_enable_workspace_v3`);
+#   - the TTY case attempts `terminal_mode: "tty"` and is EXPECTED TO FAIL the
+#     same way; a secondary exec with a TTY is refused by `engine_exec_codec_v3`
+#     (`tty` must be false) and `simple_container_exec_begin_v3` needs an issued
+#     `ContainerExecInstalledV3` + `ContainerExecAdmissionV3`, which this spec
+#     does not fabricate. "Exec" here is the workload's own process;
+#   - the fresh adapter never calls `adapter.provider`, so "no podman effect" in
+#     the refusal case is proven by the independent label query, not a counter;
+#   - on the Rust seed `linux_machine_policy_open_v1()` fails with
+#     `unknown extern function: gettid`; with the policy installed, run the
+#     self-hosted binary.
+use std.spec.{describe, it, expect, step, fail, pending}
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.*
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RUNTIME_STATUS_OK, RUNTIME_STATUS_REJECTED}
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_encode_v1
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_decode_v3
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.io.linux_machine_policy_owner_v1.*
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.dir_ops.is_dir
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
+use std.nogc_sync_mut.container_session.podman_session_v1.podman_session_host_runner_v1
+use std.io_runtime.getpid
+
+val LIVE_PODMAN_V1 = "/usr/bin/podman"
+val LIVE_LABEL_KEY_V1 = "io.simpleorch.pod_uid"
+
+var live_principal_v1: Option<MachineLocalProcessPrincipalV1> = None
+var live_open_v1: Option<SimpleContainerFreshOpenV2> = None
+var live_request_v1: Option<ContainerExecutionRequestV2> = None
+var live_window_v1: Option<ContainerEffectDeadlineV1> = None
+var live_identity_v1: Option<RuntimeIdentityV1> = None
+var live_uid_v1 = ""
+var live_work_dir_v1 = ""
+var live_image_cached_v1 = ""
+
+# ---- prerequisites (filesystem/env only until the policy dirs exist) ----
+
+fn live_policy_gate_v1() -> text:
+    for dir in ["/etc/simple/container", "/var/lib/simple/container"]:
+        if not is_dir(dir):
+            return "installed Simple Container machine policy missing: " + dir + " (administrator provision required)"
+    match linux_machine_policy_open_v1():
+        case LinuxMachinePolicyOpenV1.Ready(owner):
+            val closed = owner.close_v1()
+            if closed != "released": return "installed machine policy reader did not release: " + closed
+            ""
+        case LinuxMachinePolicyOpenV1.CleanupRequired(owner, reason):
+            val closed = owner.close_v1()
+            "installed machine policy cleanup required: " + reason + ":" + closed
+        case LinuxMachinePolicyOpenV1.Rejected(reason):
+            "installed machine policy unavailable: " + reason
+
+fn live_env_file_v1() -> text:
+    val path = env_get("SIMPLE_PODMAN_LIVE_ENV_FILE")
+    if path == "": "/etc/simple/podman-live-spec.env" else: path
+
+# Process env, then the single env file, then the given default.
+fn live_cfg_v1(key: text, fallback: text) -> text:
+    val direct = env_get(key)
+    if direct != "": return direct
+    val path = live_env_file_v1()
+    if file_exists(path):
+        val source = file_read_regular_no_follow_bounded(path, 65536)
+        if source.is_ok():
+            for raw in source.unwrap().split("\n"):
+                val line = raw.trim()
+                if line == "" or line.starts_with("#"): continue
+                if line.starts_with(key + "="): return line.substring(key.len() + 1).trim()
+    fallback
+
+# Explicit image, or the digest of the LOCAL busybox:1.36 (never pulled).
+fn live_image_v1() -> text:
+    val explicit = live_cfg_v1("SIMPLE_PODMAN_LIVE_IMAGE", "")
+    if explicit != "": return explicit
+    if not file_exists(LIVE_PODMAN_V1): return ""
+    val inspected = live_host_v1([LIVE_PODMAN_V1, "image", "inspect", "--format", live_go_template_v1("index .RepoDigests 0"), "busybox:1.36"])
+    if inspected.2 != 0: return ""
+    inspected.0.trim()
+
+fn live_template_path_v1() -> text:
+    live_cfg_v1("SIMPLE_PODMAN_LIVE_TEMPLATE", "/etc/simple/podman-live-launch-template.sdn")
+
+fn live_gate_v1() -> text:
+    val policy = live_policy_gate_v1()
+    if policy != "": return policy
+    if live_cfg_v1("SIMPLE_PODMAN_SMOKE", "") != "1": return "SIMPLE_PODMAN_SMOKE=1 not set (env or " + live_env_file_v1() + ")"
+    if not file_exists(LIVE_PODMAN_V1): return "podman executable missing: " + LIVE_PODMAN_V1
+    val image = live_image_v1()
+    if image == "": return "no SIMPLE_PODMAN_LIVE_IMAGE and local busybox:1.36 has no RepoDigest"
+    if not image.contains("@sha256:"): return "SIMPLE_PODMAN_LIVE_IMAGE not digest-pinned: " + image
+    val template = live_template_path_v1()
+    if not file_exists(template): return "fresh-owner launch template missing: " + template
+    live_image_cached_v1 = image
+    ""
+
+# ---- unique run identity ----
+
+fn live_nonce_v1(suffix: text) -> text:
+    val micros = time_sample_unix_micros_or_failure()
+    "spl-live-" + getpid().to_text() + "-" + micros.to_text() + "-" + suffix
+
+# A Go template for podman --format. Simple string literals treat "{{" as an
+# escaped "{", so the braces are concatenated rather than written literally.
+fn live_go_template_v1(body: text) -> text:
+    "{" + "{" + body + "}" + "}"
+
+fn live_host_v1(argv: [text]) -> (text, text, i64):
+    podman_session_host_runner_v1(argv, 60000)
+
+fn live_work_root_v1() -> text:
+    live_cfg_v1("SIMPLE_PODMAN_LIVE_WORK_ROOT", "/var/tmp")
+
+# ---- owner lifecycle (module holders so after_each can always clean up) ----
+
+fn live_owner_v1() -> Result<SimpleContainerOwnerV2, text>:
+    if live_open_v1.is_none() or live_open_v1.unwrap().owner.is_none(): return Err("live-owner-unavailable")
+    Ok(live_open_v1.unwrap().owner.unwrap())
+
+fn live_keep_v1(owner: SimpleContainerOwnerV2):
+    var original = live_open_v1.unwrap()
+    original.owner = Some(owner)
+    live_open_v1 = Some(original)
+
+fn live_open_owner_v1() -> Result<SimpleContainerOwnerV2, text>:
+    if live_open_v1.is_some() or live_principal_v1.is_some(): return Err("live-prior-cleanup-retained")
+    val template_source = file_read_regular_no_follow_bounded(live_template_path_v1(), 65536)?
+    val template = group_process_stream_template_decode_v3(template_source)?
+    val principal = match machine_local_process_principal_open_v1():
+        case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+            live_principal_v1 = Some(owner)
+            owner
+        case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            live_principal_v1 = Some(owner)
+            return Err("live-principal:" + reason)
+        case MachineLocalProcessPrincipalOpenV1.Rejected(reason): return Err("live-principal:" + reason)
+    val opened = simple_container_open_fresh_v2(principal, template)
+    live_open_v1 = Some(opened)
+    if opened.error != "" or opened.owner.is_none(): return Err("live-open:" + opened.error)
+    Ok(opened.owner.unwrap())
+
+fn live_leaf_v1(uid: text, script: text) -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: uid, attempt: 1, operation_id: "create-" + uid,
+        image: live_image_cached_v1, bundle_path: "",
+        command: ["/bin/sh", "-c", script], args: [], timeout_ms: 30000,
+        cpu_limit_millis: 1000, memory_limit_bytes: 268435456, pid_limit: 64,
+        network_policy: "none", filesystem_policy: "read-only", replace_entrypoint: true)
+
+fn live_request_for_v1(owner: SimpleContainerOwnerV2, leaf: LinuxOciRequestV1) -> Result<ContainerExecutionRequestV2, text>:
+    val scope = simple_container_scope_v2(owner)
+    val digest = linux_oci_request_digest_v1(leaf)?
+    val bytes = linux_oci_retained_request_encode_v1(leaf)?
+    Ok(ContainerExecutionRequestV2(plan: ContainerExecutionPlanV2(backend: "linux-podman",
+        workload_uid: leaf.pod_uid, attempt: leaf.attempt, operation_id: leaf.operation_id,
+        request_digest: digest, physical_host_id: scope.physical_host_id, service_scope_id: scope.service_scope_id,
+        boot_id: scope.boot_id, provider_generation: scope.provider_generation, native_machine_id: scope.native_machine_id,
+        continuity_mode: scope.continuity_mode, continuity_id: scope.continuity_id), request_bytes: bytes))
+
+fn live_apply_v1(action: text) -> Result<RuntimeOperationV1, text>:
+    val turn = simple_container_apply_v2(live_owner_v1()?, action, live_request_v1.unwrap(), live_window_v1.unwrap())
+    live_keep_v1(turn.owner)
+    if turn.operation.status != RUNTIME_STATUS_OK: return Err("live-" + action + ":" + turn.operation.reason)
+    Ok(turn.operation)
+
+fn live_read_v1(action: text) -> Result<RuntimeOperationV1, text>:
+    val turn = simple_container_read_v2(live_owner_v1()?, action, live_request_v1.unwrap())
+    live_keep_v1(turn.owner)
+    if turn.operation.status != RUNTIME_STATUS_OK: return Err("live-" + action + ":" + turn.operation.reason)
+    Ok(turn.operation)
+
+# Opens the owner, binds the leaf to the owner's actual scope, and runs the
+# workload to completion. Returns (workload exit code, captured stdout).
+fn live_run_v1(leaf: LinuxOciRequestV1) -> Result<(i64, text), text>:
+    val owner = live_open_owner_v1()?
+    live_uid_v1 = leaf.pod_uid
+    val request = live_request_for_v1(owner, leaf)?
+    live_request_v1 = Some(request)
+    val now = time_sample_unix_micros_or_failure() / 1000
+    if now <= 0: return Err("live-clock")
+    live_window_v1 = Some(container_effect_deadline_v1(request.plan.request_digest,
+        request.plan.operation_id, ["create", "start"], now + 60000)?)
+    live_apply_v1("prepare")?
+    val created = live_apply_v1("create")?
+    live_identity_v1 = Some(created.state.identity)
+    live_apply_v1("start")?
+    val waited = live_read_v1("wait")?
+    val logs = live_read_v1("logs")?
+    # wait reports the CLI exit in exit_code and the workload exit in state.
+    Ok((waited.state.exit_code, logs.stdout))
+
+fn live_label_filter_v1(uid: text) -> text:
+    "label=" + LIVE_LABEL_KEY_V1 + "=" + uid
+
+# Independent engine queries for anything carrying this run's unique label.
+fn live_remnants_v1(uid: text) -> Result<[text], text>:
+    var found: [text] = []
+    for kind in [["ps", "-a", "--format", live_go_template_v1(".Names")], ["pod", "ps", "--format", live_go_template_v1(".Name")], ["volume", "ls", "--format", live_go_template_v1(".Name")]]:
+        var argv: [text] = [LIVE_PODMAN_V1]
+        for part in kind: argv.push(part)
+        argv.push("--filter")
+        argv.push(live_label_filter_v1(uid))
+        val listed = live_host_v1(argv)
+        if listed.2 != 0: return Err("live-remnant-query-failed:" + kind[0] + ":" + listed.1)
+        for line in listed.0.split("\n"):
+            if line.trim() != "": found.push(kind[0] + ":" + line.trim())
+    Ok(found)
+
+fn live_make_workspace_v1(uid: text, nonce: text) -> Result<(text, text), text>:
+    val root = live_work_root_v1() + "/" + uid
+    val input = root + "/input"
+    val output = root + "/output"
+    val made = live_host_v1(["/bin/mkdir", "-p", input, output])
+    if made.2 != 0: return Err("live-workspace-mkdir:" + made.1)
+    live_work_dir_v1 = root
+    val wrote = live_host_v1(["/bin/sh", "-c", "printf %s \"$1\" > \"$2\"", "sh", nonce, input + "/nonce.txt"])
+    if wrote.2 != 0: return Err("live-workspace-seed:" + wrote.1)
+    Ok((input, output))
+
+# Destroys the workload (when created), proves absence through the API, closes
+# every owner, and removes the run's workspace root. Idempotent; a no-op when
+# nothing was opened, so BLOCKED examples never reach native code.
+fn live_finish_v1() -> text:
+    var first_error = ""
+    if live_open_v1.is_some():
+        if live_owner_v1().is_ok() and live_request_v1.is_some() and live_window_v1.is_some() and live_identity_v1.is_some():
+            val removed = live_apply_v1("destroy")
+            if removed.is_err(): first_error = removed.unwrap_err()
+            else:
+                val absent = simple_container_absence_v2(live_owner_v1().unwrap(), live_request_v1.unwrap(), live_identity_v1.unwrap())
+                live_keep_v1(absent.owner)
+                if absent.receipt.is_none(): first_error = "live-absence-unproven:" + absent.error
+        val closed = simple_container_fresh_cleanup_v2(live_open_v1.unwrap())
+        live_open_v1 = closed.retained
+        if closed.retained.is_some() or not closed.closed:
+            return "live-cleanup-retained:" + closed.error
+        if first_error == "" and closed.error != "": first_error = closed.error
+    if val principal = live_principal_v1:
+        val closed = principal.close_v1()
+        if closed == "released" or closed == "consumed-error": live_principal_v1 = None
+        if closed != "released" and first_error == "": first_error = "live-principal-close:" + closed
+    if live_work_dir_v1 != "":
+        val removed = live_host_v1(["/bin/rm", "-rf", live_work_dir_v1])
+        if removed.2 != 0 and first_error == "": first_error = "live-workspace-remove:" + removed.1
+        live_work_dir_v1 = ""
+    live_request_v1 = None
+    live_window_v1 = None
+    live_identity_v1 = None
+    first_error
+
+describe "Linux Podman route through the shared Simple Container API (live)":
+    after_each:
+        val leftover = live_finish_v1()
+        if leftover != "": print "LIVE after_each cleanup diagnostic: " + leftover
+
+    # known gap: doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md (fresh route refuses build roots; stays a real failure)
+    it "binds the workspace into the container and enforces its read-only half":
+        val blocked = live_gate_v1()
+        if blocked != "":
+            pending("BLOCKED: " + blocked)
+            return
+        step("Seed a per-run nonce file in a fresh host workspace root")
+        val uid = live_nonce_v1("ws")
+        val nonce = "nonce-" + uid
+        val roots = live_make_workspace_v1(uid, nonce)
+        if roots.is_err():
+            fail(roots.unwrap_err())
+            return
+        step("Run a workload that reads the input bind, tries to write it, and writes the output bind")
+        var leaf = live_leaf_v1(uid,
+            "cat /simple-build/inputs/nonce.txt; echo; " +
+            "if (echo x > /simple-build/inputs/probe) 2>/dev/null; then echo ro-violated; else echo ro-enforced; fi; " +
+            "echo written > /simple-build/outputs/result.txt")
+        leaf.build_input_root = roots.unwrap().0
+        leaf.build_output_root = roots.unwrap().1
+        val run = live_run_v1(leaf)
+        if run.is_err():
+            fail(run.unwrap_err())
+            return
+        val observed = run.unwrap()
+        print "LIVE workspace exit={observed.0} stdout={observed.1}"
+        expect(observed.0).to_equal(0)
+        expect(observed.1.contains(nonce)).to_equal(true)
+        expect(observed.1.contains("ro-enforced")).to_equal(true)
+        expect(observed.1.contains("ro-violated")).to_equal(false)
+        step("Check the host side of both binds")
+        expect(file_exists(roots.unwrap().0 + "/probe")).to_equal(false)
+        expect(file_exists(roots.unwrap().1 + "/result.txt")).to_equal(true)
+
+    it "applies the requested CPU and memory limits to the container cgroup":
+        val blocked = live_gate_v1()
+        if blocked != "":
+            pending("BLOCKED: " + blocked)
+            return
+        step("Request 500 CPU millis and 128 MiB, then read cgroup v2 files from inside")
+        var leaf = live_leaf_v1(live_nonce_v1("lim"), "cat /sys/fs/cgroup/cpu.max; cat /sys/fs/cgroup/memory.max")
+        leaf.cpu_limit_millis = 500
+        leaf.memory_limit_bytes = 134217728
+        val run = live_run_v1(leaf)
+        if run.is_err():
+            fail(run.unwrap_err())
+            return
+        val observed = run.unwrap()
+        print "LIVE limits exit={observed.0} stdout={observed.1}"
+        expect(observed.0).to_equal(0)
+        val lines = observed.1.trim().split("\n")
+        expect(lines.len()).to_equal(2)
+        expect(lines[0].trim()).to_equal("50000 100000")
+        expect(lines[1].trim()).to_equal("134217728")
+
+    it "returns the workload stdout and its nonzero exit code":
+        val blocked = live_gate_v1()
+        if blocked != "":
+            pending("BLOCKED: " + blocked)
+            return
+        step("Run a workload that prints a per-run marker and exits 7")
+        val uid = live_nonce_v1("exec")
+        val run = live_run_v1(live_leaf_v1(uid, "echo exec-" + uid + "; exit 7"))
+        if run.is_err():
+            fail(run.unwrap_err())
+            return
+        val observed = run.unwrap()
+        print "LIVE exec exit={observed.0} stdout={observed.1}"
+        expect(observed.0).to_equal(7)
+        expect(observed.1.trim()).to_equal("exec-" + uid)
+
+    # known gap: doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md (fresh route refuses terminal modes; stays a real failure)
+    it "allocates a TTY for the workload only when tty mode is requested":
+        val blocked = live_gate_v1()
+        if blocked != "":
+            pending("BLOCKED: " + blocked)
+            return
+        step("Request terminal_mode tty and test stdout for a terminal from inside")
+        var leaf = live_leaf_v1(live_nonce_v1("tty"), "if [ -t 1 ]; then echo tty-yes; else echo tty-no; fi")
+        leaf.terminal_mode = "tty"
+        val run = live_run_v1(leaf)
+        if run.is_err():
+            fail(run.unwrap_err())
+            return
+        val tty = run.unwrap()
+        print "LIVE tty exit={tty.0} stdout={tty.1}"
+        expect(tty.0).to_equal(0)
+        expect(tty.1.trim()).to_equal("tty-yes")
+        step("Destroy it, then run the same probe without tty mode")
+        val cleaned = live_finish_v1()
+        if cleaned != "":
+            fail("tty cleanup:" + cleaned)
+            return
+        val plain = live_run_v1(live_leaf_v1(live_nonce_v1("notty"), "if [ -t 1 ]; then echo tty-yes; else echo tty-no; fi"))
+        if plain.is_err():
+            fail(plain.unwrap_err())
+            return
+        expect(plain.unwrap().1.trim()).to_equal("tty-no")
+
+    it "leaves no container, pod or volume with the run label after destroy":
+        val blocked = live_gate_v1()
+        if blocked != "":
+            pending("BLOCKED: " + blocked)
+            return
+        step("Run a labelled workload to completion")
+        val uid = live_nonce_v1("gone")
+        val run = live_run_v1(live_leaf_v1(uid, "echo done"))
+        if run.is_err():
+            fail(run.unwrap_err())
+            return
+        val before = live_remnants_v1(uid)
+        expect(before.is_ok()).to_equal(true)
+        expect(before.unwrap().len() > 0).to_equal(true)
+        step("Destroy through the API, prove absence, close every owner")
+        val cleanup = live_finish_v1()
+        expect(cleanup).to_equal("")
+        step("Query the engine independently by the run's unique label")
+        val after = live_remnants_v1(uid)
+        if after.is_err():
+            fail(after.unwrap_err())
+            return
+        expect(after.unwrap()).to_equal([])
+
+    it "refuses unapproved images and an unsupported profile before any podman effect":
+        val blocked = live_gate_v1()
+        if blocked != "":
+            pending("BLOCKED: " + blocked)
+            return
+        step("Open the genuine owner; submit a tag-only image, an unqualified-registry pin and host networking")
+        val opened = live_open_owner_v1()
+        if opened.is_err():
+            fail(opened.unwrap_err())
+            return
+        val cases = [("tag", "fresh-workload-registry-manifest-pin-required"),
+            ("unqualified", "fresh-workload-qualified-registry-required"),
+            ("profile", "machine-fresh-workload-profile-unsupported")]
+        for entry in cases:
+            val kind = entry.0
+            val uid = live_nonce_v1("refuse-" + kind)
+            var leaf = live_leaf_v1(uid, "echo must-not-run")
+            if kind == "tag": leaf.image = "busybox:1.36"
+            if kind == "unqualified": leaf.image = "busybox@sha256:" + "b".repeat(64)
+            if kind == "profile": leaf.network_policy = "host"
+            val owner = live_owner_v1().unwrap()
+            val request = live_request_for_v1(owner, leaf)
+            if request.is_err():
+                fail("refusal request build:" + request.unwrap_err())
+                return
+            val now = time_sample_unix_micros_or_failure() / 1000
+            val window = container_effect_deadline_v1(request.unwrap().plan.request_digest,
+                request.unwrap().plan.operation_id, ["create", "start"], now + 60000).unwrap()
+            for action in ["prepare", "create"]:
+                val turn = simple_container_apply_v2(live_owner_v1().unwrap(), action, request.unwrap(), window)
+                live_keep_v1(turn.owner)
+                print "LIVE refusal {kind} {action} status={turn.operation.status} reason={turn.operation.reason}"
+                expect(turn.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+                expect(turn.operation.reason).to_equal(entry.1)
+            step("Prove no engine object carries the refused run's label")
+            val remnants = live_remnants_v1(uid)
+            expect(remnants.is_ok()).to_equal(true)
+            expect(remnants.unwrap()).to_equal([])

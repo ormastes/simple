@@ -13,6 +13,20 @@ but only because strip returns the source unsliced when line 1 is content; it
 may be reverted once the `str_slice` workaround is in a rebuilt Stage 2. The
 original text follows unchanged.
 
+Addendum 2026-11-27 (seed fix): the resolver defect itself is now fixed in the
+Rust seed. `resolve_name_variants`
+(`src/compiler_rust/compiler/src/pipeline/native_project/imports.rs`) gates both
+lowercase-joined lookups (`str_slice`, `strslice`) with
+`is_builtin_receiver_type`, so a builtin-receiver method call (`str.slice`,
+`str.len`, ...) can no longer rebind to a same-spelled user free function; it
+falls through to the builtin lowering (`rt_slice_text_bytes`, ...), which is the
+behavior every small probe already had. Regression coverage:
+`numeric_receiver_resolution_tests` in the same file. End-to-end validation (a
+rebuilt Stage 2 running `test_runner_build`) is still pending a bootstrap lane;
+until then the `str_slice` source workaround in
+`src/compiler/10.frontend/core/types.spl` stays, and it is now belt-and-braces
+rather than load-bearing.
+
 ## Symptom
 
 Stage 2 compiler-test matrix `test_runner_build` row (lanes v7c pin

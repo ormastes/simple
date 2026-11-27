@@ -462,6 +462,14 @@ impl ExecCore {
                 N::Expression(Expr::Call { callee, args, .. }) => {
                     !(args.is_empty() && matches!(callee.as_ref(), Expr::Identifier(name) if name == "main"))
                 }
+                // A bare string literal is a docstring, not a statement: no side
+                // effects, so the JIT skipping it loses nothing.
+                N::Expression(Expr::String(_)) => false,
+                N::Expression(Expr::FString { parts, .. })
+                    if parts.iter().all(|p| matches!(p, simple_parser::ast::FStringPart::Literal(_))) =>
+                {
+                    false
+                }
                 N::Expression(_)
                 | N::Assignment(_)
                 | N::If(_)
@@ -2722,6 +2730,25 @@ mod jit_top_level_statement_tests {
             rc
         };
         assert_eq!(rc, Ok(42), "imported helper must run on the JIT");
+    }
+
+    /// A docstring above a `pub fn` is a bare string-literal statement; it must
+    /// not demote the entry module to the interpreter.
+    #[test]
+    fn docstring_above_fn_is_not_a_skipped_statement() {
+        let src = "\"\"\"helper doc\"\"\"\npub fn helper():\n    print \"x\"\n\"one-line doc\"\nfn main():\n    helper()\n";
+        assert_eq!(skipped(src), 0);
+    }
+
+    /// Expressions with side effects stay counted.
+    #[test]
+    fn top_level_call_expression_is_counted() {
+        assert_eq!(skipped("fn f():\n    print \"x\"\nf()\nfn main():\n    f()\n"), 1);
+    }
+
+    #[test]
+    fn interpolated_top_level_string_is_counted() {
+        assert_eq!(skipped("fn f() -> i64:\n    1\n\"doc {f()}\"\nfn main():\n    f()\n"), 1);
     }
 
     #[test]

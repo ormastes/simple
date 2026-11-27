@@ -7,6 +7,7 @@
 use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendProber, StrictBackendFactory, backend_probe_initialized}
 use std.gpu.engine2d.backend_session.{BackendFrame}
 use std.gpu.engine2d.simd_provider.{simd_hit_counts}
+use std.nogc_sync_mut.io_runtime.{platform_name}
 
 class ComputeDispatchHits:
     kernel_launches: i64
@@ -96,18 +97,21 @@ class ComputeDispatch:
     static fn from_strict_factory(factory: StrictBackendFactory, name: text) -> ComputeDispatchResult:
         ComputeDispatchResult.create(factory.create_backend(name))
 
-    fn select_best() -> ComputeDispatchResult:
-        val cuda = self.prober.probe_cuda()
-        if backend_probe_initialized(cuda):
-            return ComputeDispatchResult.create(cuda)
+    fn select_best_for_platform(platform: text) -> ComputeDispatchResult:
+        val canonical_platform = platform.trim().lower()
+        val allow_hosted_gpu = not canonical_platform.contains("baremetal") and not canonical_platform.contains("simpleos")
+        if allow_hosted_gpu:
+            val cuda = self.prober.probe_cuda()
+            if backend_probe_initialized(cuda):
+                return ComputeDispatchResult.create(cuda)
 
-        val rocm = self.prober.probe_rocm()
-        if backend_probe_initialized(rocm):
-            return ComputeDispatchResult.create(rocm)
+            val rocm = self.prober.probe_rocm()
+            if backend_probe_initialized(rocm):
+                return ComputeDispatchResult.create(rocm)
 
-        val opencl = self.prober.probe_opencl()
-        if backend_probe_initialized(opencl):
-            return ComputeDispatchResult.create(opencl)
+            val opencl = self.prober.probe_opencl()
+            if backend_probe_initialized(opencl):
+                return ComputeDispatchResult.create(opencl)
 
         val cpu_x86 = self.prober.probe_cpu_simd_x86()
         if backend_probe_initialized(cpu_x86):
@@ -122,6 +126,9 @@ class ComputeDispatch:
             return ComputeDispatchResult.create(cpu_riscv)
 
         ComputeDispatchResult.create(self.prober.probe_cpu())
+
+    fn select_best() -> ComputeDispatchResult:
+        self.select_best_for_platform(platform_name())
 
 fn compute_dispatch_auto() -> ComputeDispatchResult:
     ComputeDispatch.auto()

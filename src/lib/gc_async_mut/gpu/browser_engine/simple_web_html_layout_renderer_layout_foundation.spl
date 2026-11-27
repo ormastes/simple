@@ -20,7 +20,7 @@ use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_langu
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{svg_view_box_milli, font_milli_of}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{IntrinsicWidthResult, LineWrapRanges, char_w, text_advance, style_char_w, style_text_advance, style_space_advance, line_h, style_line_h, style_used_face_line, _lay_style_run_byte_advances_inner, utf8_encoded_len, next_codepoint_start, byte_advances_range_width, style_text_line_advance_width_with, style_font_is_monospace, grid_item_is_replaced, replaced_default_box_w, FORM_CONTROL_UA_FONT_TRUNCATED_PX, FORM_CONTROL_UA_FONT_NUM, FORM_CONTROL_UA_FONT_DEN, FORM_CONTROL_MEASURE_MAX_PX, FORM_CONTROL_MEASURE_OVERSAMPLE, form_control_label_width_px, form_control_text_children_label_px, form_control_button_label_correction_px, form_control_first_text_child, form_control_label_text_node, replaced_default_is_content_size, replaced_specified_box_h, SVG_RATIO_MAX_BOX_PX, svg_ratio_view_box_milli, svg_ratio_scaled_px, replaced_auto_box_w, INPUT_COL_ADVANCE_PX, INPUT_CONTENT_INTERCEPT_PX, TEXTAREA_COL_ADVANCE_PX, TEXTAREA_CONTENT_INTERCEPT_PX, form_control_face_identity, form_control_intrinsic_content_w, form_control_intrinsic_content_device_w, form_control_content_w_for_face, form_control_cols, inline_replaced_predicted_width, _lay_intrinsic_text_width_inner, inline_subtree_edge_is_space, text_control_auto_outer_w, _lay_flex_item_max_content_width_inner, _table_text_min_content_width, _lay_flex_wrap_auto_base_width_inner, _lay_style_measured_run_advance_inner, codepoint_is_space, text_starts_with_collapsible_space, text_ends_with_collapsible_space, resolved_space_advance, _lay_inline_text_advance_width_inner, text_ink_y_offset, text_ink_x_offset, web_wrap_line_end, text_line_advance_width, style_text_line_advance_width, html_text_paint_fully_transparent, text_line_aligned_x, text_line_needs_paint_width, text_rtl_run_starts_box, _lay_ellipsize_text_for_width_inner, text_first_line_dx_at, text_line_box_dx, text_line_box_w, text_run_aligns_line_left, text_last_line_advance, compute_style_wrap_ranges_float_band, _lay_compute_wrap_ranges_inner, _lay_compute_style_wrap_ranges_inner, compute_style_wrap_ranges_first_line, compute_style_wrap_ranges_exact, _lay_compute_style_wrap_ranges_first_inner, first_word_advance_width, word_end_byte, css_outer_width, constrained_outer_width, cursor_advance_px, cursor_advance_frac, style_run_byte_advances, style_measured_run_advance, inline_text_advance_width, inline_text_width_after_lead, compute_style_wrap_ranges, compute_wrap_ranges, intrinsic_text_width, flex_item_max_content_width, flex_wrap_auto_base_width, ellipsize_text_for_width, layout_set_images, img_resource_auto_outer_h, img_resource_auto_outer_w}
 
 # A `<summary>`'s disclosure marker (Chrome 159 list_marker.cc): the symbol
@@ -36,6 +36,17 @@ pub fn summary_marker_symbol_64(font_size: i32) -> i32:
 # @allow(primitive_api)
 pub fn summary_marker_inline_width(font_size: i32) -> i32:
     (summary_marker_symbol_64(font_size) + font_size * 4 * 64 / 10 + 32) / 64
+
+# The same advance at device scale k, in milli CSS px. Chrome zooms the symbol
+# (0.66em of the device font) but adds the inside marker's 0.4em end margin at
+# the CSS font size, each truncated to 1/64 device px (Chrome 159, 16 px):
+# k=1 16.9375, k=2 13.75, k=4 48.625 device px = 12.15625 CSS px.
+# reason: font size and scale are layout scalars; result in milli CSS px.
+# @allow(primitive_api)
+pub fn summary_marker_inline_milli(font_size: i32, k: i32) -> i64:
+    val kk = if k < 1: 1 else: k
+    val device_64 = (font_size * kk * 66 * 64 / 100 + font_size * 4 * 64 / 10) as i64
+    device_64 * 1000 / ((64 * kk) as i64)
 
 # Bounded collapsed-border style precedence, from lowest to highest.
 # An empty style is the same as an absent/none edge. Unknown styles fail the
@@ -1496,6 +1507,7 @@ pub var g_box_line_start_err_milli: [i32] = []
 
 pub fn box_line_start_err_reset():
     g_box_line_start_err_milli = []
+    g_box_right_edge_err_milli = []
 
 # reason: node index and milli-px error index the per-node layout tables.
 # @allow(primitive_api)
@@ -1510,6 +1522,26 @@ pub fn box_line_start_err_record(node_count: i32, i: i32, err_milli: i32):
 # @allow(primitive_api)
 pub fn box_line_start_err_at(i: i32) -> i64:
     if i >= 0 and i < g_box_line_start_err_milli.len().to_i32(): g_box_line_start_err_milli[i] as i64 else: 0
+
+# Exact-minus-integer x (milli-px) of an auto table cell's RIGHT column edge,
+# the twin of `g_box_line_start_err_milli` for the cell's left edge. Recorded
+# by the table that placed the cell; reset with it. Read by the device-scale
+# paint of a collapsed cell's box (its shared rule on Chrome's edge).
+var g_box_right_edge_err_milli: [i32] = []
+
+# reason: node index and milli-px error index the per-node layout tables.
+# @allow(primitive_api)
+pub fn box_right_edge_err_record(node_count: i32, i: i32, err_milli: i32):
+    if g_box_right_edge_err_milli.len() == 0:
+        if err_milli == 0:
+            return
+        g_box_right_edge_err_milli = zero_i32_list(node_count)
+    g_box_right_edge_err_milli[i] = err_milli
+
+# reason: per-node milli-px table read by node index.
+# @allow(primitive_api)
+pub fn box_right_edge_err_at(i: i32) -> i64:
+    if i >= 0 and i < g_box_right_edge_err_milli.len().to_i32(): g_box_right_edge_err_milli[i] as i64 else: 0
 
 # Sentinel: the inline cursor moved by an advance with no exact width.
 pub val INLINE_PEN_ERR_UNKNOWN: i64 = -1000000000
@@ -2339,6 +2371,27 @@ pub fn form_control_label_device_dy(node: HNode, st: Style) -> i32:
     if k <= 1 or node.tag != "select":
         return 0
     form_control_device_baseline_delta(node, st, k, 0)
+
+# A `<textarea>` value's lines at device scale k > 1 (Chrome 159, 13.333px
+# DejaVu Sans Mono at k=4): Chrome stacks them on the face's DEVICE `normal`
+# line (63 px, baseline 50 below the line top), the box already holds rows x
+# that line (`form_control_device_extra_h`). The value is laid out outside the
+# inline baseline pass, so record what that pass would: the device strut delta
+# plus the painter term for every line, and the per-line device step beyond
+# k x the CSS line (63 - 60 = 3 px, 750 milli CSS px) for lines 2..n.
+# reason: node index and count are layout-table scalars.
+# @allow(primitive_api)
+pub fn textarea_value_device_lines_record(node_count: i32, i: i32, st: Style):
+    val k = g_layout_device_scale
+    if k <= 1 or i < 0 or i >= node_count:
+        return
+    val dy = inline_line_strut_baseline_offset_device(st, k) - k * inline_line_strut_baseline_offset(st) + text_device_painter_dy(st, k)
+    text_device_dy_record(node_count, i, dy, dy)
+    val step = (style_device_line_h_milli(st, k) - k * style_line_h(st) * 1000) / k
+    if step != 0:
+        text_line_steps_set(node_count, i, 0, step)
+        text_line_steps_set(node_count, i, 1, 0)
+        text_line_steps_set(node_count, i, 2, 0)
 
 # A `normal` line of `st` centred in a box of box_h CSS px (the media
 # controls' time text). Chrome centres it in DEVICE px with the half px
@@ -3276,88 +3329,99 @@ fn grid_fr_track_factor(token: text) -> i32:
     val plus = find_from(token, "+", 0)
     if plus >= 0: parse_int(token.substring(plus + 1, token.byte_len())) else: parse_int(token)
 
-fn _lay_grid_track_sizes_inner(raw: text, available_w: i32, gap: i32) -> [i32]:
-    var tokens: [text] = []
+struct GridTrackLayout:
+    sizes: [i32]
+    start_milli: [i32]
+    end_milli: [i32]
+
+fn _grid_snap_milli_i64(milli: i64) -> i32:
+    val shifted = milli + 500
+    (if shifted >= 0: shifted / 1000 else: 0 - ((999 - shifted) / 1000)) as i32
+
+# Resolves fixed, fractional `fr`, and floored `<floor>+<fr>` tracks
+# (`minmax(<floor>px, Nfr)`, CSS Grid 12.7.1) with cumulative milli-px edges.
+fn _lay_grid_track_layout_inner(raw: text, available_w: i32, gap: i32) -> GridTrackLayout:
     var is_fr: [bool] = []
+    var fixed_vals: [i32] = []
+    var fr_vals: [i64] = []
     var fixed_sum = 0
-    var fr_total = 0
+    var fr_total: i64 = 0
     var has_floor = false
     for part in raw.split(" "):
         val token = part.trim()
         if token == "":
             continue
         if token.ends_with("fr") and token.len() > 2:
-            val factor = grid_fr_track_factor(token)
+            val factor = grid_track_fr_micro(token)
             if factor <= 0:
-                return []
-            if grid_fr_track_floor(token) > 0:
+                return GridTrackLayout(sizes: [], start_milli: [], end_milli: [])
+            val floor = grid_fr_track_floor(token)
+            if floor > 0:
                 has_floor = true
-            tokens.push(token)
             is_fr.push(true)
+            fixed_vals.push(floor)
+            fr_vals.push(factor)
             fr_total = fr_total + factor
         else:
             val size = parse_int(token)
             if size <= 0:
-                return []
-            tokens.push(token)
+                return GridTrackLayout(sizes: [], start_milli: [], end_milli: [])
             is_fr.push(false)
+            fixed_vals.push(size)
+            fr_vals.push(0)
             fixed_sum = fixed_sum + size
-    val track_count = tokens.len() as i32
+    val track_count = is_fr.len() as i32
     if track_count == 0:
-        return []
+        return GridTrackLayout(sizes: [], start_milli: [], end_milli: [])
+    var inflexible: [bool] = [false; track_count]
+    var flex_space: i64 = (available_w - fixed_sum - gap * (track_count - 1)) as i64
+    var flex_weight: i64 = fr_total
     if has_floor:
-        return grid_floored_fr_track_sizes(tokens, is_fr, available_w - fixed_sum - gap * (track_count - 1), fr_total)
-    var free_space = available_w - fixed_sum - gap * (track_count - 1)
-    if free_space < 0:
-        free_space = 0
-    var sizes: [i32] = []
-    var idx = 0
-    while idx < tokens.len():
-        if is_fr[idx]:
-            val factor = parse_int(tokens[idx])
-            val fr_size = if fr_total > 0: free_space * factor / fr_total else: 0
-            sizes.push(fr_size)
-        else:
-            sizes.push(parse_int(tokens[idx]))
-        idx = idx + 1
-    sizes
-
-# Track sizes when an `fr` track carries a length floor (`minmax(<floor>px,
-# Nfr)`, CSS Grid 12.7.1, Chrome 159): a flexible track whose share of
-# `flex_space` (what the fixed tracks and gaps leave) is below its floor is
-# inflexible at the floor and leaves the share to the others; the floors may
-# overflow the container.
-fn grid_floored_fr_track_sizes(tokens: [text], is_fr: [bool], flex_space_in: i32, fr_total: i32) -> [i32]:
-    val n = tokens.len() as i32
-    var inflexible: [bool] = [false; n]
-    var flex_space = flex_space_in
-    var flex_weight = fr_total
-    var changed = true
-    while changed and flex_weight > 0:  # cpu-lane-loop-ok: each pass freezes one more fr track of one grid during layout
-        changed = false
-        var idx = 0
-        while idx < n:
-            if is_fr[idx] and not inflexible[idx]:
-                val floor = grid_fr_track_floor(tokens[idx])
-                if floor > 0 and floor * flex_weight > flex_space * grid_fr_track_factor(tokens[idx]):
-                    inflexible[idx] = true
-                    flex_space = flex_space - floor
-                    flex_weight = flex_weight - grid_fr_track_factor(tokens[idx])
-                    changed = true
-            idx = idx + 1
+        var changed = true
+        while changed and flex_weight > 0:  # cpu-lane-loop-ok: each pass freezes one more fr track of one grid during layout
+            changed = false
+            var fidx = 0
+            while fidx < track_count:
+                if is_fr[fidx] and not inflexible[fidx]:
+                    val floor: i64 = fixed_vals[fidx] as i64
+                    if floor > 0 and floor * flex_weight > flex_space * fr_vals[fidx]:
+                        inflexible[fidx] = true
+                        flex_space = flex_space - floor
+                        flex_weight = flex_weight - fr_vals[fidx]
+                        changed = true
+                fidx = fidx + 1
     if flex_space < 0:
         flex_space = 0
     var sizes: [i32] = []
+    var start_milli: [i32] = []
+    var end_milli: [i32] = []
+    var fixed_before: i64 = 0
+    var used_fr: i64 = 0
+    var prev_fr_px: i32 = 0
     var idx = 0
-    while idx < n:
-        if not is_fr[idx]:
-            sizes.push(parse_int(tokens[idx]))
-        elif inflexible[idx]:
-            sizes.push(grid_fr_track_floor(tokens[idx]))
+    while idx < track_count:
+        val gap_before: i64 = (idx as i64) * (gap as i64) * 1000
+        val fr_before_milli: i64 = if flex_weight > 0: (flex_space * used_fr * 1000 + flex_weight / 2) / flex_weight else: 0
+        val s_milli = fixed_before * 1000 + gap_before + fr_before_milli
+        start_milli.push(s_milli as i32)
+        if is_fr[idx] and not inflexible[idx]:
+            used_fr = used_fr + fr_vals[idx]
+            val fr_after_milli: i64 = if flex_weight > 0: (flex_space * used_fr * 1000 + flex_weight / 2) / flex_weight else: 0
+            val e_milli = fixed_before * 1000 + gap_before + fr_after_milli
+            end_milli.push(e_milli as i32)
+            val after_px = _grid_snap_milli_i64(fr_after_milli)
+            sizes.push(after_px - prev_fr_px)
+            prev_fr_px = after_px
         else:
-            sizes.push(if flex_weight > 0: flex_space * grid_fr_track_factor(tokens[idx]) / flex_weight else: 0)
+            val w = fixed_vals[idx]
+            fixed_before = fixed_before + (w as i64)
+            end_milli.push((s_milli + (w as i64) * 1000) as i32)
+            sizes.push(w)
         idx = idx + 1
-    sizes
+    GridTrackLayout(sizes: sizes, start_milli: start_milli, end_milli: end_milli)
+
+fn _lay_grid_track_sizes_inner(raw: text, available_w: i32, gap: i32) -> [i32]:
+    _lay_grid_track_layout_inner(raw, available_w, gap).sizes
 
 fn grid_placement_start(raw: text) -> i32:
     val value = raw.trim()
@@ -3507,6 +3571,14 @@ fn table_cell_min_content_width(nodes: [HNode], styles: [Style], child_index: Ht
     val t0 = _wsc_now_us()
     val out = _lay_table_cell_min_content_width_inner(nodes, styles, child_index, cell)
     _wlay_add(5, _wsc_now_us() - t0, 1)
+    out
+
+fn grid_track_layout(raw: text, available_w: i32, gap: i32) -> GridTrackLayout:
+    if not _wsc_on:
+        return _lay_grid_track_layout_inner(raw, available_w, gap)
+    val t0 = _wsc_now_us()
+    val out = _lay_grid_track_layout_inner(raw, available_w, gap)
+    _wlay_add(6, _wsc_now_us() - t0, 1)
     out
 
 fn grid_track_sizes(raw: text, available_w: i32, gap: i32) -> [i32]:

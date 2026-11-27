@@ -13,6 +13,7 @@ export use std.scv.compile_source_inventory_core.*
 use std.nogc_sync_mut.io_runtime.{dir_list_or_empty}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_publish_noreplace_raw, file_modified_time}
+use std.nogc_sync_mut.io.stderr_ops.{stderr_write}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.io_runtime.{process_is_running}
 use std.nogc_async_mut.file_system.event_watch.{FsWatchEvent}
@@ -277,6 +278,9 @@ fn compile_source_inventory_apply_cold_events_v1(
 ) -> CompileSourceInventoryChangeV1:
     if initial_generation < 0:
         return CompileSourceInventoryChangeV1(false, "event-invalid", nil, false, false)
+    val log_progress = events.len() >= 2000
+    if log_progress:
+        stderr_write("[scv] cold-apply start events={events.len()}\n")
     # A normal Git cold listing is a unique create batch. The existing
     # initializer validates every row and sorts once, avoiding a singleton
     # inventory plus full event reducer invocation for each file. Refusal is
@@ -287,6 +291,8 @@ fn compile_source_inventory_apply_cold_events_v1(
         val changed = events.len() > 0
         val inventory = CompileSourceInventoryV1(
             1, initial_generation + events.len(), initial!.entries)
+        if log_progress:
+            stderr_write("[scv] cold-apply done entries={initial!.entries.len()}\n")
         return CompileSourceInventoryChangeV1(
             true, if changed: "ok" else: "ok-no-change",
             Some(inventory), changed, changed)
@@ -296,13 +302,17 @@ fn compile_source_inventory_apply_cold_events_v1(
     var generation = initial_generation
     var content_changed = false
     var semantics_changed = false
+    var processed = 0
     for event in events:
+        processed = processed + 1
+        if log_progress and processed % 2000 == 0:
+            stderr_write("[scv] cold-apply progress={processed}/{events.len()}\n")
         var position = -1
         var single: [CompileSourceInventoryEntryV1] = []
         if positions.has(event.source_identity):
             position = positions[event.source_identity]
             if active[position]:
-                single = single.push(retained[position])
+                single.push(retained[position])
         val changed = compile_source_inventory_apply_event_v1(
             CompileSourceInventoryV1(1, generation, single), event)
         if not changed.valid:
@@ -320,15 +330,17 @@ fn compile_source_inventory_apply_cold_events_v1(
                 active[position] = true
             else:
                 positions[event.source_identity] = retained.len()
-                retained = retained.push(next.entries[0])
-                active = active.push(true)
+                retained.push(next.entries[0])
+                active.push(true)
     var entries: [CompileSourceInventoryEntryV1] = []
     var index = 0
     while index < retained.len():
         if active[index]:
-            entries = entries.push(retained[index])
+            entries.push(retained[index])
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, compile_source_inventory_sort_v1(entries))
+    if log_progress:
+        stderr_write("[scv] cold-apply done entries={entries.len()}\n")
     val reason = if generation == initial_generation: "ok-no-change" else: "ok"
     CompileSourceInventoryChangeV1(true, reason, Some(inventory), content_changed, semantics_changed)
 
@@ -460,7 +472,11 @@ fn compile_source_inventory_decode_content_v1(
     var previous = ""
     var canonical = true
     var index = 3
+    val log_decode_progress = count >= 5000
     while index < lines.len():
+        val row_num = index - 2
+        if log_decode_progress and row_num % 5000 == 0:
+            stderr_write("[scv] decode progress={row_num}/{count}\n")
         val fields = lines[index].split("|")
         if fields.len() != 7:
             return CompileSourceInventoryReadV1(false, "inventory-row-invalid", "", nil)
@@ -475,11 +491,11 @@ fn compile_source_inventory_decode_content_v1(
         # valid fields and strictly increasing byte-ordered unique identities.
         # Re-encoding every admitted generation duplicates all row strings and
         # the entire inventory inside a caller-owned transient scope.
-        if not compile_source_inventory_entry_valid_v1(entry) or
+        if not compile_source_inventory_entry_valid_unscoped_v1(entry) or
                 compile_source_inventory_identity_cmp_v1(previous, entry.source_identity) >= 0:
             canonical = false
         previous = entry.source_identity
-        entries = entries.push(entry)
+        entries.push(entry)
         index = index + 1
     val inventory = CompileSourceInventoryV1(1, generation, entries)
     # Preserve malformed-row precedence over canonicality, as in the original
@@ -1038,9 +1054,9 @@ fn compile_source_inventory_snapshot_rows_v1(
     val entries = compile_source_inventory_sort_v1(inventory.entries)
     var rows: [text] = []
     for entry in entries:
-        if not compile_source_inventory_entry_valid_v1(entry):
+        if not compile_source_inventory_entry_valid_unscoped_v1(entry):
             return ""
-        rows = rows.push("{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
+        rows.push("{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}")
     rows.join("\n")
 
 export COMPILE_SOURCE_INVENTORY_SCHEMA_V1

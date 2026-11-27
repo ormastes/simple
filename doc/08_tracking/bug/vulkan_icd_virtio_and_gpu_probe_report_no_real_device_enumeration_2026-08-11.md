@@ -188,3 +188,18 @@ No code change in this lane.
 - **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter`):**
   - `test/01_unit/os/wm_bf10/bf10_virtio_capset_and_gpu_probe_spec.spl` (plus `venus_icd_fail_closed_spec.spl` and `readback_boundary_gate_spec.spl`).
 - **Remaining open gap:** Matches upstream 2026-11-26 triage above — SimpleOS candidate still needs queue families, memory heaps/types, and limits via board PCI/Venus transport (`status=open` preserved).
+
+## 2026-11-27 W5-3 Precondition Hardening & Host Verification (`fix-implemented-verification-pending`)
+
+- **Source (`src/lib/nogc_async_mut/gpu/vulkan_icd_virtio.spl`)**:
+  - Confirmed real sysfs/DRM/ICD probing (`venus_probe_sysfs_drm`, `gpu_vendor_probe_sysfs`, `gpu_vendor_probe_host`, `venus_icd_probe_host`) and fail-closed `_venus_device_available()` / `_venus_transport_send()`.
+  - Hardened `venus_icd_connect` (`ring_size <= 0` -> `false`), `venus_icd_allocate_memory` (`size <= 0` -> `VenusCallStatus.Failed`, `"invalid-allocation-size"`), and `venus_icd_create_buffer` (`size <= 0` -> `VenusCallStatus.Failed`, `"invalid-buffer-size"`).
+- **Host verification (`SIMPLE_LIB=src`, `--mode=interpreter` on Windows)**:
+  - `test/01_unit/lib/nogc_async_mut/gpu/vulkan_icd_virtio_bounds_spec.spl` (new): 3/3 PASS.
+  - `test/01_unit/lib/nogc_async_mut/gpu/vulkan_icd_virtio_spec.spl`: 12/12 PASS.
+  - `test/01_unit/lib/gpu/vulkan_icd_virtio_probe_spec.spl`: 5/5 PASS.
+  - `test/01_unit/os/vulkan/venus_icd_fail_closed_spec.spl`: 5/5 PASS.
+  - `test/01_unit/lib/gpu/gpu_vendor_probe_id_spec.spl`: 4/4 PASS.
+  - `test/01_unit/os/wm_bf10/bf10_virtio_capset_and_gpu_probe_spec.spl`: 3/3 PASS.
+  - (`device_enumeration_boundary_spec.spl`: 9/17 PASS on Windows — 8/17 fail solely on Linux `vulkaninfo`/lavapipe ICD subprocess absence.)
+- **Pending**: QEMU VirtIO-GPU Venus / SimpleOS PCI board verification (`waiting-for: QEMU VirtIO-GPU Venus / SimpleOS PCI board verification`).

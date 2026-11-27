@@ -5829,3 +5829,187 @@ pins the border-box form, the default-UA gap is unfiled.
   (26 rows, inline + style-rule paths, measured Chrome 159.0.8154.6).
 - Trap: `.w{height:60px;padding-top:1px}` stacks at a 61px pitch — measure
   absolute getBoundingClientRect() values, do not derive them.
+## 2026-11-27 — forms-media 4x: `<summary>` label pen and textarea device line
+
+- **Survey (4x, base f43f68c218e, 8 CSS px cells).** forms-media had 30,324 mismatched px.
+  - The `Disclosure widget` summary row (CSS y 366..391) held 11,695 of them (39 %). The triangle matched column for column (device 180..214), but from `D` onward the label sat 19-20 device px right of Chrome's.
+  - The `Notes` textarea value held 2,497. Its box matched (border rows 1075..1078 / 1269..1272), but the text was one device row high.
+- **Summary marker rule (Chrome 159, `--dump-dom` at k = 1..4).** The symbol is reserved at the ZOOMED font size, but the inside marker's `0.4em` end margin uses the CSS font size. Each part is truncated to 1/64 device px on its own: `advance_device = trunc64(0.66·fs·k) + trunc64(0.4·fs)`.
+  - 16 px: k=1 16.9375, k=2 13.75, k=3 12.6875, k=4 12.15625 CSS px.
+  - At k=4: 20 px 15.19921875, 24 px 18.23828125, 13 px 9.875.
+  - **Fix.** `summary_marker_inline_milli(fs, k)` (layout_foundation) returns that advance in milli CSS px. At k > 1, `inline_base_x` takes its floor, and the remainder (`summary_err`) is added to `line_start_err` only while `cy` is on the summary's first line (`summary_line0_y`). k = 1 keeps `summary_marker_inline_width`.
+- **Textarea device line (Chrome 159, 13.333px DejaVu Sans Mono at k=4).** Value lines stack at the face's DEVICE `normal` line: 63 px, baseline 50 below the line top.
+  - The value is laid out by `layout_with_style` outside the inline baseline pass, so no device-dy was recorded. The painter's ascent at the 53 px device size is 49, so the first line sat one row high, and lines 2..n stepped k x 15 = 60.
+  - **Fix.** `textarea_value_device_lines_record` (layout_foundation, called after the textarea label layout in layout_engine) records the strut delta + painter term as device-dy for every line, plus a per-line `line_y_steps` step of (63 - 60)/k = 750 milli CSS px.
+  - Rows are now 51 / 114 / 177 (Chrome 51 / 114 / 177; was 50 / 110 / 170).
+  - Open: the `<input>` value shows the same one-row-high first line at 4x (490 vs Chrome 491, probe `font-family:monospace` input). It is not fixed here.
+- **Pins.**
+  - `summary_marker_advance_dpr4_chrome159_spec`: AC-1 checks the 4x `H` first ink at 70/83/97/60 (was 89/107/124/76). AC-2 checks 1x at 22/27/31/19.
+  - `textarea_value_device_line_dpr4_chrome159_spec`: AC-1 and AC-2 cover 4x, AC-3 is the 1x guard.
+  - 20 related textarea / form-control / dpr4 / summary specs give the same results as base. `details_summary_rendering_spec` is 0/2 on base and head, for a pre-existing reason.
+
+## 2026-11-27 — k>1 collapsed table rules on Chrome's fractional column edge (`work/webrender-csspaint-20261127`)
+
+- **Symptom:** on the 4x `css-paint` catalog the largest single region was the
+  table (1,539 px). Row scans at device row 490: Chrome's inner column rule is
+  1665..1668, Simple's 1664..1667. Cell text already matched (pen origin).
+- **Cause:** Chrome's auto column edge is 416.87109375 CSS px (LayoutUnits). It
+  paints the 1px collapsed rule centred on it (416.371 -> device 1665.48 ->
+  1665). Layout puts the cell on the whole-px column and keeps the remainder only
+  as the cell's line-start pen error (`box_line_start_err_at`), so the box
+  commands scaled to 4 x 416. At 1x Chrome also rounds to 416, so only k > 1
+  was wrong.
+- **Fix (paint side, `paint_layout`):** `_html_draw_ir_cell_device_edges` turns
+  the cell's recorded edge error into device px (`box_device_top_px(err x k)`)
+  for its left edge. The right edge uses `box_right_edge_err_at`, which the
+  table records from the next column's edge (`auto_column_edge_frac[next_columns]`)
+  next to the line-start error. That makes layout the single source for both
+  edges, and a short row keeps its rule on the column edge. A first version
+  re-derived the right edge from the adjacent sibling cell in paint, and a
+  2/1/2-cell table drew its rule at 1665 / 1664 / 1665 (AC-6, red on
+  `5eeffda24db`). It applies only to collapsed tables at k > 1. Only the cell's own box
+  command gets `device-x-offset` / `device-extra-width`. The text children are
+  not moved: they already carry the pen origin. The pushed x offset folds in
+  `box_device_dx_total`, because the scaler reads the first `device-x-offset`.
+- **Spec:** `table_collapsed_rule_fractional_edge_4x_chrome159_spec.spl`. It
+  covers W=810 (+1 device px), W=760 (+2), W=600 (negative: the edge rounds onto
+  the whole px), k=1 (negative), and a 3-column table whose middle cell moves
+  both edges (AC-5; red on base). The helper is called only for table-cell
+  nodes at k > 1.
+- **4x catalog:** css-paint 16,133 -> 15,173 px (0.14 -> 0.13). html stays 0.10.
+- **Not covered:**
+  - Separated-border tables (`border-collapse: separate`) at k > 1. Chrome's
+    cell box also sits on the fractional edge there; no oracle has been
+    measured yet.
+  - Mixed odd outer / even inner collapsed border widths, where the half-border
+    origin differs by 0.5 px.
+- **Next unowned on css-paint 4x:** about 14k of the remaining 15k px are
+  glyph-edge AA dots at an aligned position (the best whole-device-px shift is
+  (0,0)). Simple is missing roughly 4x more ink than it adds, e.g. 757 px on
+  each repeated `No complete rendering claim` line. That makes it a gray-glyph
+  coverage/gamma question, not a pen question. A smaller case is the table
+  `Aligned` cell (579 px): after `Al` the glyphs carry a sub-device-px drift
+  (the `l` band is best at dx = 0 / -1 mixed), while `Visible` matches.
+
+## 2026-11-27 (follow-up) — calc() operand kinds, constants, depth, clamp
+- calc() operands now carry a kind: number, length, or UNKNOWN (a function
+  such as `var()`, `min()`, `atan2()`, or a unit other than px/em/rem). UNKNOWN
+  is compatible with both, so `calc(var(--n) * 1px)` stays a valid AUTHOR
+  margin; before, it was INVALID and `_ua_em_block_margin` wrote the UA 1em
+  over it on p/h1-h6/lists. Function names may contain digits (`atan2`).
+- Constants `pi`, `e`, `infinity`, `-infinity` resolve (`nan` reads 0); a
+  division by zero is +-infinity. calc() evaluates in micro units with f64
+  multiply/divide (`calc(48px * 0.6667)` = 32, not 31).
+- Depth cap = Chrome 159's: 100 levels (`calc(` is 1; 99 nested parens OK,
+  100 dropped). An invalid calc() margin reads 0 (dropped), not a digit scrape.
+- Every length clamps to +-33554431 px (`CSS_LENGTH_MAX_MILLI`, Chrome's
+  LayoutUnit max) inside `css_length_milli`, and sub-pixel milli slots that
+  would not fit i32 read 0 (`_css_milli_slot`).
+- Open (layout_engine, handed to the layout lane): the block cursor wraps i32
+  milli-px for a vertical margin above ~2147483 px — base too,
+  `margin-top:30000000px` lands at y -64587. The spec therefore pins the
+  vertical clamp through the debug `margin_t` field, not y.
+- Spec: `test/01_unit/browser_engine/css_calc_operand_clamp_chrome159_spec.spl`.
+- Review fix (same day): only FUNCTIONS and non-length dimensions (`deg`, `s`)
+  are UNKNOWN. `%` and every unit in `CSS_LENGTH_UNITS` (moved from
+  renderer_core.spl to decl_apply.spl so both read one table) stay unresolved
+  LENGTH, so `calc(10% * 10%)`, `calc(1px * 1vw)`, `calc(1vw + 2)`,
+  `calc(5 / 1vw)` are still dropped (Chrome 159 keeps the UA 16px on a <p>).
+  `_css_number_scaled_at` stops multiplying at `limit / 10`; it used to wrap
+  so `calc(1e13px)` read 1 px.
+
+## 2026-11-27 (follow-up) — 4x animation 0.14 -> 0.15 was a real regression (svg viewport clip)
+- Not a capture flake: Chrome's `animation` PNG hashed identically in every
+  run and Simple's frame is byte-identical per sha. Raw mismatch 15997 px at
+  fc31db2cc8d (#11961, the commit that set the 0.14 row) vs 16795 px at
+  current base: a 798 px move. The % is TRUNCATED (pixel_diff.spl
+  `mismatch * 10000 / n`, n = 3600x3040), so 0.14 = 15322..16415 px and
+  0.15 starts at 16416; old sits mid-band, new is 380 px past it.
+- First-parent bisect: #12165 (`ed7d786ee15`). It made
+  `_html_draw_ir_device_clip` return unless `clip_cache.has_node_clips`, so
+  on a page with no overflow box the svg viewport clip (the command's own
+  box, which moves with the shifted svg) stayed k x its whole-CSS-px box: the
+  svg rect lost its right two device columns and top row.
+- Fix: the pass also runs when any box is device-shifted (the pre-#12165
+  condition), alongside `has_node_clips`. Spec:
+  `test/01_unit/browser_engine/svg_viewport_clip_no_overflow_box_4x_chrome159_spec.spl`.
+- Method trap: compare RAW `mismatch_px` (pixel_diff.spl prints it; the
+  catalog script prints only the rounded %), and hash the frames, before
+  calling a 0.01 move noise.
+
+## 2026-11-27 — device-px dashed borders re-landed (csslayout lane)
+
+- **Top css-layout cause at 4x was the `div.scroll` 1px dashed border.** A
+  band census (32 device rows, `attr.spl band`) on release/1.0.0 `f43f68c218e`
+  gave 20078 mismatching px; the dashed top/bottom/side bands held ~7.3k of
+  them, every dash edge a red/blue pair (dash phase off by one device px). The
+  rest is glyph raster (the "Examples show ..." and inventory rows) and the
+  `.badge` pill/text sub-px offset.
+- **Fix = the idle scrollbar-20261123 lane's dash half, re-landed.** That
+  branch had the work since 11-24 with no PR; it stopped on an open paint-perf
+  cost. Taken over (claim in `pagediff_claims.txt`), dash part only, with
+  `cherry-pick -x`:
+  - `0d57b390ac6`: dash i starts at i * (L - dash) / (n - 1) in DEVICE px; a
+    partly covered end pixel gets its coverage as alpha (horizontal: exact
+    fraction; vertical: share of four sub-scanline centres, Skia supersample).
+    `border_dash_aa_runs` / `border_color_at_coverage` in `paint_primitives`.
+  - `2e6da522668`: one Draw IR rect per side carrying `dash-runs`
+    (`"<vertical>,<off>,<len>,<argb>..."`, device px from the side origin);
+    `draw_ir_adv` paints each run as a fill. A styled rect is never an
+    occluder (`_engine2d_draw_ir_plain_fill` needs an empty
+    `computed_style`), and the opaque-box qualifiers reject the unknown key.
+  - No scrollbar code: the catalog hides scrollbars
+    (`SIMPLE_WEB_HIDE_SCROLLBARS`), so the classic-scrollbar half buys nothing
+    on the gated surfaces.
+- **Specs** (from that lane, dash part only):
+  `border_dash_device_aa_chrome159_spec` (Chrome 159 measured profiles, k=1
+  raster + cpu_simd, k=4 cpu_simd) 0/3 -> 3/3;
+  `border_dash_edge_batch_perf_spec` (six 800px dashed boxes, FNV pins + 3.5 s
+  budget) 0/1 -> 1/1 (k1 1019 ms, k4 1304 ms); its k=1 software-raster case (below) 0/1 -> 1/1, so 2/2.
+- **Catalog:** css-layout 1x 0.43 -> 0.35, 4x 0.18 -> 0.11 (20078 -> 12782
+  px; no 32-row band rose). Other pages unchanged; matrix 77. Vulkan 4K
+  (lavapipe, `--backend vulkan`, 3840x2160) css-layout 0.39 -> 0.22.
+- **k=1 raster trap (fixed here):** the k=1 raster painted each dash run
+  through `_fb_border_side_clip`, a framebuffer-returning call that costs
+  ~2.7 ms in the interpreter whatever the run size. The coverage-alpha ends
+  triple the run count, so a 900x760 page of six 800px dashed boxes went
+  12.4 s (base) -> 31.9 s. `_fb_dash_side_runs_clip` stores every run of a
+  side in one pass (same `blend_opacity` rule, pixels hash-pinned): 0.5 s.
+  Spec: `border_dash_edge_batch_perf_spec` raster case, 12392 ms -> 378 ms.
+  Routing only the tiny AA spans to the scalar blend twin inside
+  `fb_blend_const_row_opacity` did NOT help (36.6 s): the per-call cost is the
+  framebuffer round trip, not the extern.
+- **Perf** (seed1126b, 3 alternated rounds after a warm-up, medians base ->
+  head; wall s, document / paint ms at k=4): css-layout k=1 10.70 -> 10.82,
+  k=4 flat within noise (rounds base 26.2/29.4/21.0 s, head 33.1/20.4/20.1 s;
+  doc 7488 -> 7071, paint 8976 -> 8923 medians; host load 9-26); six-dashed-box page k=1 17.8 -> 2.4, k=4 7.8 -> 7.2
+  (doc 745 -> 267, paint 2647 -> 1576). RSS +0.2 .. +1.3 %.
+- **animation 4x 0.15 vs row 0.14** is base drift: base f43f68c218e measures
+  0.15 too and the Simple frames are byte-identical.
+- **Who executes `dash-runs`:** only `draw_ir_adv`. The SimpleOS host-GPU
+  daemon (`src/app/simpleos_gpu_host/daemon_runner.spl`) replays the decoded
+  composition through `engine2d_draw_ir_adv_fresh_device_composition_with_images`;
+  its wire format is the `draw_ir_sdn` record, which carries `computed_style`
+  (`_draw_ir_sdn_emit_styles`). The `device-rect` key of the old per-run k>1
+  form is read only by `draw_ir_device_scale`. An executor outside Engine2D
+  that fills RECTs by colour would paint the side solid: add the key there
+  first.
+- **Review fixes (Fable, 2f7e1140095):**
+  - Inside nested opacity groups the side command also carries
+    `css-opacity-group-nest`; the `len == 1` test sent it to the solid-rect
+    branch. `draw_ir_adv` now looks `dash-runs` up by key (spec: nested
+    opacity case, red 4/5 first).
+  - `_simple_web_opacity_fold_command` (budget-demoted single-command
+    opacity roots) now scales every run colour too (red 5/6 first).
+  - Fresh-device preflight admits `dash-runs`: it renders through the same
+    command loop.
+  - **Still refused, by design of those lanes:** strict Vulkan
+    (`_engine2d_draw_ir_strict_vulkan_primitive_reason`: opaque, style-free
+    rects only) and upstream Ganesh (`provider.spl`: style-free; v2 also
+    opaque). The coverage-alpha dash ends are translucent, so no encoding of
+    Chrome-exact dashes passes them; base's whole-px opaque dash rects could.
+    Their callers are qualification / WM producers
+    (`vulkan_2d_qualification`, `wm_compare/strict_semantic_*`,
+    `ui_showcase/hosts/host_2d_vulkan`), not the web catalog. The web
+    opaque-box qualifier already refused base's dashes (clipped overlay rects
+    without the required paint keys), so nothing changes there.
