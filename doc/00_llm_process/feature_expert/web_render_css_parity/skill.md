@@ -5917,3 +5917,99 @@ pins the border-box form, the default-UA gap is unfiled.
   `calc(5 / 1vw)` are still dropped (Chrome 159 keeps the UA 16px on a <p>).
   `_css_number_scaled_at` stops multiplying at `limit / 10`; it used to wrap
   so `calc(1e13px)` read 1 px.
+
+## 2026-11-27 (follow-up) — 4x animation 0.14 -> 0.15 was a real regression (svg viewport clip)
+- Not a capture flake: Chrome's `animation` PNG hashed identically in every
+  run and Simple's frame is byte-identical per sha. Raw mismatch 15997 px at
+  fc31db2cc8d (#11961, the commit that set the 0.14 row) vs 16795 px at
+  current base: a 798 px move. The % is TRUNCATED (pixel_diff.spl
+  `mismatch * 10000 / n`, n = 3600x3040), so 0.14 = 15322..16415 px and
+  0.15 starts at 16416; old sits mid-band, new is 380 px past it.
+- First-parent bisect: #12165 (`ed7d786ee15`). It made
+  `_html_draw_ir_device_clip` return unless `clip_cache.has_node_clips`, so
+  on a page with no overflow box the svg viewport clip (the command's own
+  box, which moves with the shifted svg) stayed k x its whole-CSS-px box: the
+  svg rect lost its right two device columns and top row.
+- Fix: the pass also runs when any box is device-shifted (the pre-#12165
+  condition), alongside `has_node_clips`. Spec:
+  `test/01_unit/browser_engine/svg_viewport_clip_no_overflow_box_4x_chrome159_spec.spl`.
+- Method trap: compare RAW `mismatch_px` (pixel_diff.spl prints it; the
+  catalog script prints only the rounded %), and hash the frames, before
+  calling a 0.01 move noise.
+
+## 2026-11-27 — device-px dashed borders re-landed (csslayout lane)
+
+- **Top css-layout cause at 4x was the `div.scroll` 1px dashed border.** A
+  band census (32 device rows, `attr.spl band`) on release/1.0.0 `f43f68c218e`
+  gave 20078 mismatching px; the dashed top/bottom/side bands held ~7.3k of
+  them, every dash edge a red/blue pair (dash phase off by one device px). The
+  rest is glyph raster (the "Examples show ..." and inventory rows) and the
+  `.badge` pill/text sub-px offset.
+- **Fix = the idle scrollbar-20261123 lane's dash half, re-landed.** That
+  branch had the work since 11-24 with no PR; it stopped on an open paint-perf
+  cost. Taken over (claim in `pagediff_claims.txt`), dash part only, with
+  `cherry-pick -x`:
+  - `0d57b390ac6`: dash i starts at i * (L - dash) / (n - 1) in DEVICE px; a
+    partly covered end pixel gets its coverage as alpha (horizontal: exact
+    fraction; vertical: share of four sub-scanline centres, Skia supersample).
+    `border_dash_aa_runs` / `border_color_at_coverage` in `paint_primitives`.
+  - `2e6da522668`: one Draw IR rect per side carrying `dash-runs`
+    (`"<vertical>,<off>,<len>,<argb>..."`, device px from the side origin);
+    `draw_ir_adv` paints each run as a fill. A styled rect is never an
+    occluder (`_engine2d_draw_ir_plain_fill` needs an empty
+    `computed_style`), and the opaque-box qualifiers reject the unknown key.
+  - No scrollbar code: the catalog hides scrollbars
+    (`SIMPLE_WEB_HIDE_SCROLLBARS`), so the classic-scrollbar half buys nothing
+    on the gated surfaces.
+- **Specs** (from that lane, dash part only):
+  `border_dash_device_aa_chrome159_spec` (Chrome 159 measured profiles, k=1
+  raster + cpu_simd, k=4 cpu_simd) 0/3 -> 3/3;
+  `border_dash_edge_batch_perf_spec` (six 800px dashed boxes, FNV pins + 3.5 s
+  budget) 0/1 -> 1/1 (k1 1019 ms, k4 1304 ms); its k=1 software-raster case (below) 0/1 -> 1/1, so 2/2.
+- **Catalog:** css-layout 1x 0.43 -> 0.35, 4x 0.18 -> 0.11 (20078 -> 12782
+  px; no 32-row band rose). Other pages unchanged; matrix 77. Vulkan 4K
+  (lavapipe, `--backend vulkan`, 3840x2160) css-layout 0.39 -> 0.22.
+- **k=1 raster trap (fixed here):** the k=1 raster painted each dash run
+  through `_fb_border_side_clip`, a framebuffer-returning call that costs
+  ~2.7 ms in the interpreter whatever the run size. The coverage-alpha ends
+  triple the run count, so a 900x760 page of six 800px dashed boxes went
+  12.4 s (base) -> 31.9 s. `_fb_dash_side_runs_clip` stores every run of a
+  side in one pass (same `blend_opacity` rule, pixels hash-pinned): 0.5 s.
+  Spec: `border_dash_edge_batch_perf_spec` raster case, 12392 ms -> 378 ms.
+  Routing only the tiny AA spans to the scalar blend twin inside
+  `fb_blend_const_row_opacity` did NOT help (36.6 s): the per-call cost is the
+  framebuffer round trip, not the extern.
+- **Perf** (seed1126b, 3 alternated rounds after a warm-up, medians base ->
+  head; wall s, document / paint ms at k=4): css-layout k=1 10.70 -> 10.82,
+  k=4 flat within noise (rounds base 26.2/29.4/21.0 s, head 33.1/20.4/20.1 s;
+  doc 7488 -> 7071, paint 8976 -> 8923 medians; host load 9-26); six-dashed-box page k=1 17.8 -> 2.4, k=4 7.8 -> 7.2
+  (doc 745 -> 267, paint 2647 -> 1576). RSS +0.2 .. +1.3 %.
+- **animation 4x 0.15 vs row 0.14** is base drift: base f43f68c218e measures
+  0.15 too and the Simple frames are byte-identical.
+- **Who executes `dash-runs`:** only `draw_ir_adv`. The SimpleOS host-GPU
+  daemon (`src/app/simpleos_gpu_host/daemon_runner.spl`) replays the decoded
+  composition through `engine2d_draw_ir_adv_fresh_device_composition_with_images`;
+  its wire format is the `draw_ir_sdn` record, which carries `computed_style`
+  (`_draw_ir_sdn_emit_styles`). The `device-rect` key of the old per-run k>1
+  form is read only by `draw_ir_device_scale`. An executor outside Engine2D
+  that fills RECTs by colour would paint the side solid: add the key there
+  first.
+- **Review fixes (Fable, 2f7e1140095):**
+  - Inside nested opacity groups the side command also carries
+    `css-opacity-group-nest`; the `len == 1` test sent it to the solid-rect
+    branch. `draw_ir_adv` now looks `dash-runs` up by key (spec: nested
+    opacity case, red 4/5 first).
+  - `_simple_web_opacity_fold_command` (budget-demoted single-command
+    opacity roots) now scales every run colour too (red 5/6 first).
+  - Fresh-device preflight admits `dash-runs`: it renders through the same
+    command loop.
+  - **Still refused, by design of those lanes:** strict Vulkan
+    (`_engine2d_draw_ir_strict_vulkan_primitive_reason`: opaque, style-free
+    rects only) and upstream Ganesh (`provider.spl`: style-free; v2 also
+    opaque). The coverage-alpha dash ends are translucent, so no encoding of
+    Chrome-exact dashes passes them; base's whole-px opaque dash rects could.
+    Their callers are qualification / WM producers
+    (`vulkan_2d_qualification`, `wm_compare/strict_semantic_*`,
+    `ui_showcase/hosts/host_2d_vulkan`), not the web catalog. The web
+    opaque-box qualifier already refused base's dashes (clipped overlay rects
+    without the required paint keys), so nothing changes there.

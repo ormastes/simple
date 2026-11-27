@@ -1927,6 +1927,54 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// Read the float payload of a PRESENT typed `f32?` / `f64?` /
+    /// `Option<f32|f64>` value `opt` exactly, as a native `float_ty`.
+    ///
+    /// A typed float optional reaches its readers as one of:
+    /// - the Option enum holding the verbatim IEEE-754 bits (explicit typed
+    ///   `Some(x)` through `rt_enum_new`; f32 is promoted to f64);
+    /// - the Option enum holding a tagged heap float (generic / untyped
+    ///   producers: `[f64].at`, `fn pick<T>(..) -> T?`, `fn w(x): Some(x)`);
+    /// - the flat tagged float (`return x` into an `f64?` slot).
+    ///
+    /// `rt_unwrap_or_self` + `UnboxFloat` handed the raw bits of the first
+    /// form to the tagged-float decoder, which shifts out the low 3 mantissa
+    /// bits (`Some(0.1)` read back as 0.09999999999999998); a raw-bits
+    /// reinterpret would misread the other two. `rt_option_float_bits` tells
+    /// them apart in one enum lookup and returns the exact bits, which the
+    /// lossless F64 self-cast (the typed enum-payload decode) turns into a
+    /// float. Callers must have established presence.
+    /// seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+    pub(super) fn read_present_float_option_payload(&mut self, opt: VReg, float_ty: TypeId) -> MirLowerResult<VReg> {
+        self.with_func(|func, current_block| {
+            let bits = func.new_vreg();
+            let float = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(bits),
+                target: CallTarget::from_name("rt_option_float_bits"),
+                args: vec![opt],
+            });
+            block.instructions.push(MirInst::Cast {
+                dest: float,
+                source: bits,
+                from_ty: TypeId::F64,
+                to_ty: TypeId::F64,
+            });
+            if float_ty != TypeId::F32 {
+                return float;
+            }
+            let narrowed = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Cast {
+                dest: narrowed,
+                source: float,
+                from_ty: TypeId::F64,
+                to_ty: TypeId::F32,
+            });
+            narrowed
+        })
+    }
+
     /// Set current block - explicit state mutation
     pub(super) fn set_current_block(&mut self, block: BlockId) -> MirLowerResult<()> {
         self.state.try_set_current_block(block)

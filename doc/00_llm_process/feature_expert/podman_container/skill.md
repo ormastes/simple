@@ -191,3 +191,102 @@ nil" rather than the real upstream error — print the error field first.
 - `oci_engine_policy_spec` "executes an exact scripted absolute route" and
   `oci_execution_user_v2_spec:34` (`with` not found) fail for unrelated reasons.
 - Provider journal compaction and a provider-level label sweep are not built.
+
+## Fresh route workspace/TTY admission (2026-11-27)
+
+The shared-API fresh install route (`simple_container_open_fresh_v2`) admits
+build roots and a workload TTY only when the root-installed
+`/etc/simple/container/fresh-epoch-profile.sdn` carries both optional keys
+`workloadBuildRootPrefix` and `workloadTerminalMode` (refused by default, reason
+`machine-fresh-workload-profile-unsupported` unchanged). The gate that matters is
+`linux_fresh_workload_argv_v2`, which re-derives the admission from the profile
+the installed owner holds; the record keeps what was used in
+`admitted_build_root_prefix` / `admitted_terminal_mode`. A secondary exec TTY
+needs `execTerminalMode: tty` in the installed exec policy and is always
+detached. Records and traps:
+`doc/08_tracking/bug/container_fresh_route_workspace_tty_unsupported_2026-11-27.md`.
+
+Traps hit while doing it:
+- The chain is exact-byte at five places (request projection, command
+  canonical bytes, argv, created-config inspect, profile key set). Changing one
+  alone yields `fresh-workload-command-request-fields-differ`, not a refusal.
+- `}}` inside a Simple string literal is an escaped `}`. A JSON fixture ending
+  in `}}` silently loses a brace (`Unclosed object`); write `"}" + "}"`.
+- Canonical SDN writes bare strings (`execTerminalMode: tty`, no quotes), so a
+  `replace` on the quoted form is a silent no-op; assert the text changed.
+- Fresh-route `wait`/`logs` (2026-11-27,
+  `container_fresh_route_wait_logs_unsupported_2026-11-27.md`): two named
+  stages of the Inspect action, bound through the existing closed probe
+  projection (`linux_fresh_workload_probe_project_v3`, tail
+  `<verb> -- <native id>`). Not new `LinuxFreshWorkloadActionV2` values, not the
+  probe custody lane (that one needs a compiled provider-CLI request and only
+  accepts exit `0`), and no new profile key. `logs` needs a completed `wait`;
+  each read runs once and then replays; a failed read sets `outcome_unknown`,
+  which still allows `destroy`. Source-only so far: `podman_shared_api_live_spec`
+  is not proven green, and a fast-exit workload may be refused at `start`.
+- A new operation name on the fresh route must be added in three places or a
+  later publish fails: the record's closed name list
+  (`machine_fresh_workload_action_initial_v2`), the `prior` table in
+  `action_begin_v2`, and the bind/validate branch in
+  `machine_fresh_workload_begin_v3`. The workspace record keeps its own list.
+- A fast-exit workload is already terminal at the first post-Start inspect.
+  Measured on this host (podman 4.9.3 rootless, `busybox sh -c 'echo hi; exit 7'`):
+  `created`/pid 0 before start; `stopped`/pid 0/empty `CgroupPath` right after
+  `start` returned 0; `exited` one second later. So a "did it start" check must
+  accept both `stopped` and `exited`, and two samples can differ in status.
+  `podman stop` on an exited container exits 0. The fresh route classifies this
+  with `machine_fresh_workload_start_evidence_v3` (never the running-subject
+  decoder, which stays the association gate) and replies `start` with phase
+  `exited`.
+- An exited start is never associated, so it has no native subject. `destroy`
+  settles it through `machine_fresh_workload_settle_exited_start_v3`, not the
+  subject settle: the owner's two retained exited samples, its own completed
+  Stop/Remove/Absence, and custody's whole-cohort-empty census
+  (`observe_probe_absence_v3`, the one the probe lane settles on). The census is
+  cohort-wide, so it refuses (plainly, retryable) while anything else lives in
+  the epoch. Decision and limits:
+  `doc/08_tracking/bug/container_fresh_route_exited_start_settlement_2026-11-27.md`.
+- `machine_fresh_workload_settle_cpu_v3` and `settle_v2` are body-pinned by
+  `host_linux_service_agent_v4_structure_spec.spl`. Add a sibling; do not edit them.
+- A first sample `running` followed by a confirmation `exited` (or a pid gone
+  before capture, then `exited`) is also a proven exited start, decided by the
+  pure reducer `machine_fresh_workload_association_exit_v3`
+  (`machine_fresh_workload_exit_edges_v3.spl`); the owner closes every
+  descriptor it took and is never associated. Every other association failure
+  still latches `outcome_unknown`.
+- The exited-start settle is repeated whole, at most 8 times in 2 seconds, only
+  on the three census refusals named in
+  `machine_fresh_workload_exited_cohort_retry_v3`, then refuses with
+  `machine-fresh-workload-exited-settlement-cohort-retryable:<reason>` (not
+  latched). The transfer `close_v2` attempts the same settle, so cleanup can
+  settle after a refused `destroy`. Measured on this host (own uid): conmon,
+  `podman container cleanup` and runc last seen 143 to 169 ms after `start`
+  returned for `/bin/true`. The developer's own rootless pause process
+  (`catatonit`, in its `podman-pause-*.scope`) never leaves; the route's does,
+  see the next item.
+- The rootless pause process does not block the exited-start census, and nothing
+  is excluded for it. `catatonit -P` runs as the service uid (not a subuid), pid
+  in `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid`. Without a user bus podman cannot
+  move it into a `podman-pause-*.scope`, so it stays in the cgroup of the helper
+  that created it, and that group is killed (`cgroup.kill`) when the helper
+  leader is reaped. Each later helper makes a new one. Pinned by
+  `machine_fresh_engine_residue_containment_v3_spec.spl`; if helper containment
+  changes, revisit the census decision first.
+- The same kill removes `conmon`: rootless cgroupfs podman cannot move conmon to
+  `<cgroup-parent>/conmon` (`open /sys/fs/cgroup/cgroup.subtree_control:
+  permission denied`, logged at info level only). A workload still running when
+  its start helper is reaped then breaks every later engine command with
+  `invalid internal status, try resetting the pause process`. Open:
+  `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
+- To emulate the route's engine on a developer host: private `--root`,
+  `--runroot` (50 characters at most) and `--tmpdir`, `XDG_RUNTIME_DIR` set to
+  the run root, and an unusable `DBUS_SESSION_BUS_ADDRESS`. `env -i` alone is
+  not "no user bus": podman finds `/run/user/<uid>/bus` by uid. `HOME` must
+  exist; `/nonexistent` makes podman exit 1 (`cannot resolve /nonexistent`).
+- `simple_container_fresh_cleanup_v2` reports a refusal (a stage that kept its
+  owner) for that attempt only; it keeps, first one wins, only the error of a
+  stage that gave up its owner, and the open's own error. Decided per stage by
+  the pure `container_fresh_cleanup_stage_v2`. A closed cleanup with a non-empty
+  error is therefore a real failure.
+- `host_agent_workspace_extraction_v2_spec.spl` pins two lines of the transfer
+  `close_v2` and exactly one `close_native_v2()` in it; add lines around them.

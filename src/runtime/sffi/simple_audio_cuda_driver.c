@@ -14,6 +14,7 @@ typedef int (*cu_device_count_fn)(int *);
 typedef int (*cu_device_get_fn)(int *, int);
 typedef int (*cu_ctx_create_fn)(void **, unsigned int, int);
 typedef int (*cu_ctx_destroy_fn)(void *);
+typedef int (*cu_ctx_set_current_fn)(void *);
 typedef int (*cu_module_load_fn)(void **, const void *);
 typedef int (*cu_module_unload_fn)(void *);
 typedef int (*cu_module_get_fn)(void **, void *, const char *);
@@ -29,7 +30,9 @@ struct simple_audio_cuda {
     void *library;
     void *context;
     int device;
+    int last_error;
     cu_ctx_destroy_fn ctx_destroy;
+    cu_ctx_set_current_fn ctx_set_current;
     cu_module_load_fn module_load;
     cu_module_unload_fn module_unload;
     cu_module_get_fn module_get;
@@ -75,6 +78,18 @@ static void *symbol(void *library, const char *primary, const char *fallback) {
     return value ? value : (fallback ? dlsym(library, fallback) : NULL);
 }
 
+static int ensure_context(struct simple_audio_cuda *d) {
+    if (!d || !d->context) return 1;
+    if (d->ctx_set_current) {
+        int rc = d->ctx_set_current(d->context);
+        if (rc != 0) {
+            d->last_error = rc;
+            return rc;
+        }
+    }
+    return 0;
+}
+
 int64_t simple_audio_cuda_open(void) {
     void *library = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
     if (!library) library = dlopen("libcuda.so", RTLD_NOW | RTLD_LOCAL);
@@ -87,6 +102,7 @@ int64_t simple_audio_cuda_open(void) {
     if (!driver || !init || !count || !get || !create) goto fail;
     driver->library = library;
     driver->ctx_destroy = (cu_ctx_destroy_fn)symbol(library, "cuCtxDestroy_v2", "cuCtxDestroy");
+    driver->ctx_set_current = (cu_ctx_set_current_fn)symbol(library, "cuCtxSetCurrent", NULL);
     driver->module_load = (cu_module_load_fn)symbol(library, "cuModuleLoadData", NULL);
     driver->module_unload = (cu_module_unload_fn)symbol(library, "cuModuleUnload", NULL);
     driver->module_get = (cu_module_get_fn)symbol(library, "cuModuleGetFunction", NULL);
@@ -103,6 +119,11 @@ int64_t simple_audio_cuda_open(void) {
         init(0) != 0 || count(&devices) != 0 || devices < 1 ||
         get(&driver->device, 0) != 0 || create(&driver->context, 0, driver->device) != 0)
         goto fail;
+    if (ensure_context(driver) != 0) {
+        driver->ctx_destroy(driver->context);
+        driver->context = NULL;
+        goto fail;
+    }
     return (int64_t)(uintptr_t)driver;
 fail:
     if (driver) free(driver);
@@ -112,53 +133,103 @@ fail:
 
 int64_t simple_audio_cuda_close(int64_t raw) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
+    int rc = 0;
     if (!d) return 1;
-    if (d->context) d->ctx_destroy(d->context);
+    if (d->context) {
+        if (d->ctx_set_current) d->ctx_set_current(d->context);
+        rc = d->ctx_destroy(d->context);
+        d->context = NULL;
+    }
     dlclose(d->library);
     free(d);
-    return 0;
+    return rc;
 }
 
 int64_t simple_audio_cuda_module_load(int64_t raw, int64_t ptx) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
     void *module = NULL;
-    return d && ptx && d->module_load(&module, (const void *)(uintptr_t)ptx) == 0
-        ? (int64_t)(uintptr_t)module : 0;
+    int rc;
+    if (!d || !ptx || ensure_context(d) != 0) return 0;
+    rc = d->module_load(&module, (const void *)(uintptr_t)ptx);
+    d->last_error = rc;
+    return rc == 0 ? (int64_t)(uintptr_t)module : 0;
 }
 int64_t simple_audio_cuda_module_unload(int64_t raw, int64_t module) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
-    return d && module ? d->module_unload((void *)(uintptr_t)module) : 1;
+    int rc;
+    if (!d || !module) return 1;
+    rc = ensure_context(d);
+    if (rc != 0) return rc;
+    rc = d->module_unload((void *)(uintptr_t)module);
+    d->last_error = rc;
+    return rc;
 }
 int64_t simple_audio_cuda_alloc(int64_t raw, int64_t size) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
     uint64_t ptr = 0;
-    return d && size > 0 && d->mem_alloc(&ptr, (size_t)size) == 0 ? (int64_t)ptr : 0;
+    int rc;
+    if (!d || size <= 0 || ensure_context(d) != 0) return 0;
+    rc = d->mem_alloc(&ptr, (size_t)size);
+    d->last_error = rc;
+    return rc == 0 ? (int64_t)ptr : 0;
 }
 int64_t simple_audio_cuda_free(int64_t raw, int64_t ptr) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
-    return d && ptr ? d->mem_free((uint64_t)ptr) : 1;
+    int rc;
+    if (!d || !ptr) return 1;
+    rc = ensure_context(d);
+    if (rc != 0) return rc;
+    rc = d->mem_free((uint64_t)ptr);
+    d->last_error = rc;
+    return rc;
 }
 int64_t simple_audio_cuda_upload(int64_t raw, int64_t dst, int64_t src, int64_t size) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
-    return d && dst && src && size > 0 ? d->copy_htod((uint64_t)dst, (void *)(uintptr_t)src, (size_t)size) : 1;
+    int rc;
+    if (!d || !dst || !src || size <= 0) return 1;
+    rc = ensure_context(d);
+    if (rc != 0) return rc;
+    rc = d->copy_htod((uint64_t)dst, (void *)(uintptr_t)src, (size_t)size);
+    d->last_error = rc;
+    return rc;
 }
 int64_t simple_audio_cuda_download(int64_t raw, int64_t dst, int64_t src, int64_t size) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
-    return d && dst && src && size > 0 ? d->copy_dtoh((void *)(uintptr_t)dst, (uint64_t)src, (size_t)size) : 1;
+    int rc;
+    if (!d || !dst || !src || size <= 0) return 1;
+    rc = ensure_context(d);
+    if (rc != 0) return rc;
+    rc = d->copy_dtoh((void *)(uintptr_t)dst, (uint64_t)src, (size_t)size);
+    d->last_error = rc;
+    return rc;
 }
 int64_t simple_audio_cuda_launch(int64_t raw, int64_t module, int64_t name,
     int64_t grid_x, int64_t block_x, int64_t args) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
     void *function = NULL;
-    if (!d || !module || !name || !args || grid_x < 1 || block_x < 1 ||
-        d->module_get(&function, (void *)(uintptr_t)module, (const char *)(uintptr_t)name) != 0)
-        return 1;
-    return d->launch(function, (unsigned)grid_x, 1, 1, (unsigned)block_x, 1, 1,
+    int rc;
+    if (!d || !module || !name || !args || grid_x < 1 || block_x < 1) return 1;
+    rc = ensure_context(d);
+    if (rc != 0) return rc;
+    rc = d->module_get(&function, (void *)(uintptr_t)module, (const char *)(uintptr_t)name);
+    if (rc != 0) {
+        d->last_error = rc;
+        return rc;
+    }
+    rc = d->launch(function, (unsigned)grid_x, 1, 1, (unsigned)block_x, 1, 1,
         0, NULL, (void **)(uintptr_t)args, NULL);
+    d->last_error = rc;
+    return rc;
 }
 int64_t simple_audio_cuda_sync(int64_t raw) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;
-    return d ? d->sync() : 1;
+    int rc;
+    if (!d) return 1;
+    rc = ensure_context(d);
+    if (rc != 0) return rc;
+    rc = d->sync();
+    d->last_error = rc;
+    return rc;
 }
 int64_t simple_audio_cuda_identity(int64_t raw) {
     struct simple_audio_cuda *d = (struct simple_audio_cuda *)(uintptr_t)raw;

@@ -361,6 +361,15 @@ impl<'a> MirLowerer<'a> {
                 *arg_reg = float_reg;
                 continue;
             }
+            // An explicit `Some(x)` of an `f64?` keeps x's raw IEEE bits in
+            // the enum payload slot (readers recover them from the static
+            // type). Past an erased parameter nothing knows the type, so hand
+            // the callee the raw `f64?` form instead: a tagged float.
+            // seed_jit_erased_f64_option_some_binds_raw_bits_2026-11-27
+            if param_ty == TypeId::ANY && self.is_f64_optional(arg_expr) {
+                *arg_reg = self.f64_option_some_as_tagged_float(*arg_reg)?;
+                continue;
+            }
             // `Any?` params are tagged-value slots too -- see
             // `slot_holds_tagged_value`.
             if self.slot_holds_tagged_value(param_ty) {
@@ -453,6 +462,119 @@ impl<'a> MirLowerer<'a> {
                 dest,
                 addr: slot_addr,
                 ty: TypeId::BOOL,
+            });
+            dest
+        })
+    }
+
+    /// `f64?` (source `T?` provenance), `Option<f64>`, or a direct `Some(<f64>)`.
+    fn is_f64_optional(&self, arg: &HirExpr) -> bool {
+        if let HirExprKind::Call { func, args, .. } = &arg.kind {
+            if matches!(&func.kind, HirExprKind::Global(n) if n == "Some")
+                && matches!(args.as_slice(), [p] if p.ty == TypeId::F64)
+            {
+                return true;
+            }
+        }
+        let ty = arg.ty;
+        let Some(tr) = self.type_registry else {
+            return false;
+        };
+        tr.optional_inner(ty) == Some(TypeId::F64)
+            || matches!(tr.get(ty), Some(HirType::Enum { name, variants, .. })
+                if name.as_str() == "Option"
+                    && variants.iter().any(|(v, p)| v == "Some" && p.as_deref() == Some(&[TypeId::F64][..])))
+    }
+
+    /// `if rt_enum_check_variant(v, Option, Some): BoxFloat(payload bits)
+    /// else: v` -- an `f64?` value in its raw (tagged-float or nil) form.
+    fn f64_option_some_as_tagged_float(&mut self, value: VReg) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let some_disc = Self::enum_variant_discriminant("Some");
+        let (slot_addr, then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+            let id_reg = func.new_vreg();
+            let disc_reg = func.new_vreg();
+            let is_some = func.new_vreg();
+            let local_index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$f64_opt_arg_{}", local_index),
+                ty: TypeId::ANY,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::ConstInt { dest: id_reg, value: 1 });
+            block.instructions.push(MirInst::ConstInt {
+                dest: disc_reg,
+                value: some_disc,
+            });
+            block.instructions.push(MirInst::Call {
+                dest: Some(is_some),
+                target: CallTarget::from_name("rt_enum_check_variant"),
+                args: vec![value, id_reg, disc_reg],
+            });
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index,
+            });
+            let then_id = func.new_block();
+            let else_id = func.new_block();
+            let merge_id = func.new_block();
+            func.block_mut(current_block).unwrap().terminator = crate::mir::Terminator::Branch {
+                cond: is_some,
+                then_block: then_id,
+                else_block: else_id,
+            };
+            (addr, then_id, else_id, merge_id)
+        })?;
+        self.set_current_block(then_id)?;
+        self.with_func(|func, current_block| {
+            let bits = func.new_vreg();
+            let float = func.new_vreg();
+            let boxed = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(bits),
+                target: CallTarget::from_name("rt_enum_payload"),
+                args: vec![value],
+            });
+            // Same lossless reinterpret as the typed f64 payload reader.
+            block.instructions.push(MirInst::Cast {
+                dest: float,
+                source: bits,
+                from_ty: TypeId::F64,
+                to_ty: TypeId::F64,
+            });
+            block.instructions.push(MirInst::BoxFloat {
+                dest: boxed,
+                value: float,
+            });
+            block.instructions.push(MirInst::Store {
+                addr: slot_addr,
+                value: boxed,
+                ty: TypeId::ANY,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+        self.set_current_block(else_id)?;
+        self.with_func(|func, current_block| {
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Store {
+                addr: slot_addr,
+                value,
+                ty: TypeId::ANY,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Load {
+                dest,
+                addr: slot_addr,
+                ty: TypeId::ANY,
             });
             dest
         })

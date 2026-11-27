@@ -13,13 +13,17 @@
 //! This is the type twin of `flatten_global_owner.rs` (globals) and the
 //! `flatten_fn_owners` scheme (functions):
 //!
-//! * Census: a struct/class name declared by two or more distinct owners with
-//!   differing field layouts (names or types) is a collision. Identical layouts are left alone
-//!   (bare-name sharing is already correct for them).
+//! * Census: a struct/class name declared by two or more distinct owners is a
+//!   collision, whatever its layout (owner decision 2026-11-27: a class is
+//!   identified by its owner module -- same-layout classes still carry
+//!   different methods, statics and constructors). An ENUM collides only
+//!   when its variant layouts differ.
 //! * Declarations: on a clone of the module (only when a collision exists),
-//!   each colliding declaration is renamed to [`flattened_global_symbol`] --
-//!   the entry module's (or else the last) declaration keeps the bare name, so
-//!   references nothing can attribute keep their historical meaning. Because
+//!   each colliding declaration of an imported owner is renamed to
+//!   [`owned_type_symbol`]; only an entry-module declaration keeps the bare
+//!   name (see that fn for why no imported one may). A reference nothing can
+//!   attribute binds the entry's (or else the last) declaration through the
+//!   scope fallback, so it keeps its historical meaning. Because
 //!   the declaration itself is renamed, every name-keyed registry downstream
 //!   (type registry, `Name.method` symbols, method return types, impls) is
 //!   owner-exact at once.
@@ -35,18 +39,19 @@
 //! the declaration named by `O`'s selective import of `N` (aliases and
 //! re-export chains followed through the flattener's import-binding markers),
 //! else the declaration exactly one of `O`'s glob sources (`use m.*`, bare
-//! `use m`) reaches, else unchanged (bare).
+//! `use m`) reaches, else the default declaration (entry, else last).
 //!
 //! Units with no owner attributes (native-project lane, single files) have
 //! every owner `None`, so no name ever collides and this pass is a no-op.
-//! The interpreter never sees the clone.
+//! The interpreter applies the same renaming to its own copy of the items
+//! ([`qualify_flattened_classes_for_interpreter`]).
 
 use std::collections::HashMap;
 
 use simple_parser::ast::{Node, Type};
 use simple_parser::Module;
 
-use super::flattened_global_symbol;
+use crate::interpreter::flatten_owner_mangled_name;
 use crate::hir::lower::lowerer::Lowerer;
 use crate::interpreter::FLATTEN_GLOBAL_OWNER_MARKER_PREFIX;
 
@@ -114,17 +119,31 @@ fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Layout<'_>)>
 fn census(items: &[Node]) -> FlattenStructOwners {
     let mut owners: FlattenStructOwners = HashMap::new();
     let mut layouts: HashMap<&str, Vec<Layout<'_>>> = HashMap::new();
+    let mut nominal: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for item in items {
         if let Some((name, owner, fields)) = struct_declaration(item) {
+            if matches!(item, Node::Struct(_) | Node::Class(_)) {
+                nominal.insert(name);
+            }
             owners.entry(name.to_string()).or_default().push(owner);
             layouts.entry(name).or_default().push(fields);
         }
     }
     owners.retain(|name, list| {
         let distinct_owners = list.iter().any(|owner| owner != &list[0]);
+        if !distinct_owners {
+            return false;
+        }
+        // Owner decision 2026-11-27: a struct/class is identified by its
+        // OWNER module, not its bare name. Two same-layout classes still
+        // carry different methods/statics/constructors, so sharing one bare
+        // identity dispatched `pb.Thing`'s calls into `pa.Thing`'s bodies
+        // (bug interpreter_same_name_class_method_dispatch_collision_2026_11_26).
+        if nominal.contains(name.as_str()) {
+            return true;
+        }
         let layouts = &layouts[name.as_str()];
-        let distinct_layouts = layouts.iter().any(|layout| layout != &layouts[0]);
-        distinct_owners && distinct_layouts
+        layouts.iter().any(|layout| layout != &layouts[0])
     });
     owners
 }
@@ -152,7 +171,7 @@ fn resolve_through(
     }
     if let Some(list) = owners.get(name) {
         if list.iter().any(|declared| declared.as_deref() == Some(owner)) {
-            return Some(flattened_global_symbol(list, Some(owner), name));
+            return Some(owned_type_symbol(Some(owner), name));
         }
     }
     if let Some((source_owner, source_name)) = bindings.get(owner).and_then(|imports| imports.get(name)) {
@@ -185,7 +204,7 @@ pub(crate) fn resolve_owned_struct(
 ) -> Option<String> {
     if let Some(list) = owners.get(name) {
         if list.iter().any(|owner| owner.as_deref() == current) {
-            return Some(flattened_global_symbol(list, current, name));
+            return Some(owned_type_symbol(current, name));
         }
     }
     let mut seen = std::collections::HashSet::new();
@@ -201,11 +220,15 @@ pub(crate) fn struct_scope_for(
     current: Option<&str>,
 ) -> FlattenStructScope {
     let mut scope = FlattenStructScope::new();
-    for name in owners.keys() {
-        if let Some(symbol) = resolve_owned_struct(owners, bindings, globs, current, name) {
-            if &symbol != name {
-                scope.insert(name.clone(), symbol);
-            }
+    for (name, list) in owners {
+        // A reference nothing attributes keeps its historical meaning: the
+        // entry module's declaration, else the last one (the declaration a
+        // bare-name registry ended up holding) -- the same default the
+        // function/global passes keep under the bare name.
+        let symbol = resolve_owned_struct(owners, bindings, globs, current, name)
+            .unwrap_or_else(|| default_type_symbol(list, name));
+        if &symbol != name {
+            scope.insert(name.clone(), symbol);
         }
     }
     if let Some(imports) = bindings.get(current.unwrap_or("<entry>")) {
@@ -284,29 +307,41 @@ fn rewrite_signature(function: &mut simple_parser::ast::FunctionDef, scope: &Fla
 /// rewrite declaration signatures through each declaring owner's scope.
 ///
 /// Returns `None` when no struct/class name collides.
-///
-/// `Err(alias)` when a type alias names a colliding struct (no owner to
-/// resolve it through).
 pub(crate) fn module_with_owner_qualified_structs(
     ast_module: &Module,
     bindings: &FlattenImportBindings,
     globs: &FlattenGlobSources,
-) -> Result<Option<(Module, FlattenStructOwners)>, String> {
+) -> Option<(Module, FlattenStructOwners)> {
     let owners = census(&ast_module.items);
     if owners.is_empty() {
-        return Ok(None);
+        return None;
     }
+    let mut module = ast_module.clone();
+    qualify_items_in_place(&mut module.items, &owners, bindings, globs);
+    Some((module, owners))
+}
+
+/// In-place body of [`module_with_owner_qualified_structs`]: rename every
+/// declaration named in `owners` and rewrite signatures / impl targets /
+/// typed globals through the declaring owner's scope. Shared with the
+/// interpreter ([`qualify_flattened_classes_for_interpreter`]), so both lanes
+/// give one class the same owner-exact identity.
+pub(crate) fn qualify_items_in_place(
+    items: &mut [Node],
+    owners: &FlattenStructOwners,
+    bindings: &FlattenImportBindings,
+    globs: &FlattenGlobSources,
+) {
     let mut scopes: HashMap<Option<String>, FlattenStructScope> = HashMap::new();
     let mut scope_of = |owner: &Option<String>| -> FlattenStructScope {
         scopes
             .entry(owner.clone())
-            .or_insert_with(|| struct_scope_for(&owners, bindings, globs, owner.as_deref()))
+            .or_insert_with(|| struct_scope_for(owners, bindings, globs, owner.as_deref()))
             .clone()
     };
 
-    let mut module = ast_module.clone();
     let mut pending_global_owner: Option<String> = None;
-    for item in &mut module.items {
+    for item in items.iter_mut() {
         let global_owner = pending_global_owner.take();
         match item {
             Node::Const(c) if c.name.starts_with(FLATTEN_GLOBAL_OWNER_MARKER_PREFIX) => {
@@ -317,8 +352,8 @@ pub(crate) fn module_with_owner_qualified_structs(
             }
             Node::Struct(s) => {
                 let owner = declaration_owner(&s.attributes, &s.methods);
-                if let Some(list) = owners.get(&s.name) {
-                    s.name = flattened_global_symbol(list, owner.as_deref(), &s.name);
+                if owners.contains_key(&s.name) {
+                    s.name = owned_type_symbol(owner.as_deref(), &s.name);
                 }
                 let scope = scope_of(&owner);
                 s.fields
@@ -330,8 +365,8 @@ pub(crate) fn module_with_owner_qualified_structs(
             }
             Node::Class(c) => {
                 let owner = declaration_owner(&c.attributes, &c.methods);
-                if let Some(list) = owners.get(&c.name) {
-                    c.name = flattened_global_symbol(list, owner.as_deref(), &c.name);
+                if owners.contains_key(&c.name) {
+                    c.name = owned_type_symbol(owner.as_deref(), &c.name);
                 }
                 let scope = scope_of(&owner);
                 c.fields
@@ -359,8 +394,8 @@ pub(crate) fn module_with_owner_qualified_structs(
             }
             Node::Enum(e) => {
                 let owner = declaration_owner(&e.attributes, &e.methods);
-                if let Some(list) = owners.get(&e.name) {
-                    e.name = flattened_global_symbol(list, owner.as_deref(), &e.name);
+                if owners.contains_key(&e.name) {
+                    e.name = owned_type_symbol(owner.as_deref(), &e.name);
                 }
                 let scope = scope_of(&owner);
                 for variant in &mut e.variants {
@@ -377,23 +412,96 @@ pub(crate) fn module_with_owner_qualified_structs(
                 let scope = scope_of(&owner);
                 t.methods.iter_mut().for_each(|method| rewrite_signature(method, &scope));
             }
-            // A type alias carries no owner, so a target naming a colliding
-            // struct cannot be attributed. Refuse it (the caller fails the
-            // lowering, i.e. the old fail-closed de-JIT) rather than bind
-            // the default owner's layout silently.
-            Node::TypeAlias(alias) if type_names_any(&alias.ty, &owners) => {
-                return Err(alias.name.clone());
+            // A type alias resolves through its declaring module's scope (the
+            // flattening loader tags it with its owner; an untagged alias is
+            // the entry module's).
+            Node::TypeAlias(alias) => {
+                let owner = Lowerer::flatten_owner_of(alias.attributes.iter().map(|a| a.name.as_str()));
+                rewrite_type(&mut alias.ty, &scope_of(&owner));
             }
             _ => {}
         }
     }
-    Ok(Some((module, owners)))
 }
 
-/// Whether `ty` names any colliding struct/class (directly or nested).
-fn type_names_any(ty: &Type, owners: &FlattenStructOwners) -> bool {
-    let mut probe = ty.clone();
-    let marker: FlattenStructScope = owners.keys().map(|name| (name.clone(), String::new())).collect();
-    rewrite_type(&mut probe, &marker);
-    probe != *ty
+/// Symbol a colliding struct/class/enum declared by `owner` is lowered under.
+///
+/// Unlike globals/functions (`flattened_global_symbol`), NO owned declaration
+/// keeps the bare name: an owner scope maps bare/alias names to symbols, and
+/// every `types.lookup` re-applies that scope. A bare symbol would therefore be
+/// re-mapped by the importer's own binding of the same bare name -- measured:
+/// `use pb.Thing as Legacy` beside `use pa.Thing` resolved `Legacy` to pb's
+/// bare `Thing`, which the next lookup re-scoped to pa's class. Owner-mangled
+/// symbols are never scope keys, so the overlay is idempotent. The entry
+/// module's own declaration (no owner) keeps the bare name.
+pub(crate) fn owned_type_symbol(owner: Option<&str>, name: &str) -> String {
+    match owner {
+        Some(owner) => flatten_owner_mangled_name(owner, name),
+        None => name.to_string(),
+    }
+}
+
+/// Interpreter twin of `Lowerer::qualify_flattened_structs`: give every
+/// same-named struct/class of a flattened unit the owner-exact identity HIR
+/// lowering gives it (same census, same [`owned_type_symbol`]). Enums are left
+/// to the interpreter's own owner-keyed enum tables. The flattener's import
+/// markers supply the import bindings and glob sources, exactly as
+/// `Lowerer::collect_flattened_import_aliases` reads them.
+///
+/// The census is empty when no struct/class collides, which
+/// is every unit without owner attributes.
+pub(crate) fn interpreter_class_collisions(items: &[Node]) -> FlattenStructOwners {
+    let mut owners = census(items);
+    if owners.is_empty() {
+        return owners;
+    }
+    let enum_names: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|item| match item {
+            Node::Enum(e) => Some(e.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    owners.retain(|name, _| !enum_names.contains(name.as_str()));
+    owners
+}
+
+/// Apply [`interpreter_class_collisions`]' census to `items` in place.
+pub(crate) fn qualify_flattened_classes_for_interpreter(
+    items: &mut [Node],
+    owners: &FlattenStructOwners,
+) {
+    let mut bindings: FlattenImportBindings = HashMap::new();
+    let mut globs: FlattenGlobSources = HashMap::new();
+    for item in items.iter() {
+        let Node::Const(marker) = item else {
+            continue;
+        };
+        let Some((importer, local_name, source_owner, source_name)) =
+            crate::interpreter::decode_import_binding_marker(&marker.name)
+        else {
+            continue;
+        };
+        if local_name == "*" && source_name == "*" {
+            let sources = globs.entry(importer.to_string()).or_default();
+            if !sources.iter().any(|known| known == source_owner) {
+                sources.push(source_owner.to_string());
+            }
+        } else if local_name != "*" && source_name != "*" {
+            bindings
+                .entry(importer.to_string())
+                .or_default()
+                .insert(local_name.to_string(), (source_owner.to_string(), source_name.to_string()));
+        }
+    }
+    qualify_items_in_place(items, owners, &bindings, &globs);
+}
+
+/// Symbol an unattributed reference to the colliding `name` binds: the entry
+/// module's declaration (bare) when it has one, else the last declaration's.
+fn default_type_symbol(list: &[Option<String>], name: &str) -> String {
+    if list.iter().any(Option::is_none) {
+        return name.to_string();
+    }
+    owned_type_symbol(list.last().and_then(|owner| owner.as_deref()), name)
 }

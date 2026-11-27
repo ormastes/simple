@@ -715,6 +715,8 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
 
         // Enum operations
         "rt_enum_new" => simple_runtime::rt_enum_new as *const () as usize,
+        "rt_enum_new_none" => simple_runtime::rt_enum_new_none as *const () as usize,
+        "rt_is_none_variant" => simple_runtime::rt_is_none_variant as *const () as usize,
         "rt_enum_register_name" => simple_runtime::rt_enum_register_name as *const () as usize,
         "rt_enum_check_discriminant" => simple_runtime::rt_enum_check_discriminant as *const () as usize,
         "rt_enum_check_variant" => simple_runtime::rt_enum_check_variant as *const () as usize,
@@ -804,6 +806,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_opt_i64_to_string" => simple_runtime::rt_opt_i64_to_string as *const () as usize,
         "rt_i64_to_hex" => simple_runtime::rt_i64_to_hex as *const () as usize,
         "rt_opt_value_to_string" => simple_runtime::rt_opt_value_to_string as *const () as usize,
+        "rt_option_float_bits" => simple_runtime::rt_option_float_bits as *const () as usize,
         "rt_opt_bool_to_string" => simple_runtime::rt_opt_bool_to_string as *const () as usize,
         "rt_opt_f64_to_string" => simple_runtime::rt_opt_f64_to_string as *const () as usize,
         "rt_capture_stdout_start" => value::rt_capture_stdout_start as *const () as usize,

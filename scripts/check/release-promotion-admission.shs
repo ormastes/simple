@@ -1,0 +1,413 @@
+#!/bin/sh
+# release-promotion-admission.shs — fail-closed admission of a pull request or
+# push that PROMOTES AN ALREADY-PUBLISHED RELEASE LINE ONTO main.
+#
+# Why: a release line that has absorbed main and then moved on (2026-11-27:
+# release/1.0.0 was 21,916 commits and +4.6% files ahead of main, main an
+# ancestor of it) cannot be landed on main through the range gates. Every
+# range gate scans base..head — 21,916 commits against a 64-commit bound and
+# a +-0.15% tree-size band — although each of those commits was already gated
+# when it landed on the release line through its own pull request. This is the
+# same situation as a tag push (0 new commits, see check-push-must-pass.shs),
+# and it is admitted the same way: on conditions that are VERIFIED, never by
+# name.
+#
+# Admitted only when ALL hold:
+#   (i)   the base is main (--base-ref main | refs/heads/main);
+#   (ii)  the head is published on a versioned release line of the LIVE remote
+#         (`git ls-remote`, never a local tracking ref, which can be forged):
+#         the head commit is the advertised refs/heads/release/<x.y> tip or an
+#         ancestor of it; or its tree is byte-identical (same tree object id)
+#         to the tree of that TIP, the tip descends from main, and the head
+#         adds no history beyond itself (`rev-list <head> --not <main> <tip>`
+#         is exactly the head — no extra parent);
+#   (iii) the live remote main — and --base, when given — is an ancestor of the
+#         head, so the promotion is fast-forward-equivalent and drops nothing
+#         of main.
+# Anything else, including every failure to determine one of the above
+# (unreachable remote, missing commit, shallow history that cannot prove
+# ancestry), is NOT admitted and the caller runs its normal gates.
+#
+# Usage:
+#   release-promotion-admission.shs --base-ref <ref> --head <sha> --remote <name|url>
+#           [--base <sha>] [--expect-tree <tree-id>] [--repo <dir>] [--scratch-fetch]
+#   release-promotion-admission.shs --selftest
+#
+#   --remote         the destination queried with ls-remote (remote name or URL).
+#   --base           an additional main commit that must be an ancestor of the
+#                    head (CI: the pull request's base sha).
+#   --expect-tree    refuse unless the head's tree is this id (CI: the tree of
+#                    the checked-out merge ref, so the tip checks the caller
+#                    then runs on its checkout are checks of the head's tree).
+#   --scratch-fetch  for a shallow CI clone: fetch COMMIT objects only
+#                    (--filter=tree:0) into a private scratch repository and
+#                    decide there. The caller's clone is never touched (a
+#                    tree:0 fetch into it would leave it treeless and make
+#                    every later gate lazy-fetch). A bounded
+#                    $SCRATCH_WINDOW-commit fetch of the release tips decides
+#                    first whether the head can be on a release line at all, so
+#                    an ordinary main pull request pays one ls-remote and one
+#                    small fetch; only a candidate pays the full commit-only
+#                    history fetch (35 MB / 55 s measured on this repo).
+#
+# Last stdout line and exit status:
+#   PASS — release promotion: <head> tree == published release/<x.y> <head>; 0 unreviewed commits   exit 0
+#   PASS — release promotion: <head> tree == published release/<x.y> tip <tip>; the head is 1 new
+#          commit carrying that tree, 0 other unpublished commits                                 exit 0
+#   NOT ADMITTED — <reason> (normal gates apply)                                                 exit 1
+#   ERROR — nothing was checked (<usage or selftest problem>)                                     exit 2
+# Callers admit on exit 0 ONLY.
+set -u
+
+SELF=release-promotion-admission
+SCRATCH_WINDOW=${RELEASE_PROMOTION_SCRATCH_WINDOW:-512}
+QUERY_TIMEOUT_S=${RELEASE_PROMOTION_QUERY_TIMEOUT_S:-15}
+FETCH_TIMEOUT_S=${RELEASE_PROMOTION_FETCH_TIMEOUT_S:-240}
+SCRATCH_DIR=""
+
+refuse() {
+    echo "NOT ADMITTED — $* (normal gates apply)"
+    return 1
+}
+
+bounded() {
+    _b_s=$1; shift
+    if command -v timeout >/dev/null 2>&1 && timeout --version >/dev/null 2>&1; then
+        timeout -k 1s "${_b_s}s" "$@"
+    else
+        "$@"
+    fi
+}
+
+is_sha() {
+    case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" -eq 40 ]
+}
+
+has_commit() {
+    GIT_NO_LAZY_FETCH=1 git -C "$1" rev-parse --verify --quiet "$2^{commit}" >/dev/null 2>&1
+}
+
+# live_refs <repo> <remote> : prints `<sha> main` and `<sha> <x.y>` rows for
+# the destination's main and its versioned release lines. Non-zero when the
+# destination cannot be queried.
+live_refs() {
+    _lr_out=$(bounded "$QUERY_TIMEOUT_S" git -C "$1" ls-remote "$2" refs/heads/main 'refs/heads/release/*' 2>/dev/null) || return 1
+    printf '%s\n' "$_lr_out" | while read -r _lr_sha _lr_ref; do
+        is_sha "$_lr_sha" || continue
+        case "$_lr_ref" in
+            refs/heads/main) printf '%s main\n' "$_lr_sha" ;;
+            refs/heads/release/*)
+                _lr_ver=${_lr_ref#refs/heads/release/}
+                case "$_lr_ver" in *.*) ;; *) continue ;; esac
+                case "$_lr_ver" in ''|.*|*.|*..*|*[!0-9.]*) continue ;; esac
+                printf '%s %s\n' "$_lr_sha" "$_lr_ver" ;;
+        esac
+    done
+}
+
+# is_anc <repo> <ancestor> <descendant>
+is_anc() {
+    GIT_NO_LAZY_FETCH=1 git -C "$1" merge-base --is-ancestor "$2" "$3" 2>/dev/null
+}
+
+# tree_of <repo> <commit> : the tree id recorded in the commit object (works in
+# a commit-only repository, where the tree object itself is absent).
+tree_of() {
+    GIT_NO_LAZY_FETCH=1 git -C "$1" log -1 --format=%T "$2" 2>/dev/null
+}
+
+# decide <repo> <head> <base|''> <expect-tree|''> <live-refs-text>
+#
+# Two ways a head is vouched for by a live release tip T, both requiring that
+# every main commit is an ancestor of the head:
+#   line  the head is T or an ancestor of T: the commit itself was published.
+#   tree  the head's tree is T's tree, and T itself descends from main. Only
+#         the TIP vouches: an interior commit of the line (even a
+#         first-parent one) is a state the line has moved past, and a commit
+#         from before main was merged in would rewind main.
+# In both, `rev-list <head> --not <main> <T>` must be empty or exactly the
+# head: an extra parent would otherwise smuggle history that no gate has seen
+# into main behind an identical tree.
+decide() {
+    _d_repo=$1; _d_head=$2; _d_base=$3; _d_expect=$4; _d_live=$5
+    has_commit "$_d_repo" "$_d_head" || { refuse "head $_d_head is not available in the repository"; return 1; }
+    _d_tree=$(tree_of "$_d_repo" "$_d_head") || _d_tree=""
+    is_sha "$_d_tree" || { refuse "cannot read the tree id of head $_d_head"; return 1; }
+    if [ -n "$_d_expect" ] && [ "$_d_expect" != "$_d_tree" ]; then
+        refuse "head $_d_head has tree $_d_tree, not the expected $_d_expect"; return 1
+    fi
+    _d_main=$(printf '%s\n' "$_d_live" | awk '$2 == "main" { print $1; exit }')
+    is_sha "$_d_main" || { refuse "the remote advertises no refs/heads/main"; return 1; }
+    [ "$_d_main" != "$_d_head" ] || { refuse "head $_d_head is already the remote main; there is nothing to promote"; return 1; }
+    for _d_m in "$_d_main" $_d_base; do
+        has_commit "$_d_repo" "$_d_m" || { refuse "main commit $_d_m is not available locally; fetch main and retry"; return 1; }
+        is_anc "$_d_repo" "$_d_m" "$_d_head" ||
+            { refuse "main $_d_m is not an ancestor of head $_d_head, so the promotion would drop or merge main commits"; return 1; }
+    done
+    _d_seen=0; _d_why="is neither on a published release/<x.y> line nor tree-identical to its tip"
+    for _d_row in $(printf '%s\n' "$_d_live" | awk '$2 != "main" { print $1 ":" $2 }'); do
+        _d_tip=${_d_row%%:*}; _d_ver=${_d_row#*:}
+        _d_seen=$(( _d_seen + 1 ))
+        has_commit "$_d_repo" "$_d_tip" || continue
+        if [ "$_d_head" = "$_d_tip" ] || is_anc "$_d_repo" "$_d_head" "$_d_tip"; then
+            _d_mode=line
+        elif [ "$(tree_of "$_d_repo" "$_d_tip")" = "$_d_tree" ]; then
+            _d_mode=tree
+            _d_ok=1
+            for _d_m in "$_d_main" $_d_base; do
+                is_anc "$_d_repo" "$_d_m" "$_d_tip" || _d_ok=0
+            done
+            if [ "$_d_ok" -ne 1 ]; then
+                _d_why="has the tree of release/$_d_ver tip $_d_tip, which does not descend from main"
+                continue
+            fi
+        else
+            continue
+        fi
+        # shellcheck disable=SC2086
+        _d_new=$(GIT_NO_LAZY_FETCH=1 git -C "$_d_repo" rev-list "$_d_head" --not "$_d_main" $_d_base "$_d_tip" 2>/dev/null) || {
+            _d_why="has history that cannot be listed against release/$_d_ver"
+            continue
+        }
+        _d_extra=$(printf '%s\n' "$_d_new" | awk -v h="$_d_head" 'NF && $1 != h { n++ } END { print n + 0 }')
+        if [ "$_d_extra" -ne 0 ]; then
+            _d_why="carries $_d_extra commit(s) that are on neither main nor release/$_d_ver (an extra parent)"
+            continue
+        fi
+        if [ "$_d_mode" = line ]; then
+            echo "PASS — release promotion: $_d_head tree == published release/$_d_ver $_d_head; 0 unreviewed commits"
+        else
+            echo "PASS — release promotion: $_d_head tree == published release/$_d_ver tip $_d_tip; the head is 1 new commit carrying that tree, 0 other unpublished commits"
+        fi
+        return 0
+    done
+    [ "$_d_seen" -gt 0 ] || { refuse "the remote advertises no versioned release/<x.y> line"; return 1; }
+    refuse "head $_d_head $_d_why"
+    return 1
+}
+
+# scratch_prepare <repo> <remote> <head> <base|''> <live-refs-text> : builds a
+# commit-only scratch repository in $SCRATCH_DIR holding the full history of
+# the head, main and the release tips. Returns 1 (with a refusal already
+# printed) when the bounded window shows the head is not a candidate.
+scratch_prepare() {
+    _sp_repo=$1; _sp_remote=$2; _sp_head=$3; _sp_base=$4; _sp_live=$5
+    case "$_sp_remote" in
+        *:*|/*|./*) _sp_url=$_sp_remote ;;
+        *) _sp_url=$(git -C "$_sp_repo" config --get "remote.$_sp_remote.url" 2>/dev/null) || _sp_url="" ;;
+    esac
+    [ -n "$_sp_url" ] || { refuse "cannot resolve a URL for remote '$_sp_remote'"; return 1; }
+    _sp_tips=$(printf '%s\n' "$_sp_live" | awk '$2 != "main" { print $1 }')
+    [ -n "$_sp_tips" ] || { refuse "the remote advertises no versioned release/<x.y> line"; return 1; }
+    SCRATCH_DIR=$(mktemp -d) || { refuse "cannot create a scratch directory"; return 1; }
+    git init -q --bare "$SCRATCH_DIR/promo.git" >/dev/null 2>&1 &&
+        git -C "$SCRATCH_DIR/promo.git" remote add origin "$_sp_url" ||
+        { refuse "cannot initialise the scratch repository"; return 1; }
+    _sp_git="$SCRATCH_DIR/promo.git"
+    # shellcheck disable=SC2086
+    bounded "$FETCH_TIMEOUT_S" git -C "$_sp_git" fetch --no-tags --no-recurse-submodules --quiet \
+        --filter=tree:0 --depth="$SCRATCH_WINDOW" origin "$_sp_head" $_sp_tips >/dev/null 2>&1 ||
+        { refuse "the bounded commit-only fetch of the head and the release tips failed"; return 1; }
+    _sp_tree=$(GIT_NO_LAZY_FETCH=1 git -C "$_sp_git" log -1 --format=%T "$_sp_head" 2>/dev/null) || _sp_tree=""
+    _sp_candidate=0
+    for _sp_tip in $_sp_tips; do
+        if [ "$_sp_head" = "$_sp_tip" ] ||
+            GIT_NO_LAZY_FETCH=1 git -C "$_sp_git" merge-base --is-ancestor "$_sp_head" "$_sp_tip" 2>/dev/null ||
+            [ "$(tree_of "$_sp_git" "$_sp_tip")" = "$_sp_tree" ]; then
+            _sp_candidate=1
+            break
+        fi
+    done
+    [ "$_sp_candidate" -eq 1 ] ||
+        { refuse "head $_sp_head is neither within $SCRATCH_WINDOW commits behind a published release/<x.y> tip nor tree-identical to one"; return 1; }
+    _sp_main=$(printf '%s\n' "$_sp_live" | awk '$2 == "main" { print $1; exit }')
+    _sp_deepen=""
+    [ "$(git -C "$_sp_git" rev-parse --is-shallow-repository 2>/dev/null)" != true ] || _sp_deepen=--unshallow
+    # shellcheck disable=SC2086
+    bounded "$FETCH_TIMEOUT_S" git -C "$_sp_git" fetch --no-tags --no-recurse-submodules --quiet \
+        --filter=tree:0 $_sp_deepen origin "$_sp_head" $_sp_main $_sp_base $_sp_tips >/dev/null 2>&1 ||
+        { refuse "the commit-only history fetch failed, so ancestry cannot be proven"; return 1; }
+    return 0
+}
+
+# admit <repo> <base-ref> <head> <remote> <base|''> <expect-tree|''> <scratch 0|1>
+admit() {
+    _a_repo=$1; _a_ref=$2; _a_head=$3; _a_remote=$4; _a_base=$5; _a_expect=$6; _a_scratch=$7
+    case "$_a_ref" in
+        main|refs/heads/main) ;;
+        *) refuse "the base '$_a_ref' is not main"; return 1 ;;
+    esac
+    is_sha "$_a_head" || { refuse "head '$_a_head' is not a full commit id"; return 1; }
+    [ -z "$_a_base" ] || is_sha "$_a_base" || { refuse "base '$_a_base' is not a full commit id"; return 1; }
+    [ -z "$_a_expect" ] || is_sha "$_a_expect" || { refuse "expected tree '$_a_expect' is not a full object id"; return 1; }
+    case "$_a_remote" in ''|-*) refuse "no remote to query"; return 1 ;; esac
+    _a_live=$(live_refs "$_a_repo" "$_a_remote") || { refuse "cannot query the live refs of '$_a_remote'"; return 1; }
+    if [ "$_a_scratch" -eq 1 ]; then
+        scratch_prepare "$_a_repo" "$_a_remote" "$_a_head" "$_a_base" "$_a_live" || return 1
+        _a_repo="$SCRATCH_DIR/promo.git"
+    fi
+    decide "$_a_repo" "$_a_head" "$_a_base" "$_a_expect" "$_a_live"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST
+# ---------------------------------------------------------------------------
+fx_commit() {  # <repo> <file> <text>
+    echo "$3" >> "$1/$2"
+    git -C "$1" add "$2" >/dev/null 2>&1 && git -C "$1" commit -q -m "$3" >/dev/null 2>&1
+}
+
+selftest() {
+    st=$(mktemp -d) || return 1
+    # Scratch repositories are created by admit() inside a command
+    # substitution; keep them under the fixture root so one rm removes them.
+    mkdir -p "$st/tmp" && TMPDIR=$st/tmp && export TMPDIR
+    fail=0; ran=0
+    w=$st/work; r=$st/remote.git
+    mkdir -p "$w"
+    ( cd "$w" && git init -q -b main . && git config user.email f@f && git config user.name f &&
+        git config commit.gpgsign false ) >/dev/null 2>&1 || return 1
+    git init -q --bare "$r" >/dev/null 2>&1 || return 1
+    git -C "$r" config uploadpack.allowFilter true
+    git -C "$r" config uploadpack.allowAnySHA1InWant true
+    git -C "$w" remote add origin "file://$r"
+    fx_commit "$w" a.txt m1 || return 1
+    fx_commit "$w" a.txt m2 || return 1
+    main=$(git -C "$w" rev-parse main)
+    git -C "$w" checkout -q -b release/9.9
+    fx_commit "$w" b.txt r1; fx_commit "$w" b.txt r2; fx_commit "$w" b.txt r3
+    tip=$(git -C "$w" rev-parse release/9.9)
+    mid=$(git -C "$w" rev-parse release/9.9~1)
+    # a second line that branched BEFORE main's tip, then merged main
+    git -C "$w" checkout -q -b release/8.8 main~1
+    fx_commit "$w" c.txt q1
+    stale=$(git -C "$w" rev-parse release/8.8)
+    git -C "$w" merge -q --no-ff -m "merge main" main >/dev/null 2>&1 || return 1
+    fx_commit "$w" c.txt q3
+    tip8=$(git -C "$w" rev-parse release/8.8)
+    # a third line that branched before main's tip and NEVER merged main
+    git -C "$w" checkout -q -b release/7.7 main~1
+    fx_commit "$w" d.txt p1
+    tip7=$(git -C "$w" rev-parse release/7.7)
+    git -C "$w" push -q origin main release/9.9 release/8.8 release/7.7 >/dev/null 2>&1 || return 1
+    git -C "$w" fetch -q origin >/dev/null 2>&1
+
+    # unpublished continuation of the release line (never pushed)
+    git -C "$w" checkout -q -b unpub release/9.9
+    fx_commit "$w" b.txt local-only
+    unpub=$(git -C "$w" rev-parse unpub)
+    # a commit with the published tip's tree but different parents
+    same=$(git -C "$w" commit-tree -p "$main" -p "$tip" -m "promote" "$tip^{tree}")
+    # forged promotions: main as a graph parent, tree taken from the line
+    rewind=$(git -C "$w" commit-tree -p "$main" -p "$stale" -m "forged" "$stale^{tree}")
+    same8=$(git -C "$w" commit-tree -p "$main" -p "$tip8" -m "promote" "$tip8^{tree}")
+    behind=$(git -C "$w" commit-tree -p "$main" -p "$tip7" -m "forged" "$tip7^{tree}")
+    # extra parent: main + the tip + an orphan nobody reviewed, tip's tree
+    orphan=$(git -C "$w" commit-tree -m "orphan" "$main^{tree}")
+    extra=$(git -C "$w" commit-tree -p "$main" -p "$tip" -p "$orphan" -m "promote+orphan" "$tip^{tree}")
+    # interior tree: parents main + tip, tree of an INTERIOR commit of the line
+    interior=$(git -C "$w" commit-tree -p "$main" -p "$tip" -m "promote-old" "$mid^{tree}")
+    # a non-versioned release/* branch carrying its own commit
+    git -C "$w" checkout -q -b release/foo release/9.9
+    fx_commit "$w" b.txt foo-only
+    foo=$(git -C "$w" rev-parse release/foo)
+    git -C "$w" push -q origin release/foo >/dev/null 2>&1 || return 1
+
+    expect() {  # <name> <want: 0 line | T tree | 1 refused> <args...>
+        e_name=$1; e_want=$2; shift 2
+        ran=$(( ran + 1 ))
+        e_out=$( admit "$@" 2>/dev/null ); e_rc=$?
+        e_last=$(printf '%s\n' "$e_out" | tail -n 1)
+        case "$e_want:$e_rc:$e_last" in
+            0:0:"PASS — release promotion: "*"; 0 unreviewed commits") ;;
+            T:0:"PASS — release promotion: "*" tip "*"; the head is 1 new commit carrying that tree, 0 other unpublished commits") ;;
+            1:1:"NOT ADMITTED — "*) ;;
+            *) echo "  [selftest FAIL] $e_name: want $e_want, got rc=$e_rc ($e_last)"; fail=$(( fail + 1 )) ;;
+        esac
+    }
+
+    # --- admitted -----------------------------------------------------------
+    expect "head is the published release tip" 0 "$w" main "$tip" origin "$main" "" 0
+    expect "head is an ancestor of an advanced release tip" 0 "$w" refs/heads/main "$mid" origin "" "" 0
+    expect "new commit, tree identical to the published tip" T "$w" main "$same" origin "$main" "$(git -C "$w" rev-parse "$tip^{tree}")" 0
+    expect "new commit, tree identical to a tip that merged main" T "$w" main "$same8" origin "$main" "" 0
+    # --- refused ------------------------------------------------------------
+    expect "forged head carrying a pre-merge release tree (would rewind main)" 1 "$w" main "$rewind" origin "$main" "" 0
+    expect "forged head carrying the tree of a tip that never merged main" 1 "$w" main "$behind" origin "$main" "" 0
+    expect "extra parent smuggles an unreviewed commit behind the tip's tree" 1 "$w" main "$extra" origin "$main" "" 0
+    expect "tree identical to an INTERIOR commit of the line, not its tip" 1 "$w" main "$interior" origin "$main" "" 0
+    expect "pre-merge release commit itself (main not its ancestor)" 1 "$w" main "$stale" origin "" "" 0
+    expect "tree differs (unpublished commit on top of the tip)" 1 "$w" main "$unpub" origin "$main" "" 0
+    expect "base is not main" 1 "$w" release/9.9 "$tip" origin "" "" 0
+    expect "only a non-versioned release/* line holds the head" 1 "$w" main "$foo" origin "" "" 0
+    expect "expected tree mismatch" 1 "$w" main "$tip" origin "" "$(git -C "$w" rev-parse "$main^{tree}")" 0
+    expect "unreachable remote" 1 "$w" main "$tip" "file://$st/absent" "" "" 0
+    expect "head is already main (nothing to promote)" 1 "$w" main "$main" origin "" "" 0
+    expect "abbreviated head" 1 "$w" main "$(git -C "$w" rev-parse --short "$tip")" origin "" "" 0
+
+    # unpublished release commit: a FORGED local tracking ref must not admit it
+    git -C "$w" update-ref refs/remotes/origin/release/9.9 "$unpub"
+    expect "unpublished release commit behind a forged tracking ref" 1 "$w" main "$unpub" origin "$main" "" 0
+    git -C "$w" update-ref refs/remotes/origin/release/9.9 "$tip"
+
+    # scratch mode from a depth-1 clone (the CI shape): same verdicts, and the
+    # caller's clone stays a plain shallow clone (no promisor config).
+    c=$st/ci
+    git init -q "$c" >/dev/null 2>&1 && git -C "$c" remote add origin "file://$r" &&
+        git -C "$c" fetch -q --no-tags --depth=1 origin "$tip" >/dev/null 2>&1 || return 1
+    expect "scratch fetch: published tip from a depth-1 clone" 0 "$c" main "$tip" origin "$main" "" 1
+    git -C "$w" push -q origin unpub:refs/heads/work/unpub >/dev/null 2>&1 || return 1
+    expect "scratch fetch: unpublished work commit" 1 "$c" main "$unpub" origin "$main" "" 1
+    git -C "$w" push -q origin "$rewind:refs/heads/work/rewind" >/dev/null 2>&1 || return 1
+    expect "scratch fetch: forged head carrying a pre-merge release tree" 1 "$c" main "$rewind" origin "$main" "" 1
+    git -C "$w" push -q origin "$extra:refs/heads/work/extra" "$same:refs/heads/work/same" >/dev/null 2>&1 || return 1
+    expect "scratch fetch: extra parent behind the tip's tree" 1 "$c" main "$extra" origin "$main" "" 1
+    expect "scratch fetch: new commit, tree identical to the published tip" T "$c" main "$same" origin "$main" "" 1
+    ran=$(( ran + 1 ))
+    if [ -n "$(git -C "$c" config --get remote.origin.promisor 2>/dev/null)" ] ||
+        [ -n "$(git -C "$c" config --get remote.origin.partialclonefilter 2>/dev/null)" ]; then
+        echo "  [selftest FAIL] scratch fetch turned the caller's clone into a partial clone"; fail=$(( fail + 1 ))
+    fi
+
+    # main not an ancestor: main advances past the release line's merge base.
+    # LAST, because it moves the remote's main for every later query.
+    git -C "$w" checkout -q main
+    fx_commit "$w" a.txt m3
+    git -C "$w" push -q origin main >/dev/null 2>&1 || return 1
+    expect "live main is not an ancestor of the head" 1 "$w" main "$tip" origin "" "" 0
+    expect "scratch fetch: live main is not an ancestor of the head" 1 "$c" main "$tip" origin "" "" 1
+
+    rm -rf "$st"
+    echo "  selftest: $ran fixture(s) run, $fail failure(s)"
+    [ "$fail" -eq 0 ] && [ "$ran" -eq 25 ]
+}
+
+if [ "${1:-}" = --selftest ]; then
+    if selftest; then echo "PASS — 25 release-promotion fixture(s) checked (selftest only)"; exit 0; fi
+    echo "ERROR — nothing was checked (selftest failed)"; exit 2
+fi
+
+REPO=.; BASE_REF=""; HEAD_SHA=""; BASE_SHA=""; REMOTE=""; EXPECT_TREE=""; SCRATCH=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --scratch-fetch) SCRATCH=1; shift; continue ;;
+    esac
+    [ "$#" -ge 2 ] || { echo "ERROR — nothing was checked ($1 needs a value)"; exit 2; }
+    case "$1" in
+        --repo) REPO=$2 ;;
+        --base-ref) BASE_REF=$2 ;;
+        --head) HEAD_SHA=$2 ;;
+        --base) BASE_SHA=$2 ;;
+        --remote) REMOTE=$2 ;;
+        --expect-tree) EXPECT_TREE=$2 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+    shift 2
+done
+if [ -z "$BASE_REF" ] || [ -z "$HEAD_SHA" ] || [ -z "$REMOTE" ]; then
+    echo "ERROR — nothing was checked (usage: $0 --base-ref <ref> --head <sha> --remote <name|url> [--base <sha>] [--expect-tree <id>] [--repo <dir>] [--scratch-fetch])"
+    exit 2
+fi
+trap '[ -z "$SCRATCH_DIR" ] || rm -rf "$SCRATCH_DIR"' EXIT INT TERM
+admit "$REPO" "$BASE_REF" "$HEAD_SHA" "$REMOTE" "$BASE_SHA" "$EXPECT_TREE" "$SCRATCH"

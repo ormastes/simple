@@ -276,6 +276,29 @@ pub(crate) fn flatten_owner_mangled_name(owner: &str, name: &str) -> String {
     format!("{FLATTEN_OWNER_SYMBOL_PREFIX}{stem}_{hash:016x}__{name}")
 }
 
+/// Source-level name behind a [`flatten_owner_mangled_name`] symbol
+/// (`__spl_flat_<stem>_<16 hex>__<name>` -> `<name>`), or `name` itself when
+/// it is not such a symbol. Owner-keyed registries index a renamed class
+/// under the name its own module writes.
+pub(crate) fn flatten_owner_source_name(name: &str) -> &str {
+    let Some(rest) = name.strip_prefix(FLATTEN_OWNER_SYMBOL_PREFIX) else {
+        return name;
+    };
+    let bytes = rest.as_bytes();
+    // The hash is exactly 16 lowercase hex digits between `_` and `__`.
+    for start in 0..bytes.len() {
+        let end = start + 1 + 16;
+        if bytes[start] == b'_'
+            && bytes.len() > end + 2
+            && bytes[start + 1..end].iter().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && &bytes[end..end + 2] == b"__"
+        {
+            return &rest[end + 2..];
+        }
+    }
+    name
+}
+
 pub(crate) fn tag_function_module_owner(function: &mut FunctionDef, owner: &str) {
     if function
         .attributes
@@ -1426,6 +1449,7 @@ pub(crate) fn clear_moved_vars() {
 ///
 /// Note: Module cache is cleared separately via `clear_module_cache()`.
 pub fn clear_interpreter_state() {
+    crate::interpreter::clear_owner_qualified_classes();
     // Clear BDD registries (accumulate test definitions)
     BDD_REGISTRY_GROUPS.with(|cell| cell.borrow_mut().clear());
     BDD_REGISTRY_CONTEXTS.with(|cell| cell.borrow_mut().clear());

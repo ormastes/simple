@@ -517,6 +517,29 @@ pub extern "C" fn rt_enum_register_name(enum_id: u32, discriminant: u32, name_pt
 /// Allocate a new enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue {
+    enum_new_with_flags(enum_id, discriminant, payload, 0)
+}
+
+/// Enum header flag (`HeapHeader.reserved`, per object type like the string
+/// flags): the value is a variant NAMED `None` of an enum other than the
+/// builtin Option. Written before the value is published, never after. The
+/// bit is disjoint from the string flags (`RT_STRING_FLAG_*`, bits 0-1), whose
+/// writers take any heap header.
+pub const RT_ENUM_FLAG_NONE_VARIANT: u16 = 1 << 15;
+
+/// `rt_enum_new` for a variant named `None` of a user enum. A bare `None` /
+/// `nil` arm over an untyped subject matches such a value by name (the
+/// interpreter rule); stamping the object lets `rt_is_none_variant` answer
+/// without knowing the enum.
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+#[no_mangle]
+pub extern "C" fn rt_enum_new_none(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue {
+    enum_new_with_flags(enum_id, discriminant, payload, RT_ENUM_FLAG_NONE_VARIANT)
+}
+
+/// `rt_enum_new` with the header flags of the enum being copied.
+#[inline]
+pub(crate) fn enum_new_with_flags(enum_id: u32, discriminant: u32, payload: RuntimeValue, flags: u16) -> RuntimeValue {
     let size = std::mem::size_of::<RuntimeEnum>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
@@ -527,6 +550,7 @@ pub extern "C" fn rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeV
         }
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Enum, size as u32);
+        (*ptr).header.reserved = flags;
         (*ptr).enum_id = enum_id;
         (*ptr).discriminant = discriminant;
         (*ptr).payload = payload;
@@ -586,6 +610,31 @@ pub extern "C" fn rt_unwrap_or_self(value: RuntimeValue) -> RuntimeValue {
         // (see below for the sibling `rt_unwrap_or_trap` used by `.unwrap()`)
         value
     }
+}
+
+/// Exact IEEE-754 bits of the payload of a PRESENT typed float optional
+/// (`f64?` / `f32?` / `Option<f64>`), in one enum lookup.
+///
+/// The canonical Option enum holds either the RAW bits of the float (an
+/// explicit `Some(x)` of a typed float) or a tagged heap-boxed float (generic
+/// / untyped producers such as `[f64].at`, `fn pick<T>`); any other word is
+/// the flat tagged float form. A payload is read as a boxed float only when it
+/// is a registered `HeapFloat` (membership is checked before any dereference),
+/// so raw bits that alias a live boxed-float address are the one residual
+/// misread. Twin of `rt_option_float_bits` in src/runtime/runtime_native.c.
+/// seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+#[no_mangle]
+pub extern "C" fn rt_option_float_bits(value: RuntimeValue) -> i64 {
+    if let Some(p) = get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum) {
+        if unsafe { (*p).enum_id } == OPTION_ENUM_ID {
+            let payload = unsafe { (*p).payload };
+            if let Some(f) = payload.as_heap_float_ptr() {
+                return unsafe { (*f).value }.to_bits() as i64;
+            }
+            return payload.to_raw() as i64;
+        }
+    }
+    value.as_float().to_bits() as i64
 }
 
 /// Unwrap the payload of a present `Result.Ok`/`Option.Some` value; abort
@@ -882,6 +931,23 @@ pub extern "C" fn rt_is_none(value: RuntimeValue) -> bool {
         (*p).enum_id == OPTION_ENUM_ID
             && ((*p).discriminant == 1
                 || (*p).discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None")))
+    })
+}
+
+/// `rt_is_none`, or a user enum variant named `None` (`rt_enum_new_none`): the
+/// test of a bare `None` / `nil` arm over an untyped subject. `rt_is_none`
+/// itself must keep ignoring the flag: a typed `Q?` holding `Q.None` is present.
+#[no_mangle]
+pub extern "C" fn rt_is_none_variant(value: RuntimeValue) -> bool {
+    if value.is_nil() {
+        return true;
+    }
+    static NONE_DISC: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum).is_some_and(|p| unsafe {
+        (*p).header.reserved & RT_ENUM_FLAG_NONE_VARIANT != 0
+            || ((*p).enum_id == OPTION_ENUM_ID
+                && ((*p).discriminant == 1
+                    || (*p).discriminant == *NONE_DISC.get_or_init(|| hash_variant_discriminant("None"))))
     })
 }
 

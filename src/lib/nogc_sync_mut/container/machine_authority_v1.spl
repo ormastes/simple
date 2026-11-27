@@ -48,6 +48,7 @@ use std.nogc_sync_mut.io.linux_container_containment_v1.{LinuxContainerContainme
 use std.common.contracts.container.execution_v2.*
 use std.common.contracts.distributed_operation_state_v2.*
 use std.common.contracts.container.linux_fresh_workload_v2.*
+use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_workload_read_action_v3
 use std.common.contracts.container.effect_deadline_v1.*
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.nogc_sync_mut.database.wal.WalEntry
@@ -797,7 +798,13 @@ pub class MachineFreshWorkloadTransferV2:
         val epoch = self.current_v2()?
         val actual = self.admission.authority.unwrap().validate_local_process_v1(principal)?
         machine_fresh_cpu_reserve_v3(self.admission.authority.unwrap().storage, self.state, epoch,
-            self.admission.initial_commit, self.scope_v2()?, actual, request, template)
+            self.admission.initial_commit, self.scope_v2()?, actual, request, template, self.workload_admission_v2()?)
+
+    # Workspace/TTY admission of the installed fresh-epoch profile, read through
+    # the live custody. Refuse-all unless the root-installed profile names it.
+    pub fn workload_admission_v2() -> Result<LinuxFreshWorkloadAdmissionV2, text>:
+        val current = self.current_v2()?
+        self.admission.custody.unwrap().current_workload_admission_v2()
 
     pub fn open_workspace_source_installed_v3(root: LinuxWorkspaceRootBorrowV3,
             request: ContainerExecutionRequestV2) -> MachineWorkspaceSourceOpenTurnV3:
@@ -889,6 +896,20 @@ pub class MachineFreshWorkloadTransferV2:
     pub fn run_action_v2(action: LinuxFreshWorkloadActionV2,
             deadline: Option<ContainerEffectDeadlineV1> = None) -> Result<MachineFreshWorkloadActionResultV2, text>:
         self.state.after_action_v2(self.run_named_v2(action, self.state.name_v2(linux_fresh_workload_action_name_v2(action))?, deadline))
+
+    # Bounded once-only `wait`/`logs` read of this owner's own CPU workload. A completed read is replayed from
+    # the retained result (no second helper); an attempted but unresolved one stays refused by action_begin_v2.
+    # @allow(primitive_api) reason: name is the closed shared-API read action text, checked against the two-value selector first
+    pub fn read_output_v3(name: text) -> Result<MachineFreshWorkloadActionResultV2, text>:
+        val selected = linux_fresh_workload_read_action_v3(name)?
+        val current = self.current_v2()?
+        val retained = self.state.completed_result_v3(name)
+        if retained.is_ok(): return retained
+        self.state.after_action_v2(self.run_named_v2(LinuxFreshWorkloadActionV2.Inspect, name, None))
+
+    # @allow(primitive_api) reason: predicate over one closed read action name; bool is the predicate result
+    pub fn read_completed_v3(name: text) -> bool:
+        linux_fresh_workload_read_action_v3(name).is_ok() and self.state.completed_result_v3(name).is_ok()
 
     fn run_named_v2(action: LinuxFreshWorkloadActionV2, name: text,
             deadline: Option<ContainerEffectDeadlineV1>) -> Result<MachineFreshWorkloadActionResultV2, text>:
@@ -1076,6 +1097,22 @@ pub class MachineFreshWorkloadTransferV2:
         machine_fresh_workload_settle_cpu_v3(self.admission.authority.unwrap().storage,
             self.admission.custody.unwrap(), self.state)
 
+    # Exited-start sibling of settle_v2 (which stays byte-unchanged): same current-epoch gate, same storage and custody.
+    pub fn settle_exited_start_v3() -> Result<(), text>:
+        val current = self.current_v2()?
+        machine_fresh_workload_settle_exited_start_bounded_v3(self.admission.authority.unwrap().storage,
+            self.admission.custody.unwrap(), self.state)
+
+    # Cleanup-driven attempt of the same settle, for an owner whose destroy already completed Stop, Remove and
+    # Absence on a proven exited start and was refused only at the cohort census. Strictly additive: when the
+    # owner is not current or nothing is pending it does nothing, and a refusal is returned to the caller,
+    # never latched and never retained as a diagnostic.
+    fn settle_exited_pending_v3() -> Result<(), text>:
+        if self.current_v2().is_err(): return Ok(())
+        val pending = self.state.exited_settlement_pending_v3()
+        if pending.is_err() or not pending.unwrap(): return Ok(())
+        self.settle_exited_start_v3()
+
     pub fn native_id_v2() -> Result<text, text>:
         val current = self.current_v2()?
         self.state.native_id_v2()
@@ -1098,6 +1135,8 @@ pub class MachineFreshWorkloadTransferV2:
     pub fn configuration_v2(kind: LinuxFreshWorkloadActionV2) -> Result<text, text>: self.state.configuration_v2(kind, self.current_v2()?)
     pub fn operation_v2(action: LinuxFreshWorkloadActionV2) -> Result<DistributedOperationStateV2, text>: self.state.action_state_v2(linux_fresh_workload_action_name_v2(action))
     pub fn settled_v2() -> Result<bool, text>: self.state.settled_v2()
+    # @allow(primitive_api) reason: forwards the lifecycle predicate over the owner's own retained outputs; bool is the predicate result
+    pub fn exited_start_v3() -> Result<bool, text>: self.state.exited_start_v3()
     pub fn close_v2() -> MachineFreshWorkloadCloseTurnV2:
         var retained = self
         # milestone_0021: plain refusals while any V4 loan is active (no-ops for V7: transfer_workload_v2 refuses a
@@ -1111,12 +1150,13 @@ pub class MachineFreshWorkloadTransferV2:
         val phase = retained.admission.lifecycle.phase_v1()
         if phase.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, phase.unwrap_err())
         if phase.unwrap() == "closed": return MachineFreshWorkloadCloseTurnV2(nil, true, retained.admission.lifecycle.diagnostic_v1().unwrap())
+        val settle = retained.settle_exited_pending_v3()
         val already = retained.state.closed_state_v3()
         val native = if already.is_ok() and already.unwrap(): Ok(()) else: retained.state.close_native_v2()
         val native_diagnostic = retained.state.diagnostic_v2()
         if native_diagnostic.is_ok():
             val first = retained.admission.lifecycle.retain_diagnostic_v1(native_diagnostic.unwrap())
-        if native.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, if retained.admission.lifecycle.diagnostic_v1().unwrap() != "": retained.admission.lifecycle.diagnostic_v1().unwrap() else: native.unwrap_err())
+        if native.is_err(): return MachineFreshWorkloadCloseTurnV2(Some(retained), false, if retained.admission.lifecycle.diagnostic_v1().unwrap() != "": retained.admission.lifecycle.diagnostic_v1().unwrap() else: (if settle.is_err(): settle.unwrap_err() else: native.unwrap_err()))
         if val authority = retained.admission.authority:
             val closed = authority.close_v1()
             var diagnostic = authority.close_diagnostic_v1()

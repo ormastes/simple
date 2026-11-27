@@ -311,6 +311,14 @@ pub(super) fn eval_literal_expr(
             if crate::value::strict_mem_enabled() && env.is_uninit(name) {
                 return Err(CompileError::semantic(format!("strict-mem: read of uninitialized {name}")));
             }
+            // A class renamed to its owner-exact symbol (same-named classes of
+            // several flattened modules) is named here by the local name its
+            // module sees -- its own declaration, or an import / alias of it.
+            if crate::interpreter::owner_qualified_classes_enabled() && !env.is_local(name) {
+                if let Some(class_name) = crate::interpreter::owner_qualified_class_symbol(name) {
+                    return Ok(Some(Value::Constructor { class_name }));
+                }
+            }
             // Imported globals can change during a nested call, so refresh only
             // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {

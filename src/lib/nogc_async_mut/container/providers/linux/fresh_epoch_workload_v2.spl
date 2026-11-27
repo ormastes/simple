@@ -25,6 +25,7 @@ use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.workspace_action_v3.ContainerWorkspaceActionV3
 use std.common.contracts.container.runtime_v1.*
 use std.common.contracts.container.linux_fresh_workload_v2.LinuxFreshWorkloadActionV2
+use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_workload_wait_exit_code_v3
 use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStreamLaunchV2
 use std.nogc_async_mut.container.providers.linux.workspace_root_borrow_v3.*
 use std.nogc_async_mut.container.providers.linux.workspace_source_loan_v3.*
@@ -65,13 +66,16 @@ pub class LinuxFreshWorkloadOwnerV2:
 
     pub fn project_v2(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
         if self.workspace_root.is_some(): return self.transfer.project_workspace_request_v3(request)
-        val decoded = machine_fresh_workload_request_v2(self.scope_v2()?, request)?
+        # Build roots and a TTY are projected only under the installed profile's
+        # admission; without it this is the historical first-profile refusal.
+        val decoded = machine_fresh_workload_request_admitted_v2(self.scope_v2()?, request,
+            self.transfer.workload_admission_v2()?)?
         val retained = self.transfer.request_v2()
         if retained.is_ok() and retained.unwrap().request != request: return Err("machine-fresh-workload-request-changed")
         Ok(ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt,
             operation_id: decoded.operation_id, request_digest: request.plan.request_digest,
             cpu_millis: decoded.cpu_limit_millis, memory_bytes: decoded.memory_limit_bytes,
-            timeout_ms: decoded.timeout_ms, has_devices: false, has_workspace: false))
+            timeout_ms: decoded.timeout_ms, has_devices: false, has_workspace: decoded.build_input_root != ""))
 
     fn identity_v2(request: ContainerExecutionRequestV2) -> Result<RuntimeIdentityV1, text>:
         val projected = self.project_v2(request)?
@@ -122,11 +126,15 @@ pub class LinuxFreshWorkloadOwnerV2:
             val started = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Start, deadline)?
             val before = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Inspect)?
             val associated = self.transfer.associate_v2()?
+            # A short workload may already be gone. Both forms are a proven start: an exited start confirmed
+            # by the owner's own two post-Start samples, or the associated subject observed empty.
+            if self.transfer.exited_start_v3()?: return self.reply_v2(request, action, RUNTIME_PHASE_EXITED, started)
             val native = self.transfer.subject_v2()?
-            if native.state != LinuxContainerContainmentPopulationV1.Populated: return Err("machine-fresh-workload-running-unproven")
-            return self.reply_v2(request, action, RUNTIME_PHASE_RUNNING, started)
+            val phase = if native.state == LinuxContainerContainmentPopulationV1.Populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_EXITED
+            return self.reply_v2(request, action, phase, started)
         if action == "stop":
             val stopped = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Stop)?
+            if self.transfer.exited_start_v3()?: return self.reply_v2(request, action, RUNTIME_PHASE_STOPPED, stopped)
             val native = self.transfer.subject_v2()?
             if native.state != LinuxContainerContainmentPopulationV1.EmptySnapshot: return Err("machine-fresh-workload-stop-unproven")
             return self.reply_v2(request, action, RUNTIME_PHASE_STOPPED, stopped)
@@ -137,7 +145,10 @@ pub class LinuxFreshWorkloadOwnerV2:
             if not self.done_v2(LinuxFreshWorkloadActionV2.Remove): removed = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Remove)?
             if not self.done_v2(LinuxFreshWorkloadActionV2.Absence):
                 val absent = self.transfer.run_action_v2(LinuxFreshWorkloadActionV2.Absence)?
-            val settled = self.transfer.settle_v2()?
+            # An exited start has no native subject to close against; it settles on the owner's own retained
+            # evidence plus custody's cohort-empty sample. Every other start keeps the subject-closure settle.
+            if self.transfer.exited_start_v3()?: self.transfer.settle_exited_start_v3()?
+            else: self.transfer.settle_v2()?
             return self.reply_v2(request, action, RUNTIME_PHASE_DESTROYED, removed)
         Err("linux-fresh-workload-action-unsupported")
 
@@ -192,9 +203,33 @@ pub class LinuxFreshWorkloadOwnerV2:
         container_execution_stats_observation_validate_v1(observation)?
         Ok(observation)
 
+    # Bounded reads of this owner's own workload through the closed probe projection: `wait` is the engine's
+    # printed payload exit status, `logs` the retained stdout (64 KiB cap, refused rather than truncated).
+    # Each runs once under the request's own helper deadline and replays afterwards; `logs` needs a completed
+    # `wait`. The native id is the transfer's; the caller supplies only its original request.
+    fn observe_v3(action: text, request: ContainerExecutionRequestV2) -> Result<RuntimeOperationV1, text>:
+        val projected = self.project_v2(request)?
+        val record = self.transfer.request_v2()?
+        if record.request != request: return Err("machine-fresh-workload-request-changed")
+        if action == "logs" and not self.transfer.read_completed_v3("wait"):
+            return Err("linux-fresh-workload-logs-requires-completed-wait")
+        val waited = self.transfer.read_output_v3("wait")?
+        val code = linux_fresh_workload_wait_exit_code_v3(waited.output)?
+        var result = waited
+        if action == "logs": result = self.transfer.read_output_v3("logs")?
+        val identity = self.identity_v2(request)?
+        # As the OCI provider's native wait: the helper exit stays in exit_code, the workload exit in state.
+        Ok(RuntimeOperationV1(status: RUNTIME_STATUS_OK, operation: action,
+            command: RuntimeCommandV1(action, result.program, result.arguments),
+            state: RuntimeStateV1(RUNTIME_PHASE_EXITED, identity, code, "exited"),
+            exit_code: result.exit_code, stdout: result.output, stderr: "", reason: "exited"))
+
     pub fn read_v2(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
         if action == "configuration" or action == "input-configuration":
             val observed = self.configuration_v2(action, request)
+            return if observed.is_ok(): observed.unwrap() else: self.refused_v2(action, observed.unwrap_err())
+        if action == "wait" or action == "logs":
+            val observed = self.observe_v3(action, request)
             return if observed.is_ok(): observed.unwrap() else: self.refused_v2(action, observed.unwrap_err())
         if action != "inspect": return self.refused_v2(action, "linux-fresh-workload-read-action-unsupported:" + action)
         val checked = self.project_v2(request)
@@ -202,6 +237,11 @@ pub class LinuxFreshWorkloadOwnerV2:
         if self.transfer.settled_v2().is_ok() and self.transfer.settled_v2().unwrap():
             val reply = self.reply_v2(request, action, RUNTIME_PHASE_DESTROYED, MachineFreshWorkloadActionResultV2(true, "", 0, ""))
             return if reply.is_ok(): reply.unwrap() else: self.refused_v2(action, reply.unwrap_err())
+        val exited = self.transfer.exited_start_v3()
+        if exited.is_err(): return self.refused_v2(action, exited.unwrap_err())
+        if exited.unwrap():
+            val gone = self.reply_v2(request, action, RUNTIME_PHASE_EXITED, MachineFreshWorkloadActionResultV2(true, "", 0, ""))
+            return if gone.is_ok(): gone.unwrap() else: self.refused_v2(action, gone.unwrap_err())
         val native = self.transfer.subject_v2()
         if native.is_err(): return self.refused_v2(action, native.unwrap_err())
         val phase = if native.unwrap().state == LinuxContainerContainmentPopulationV1.Populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_EXITED
@@ -213,14 +253,16 @@ pub class LinuxFreshWorkloadOwnerV2:
         var phase = RUNTIME_PHASE_PREPARED
         if self.done_v2(LinuxFreshWorkloadActionV2.Create): phase = RUNTIME_PHASE_CREATED
         if self.transfer.settled_v2()?: phase = RUNTIME_PHASE_DESTROYED
+        elif self.done_v2(LinuxFreshWorkloadActionV2.Start) and self.transfer.exited_start_v3()?:
+            phase = if self.done_v2(LinuxFreshWorkloadActionV2.Stop): RUNTIME_PHASE_STOPPED else: RUNTIME_PHASE_EXITED
         elif self.done_v2(LinuxFreshWorkloadActionV2.Start):
             val native = self.transfer.subject_v2()?
             if self.done_v2(LinuxFreshWorkloadActionV2.Stop):
                 if native.state != LinuxContainerContainmentPopulationV1.EmptySnapshot: return Err("machine-fresh-workload-stop-unproven")
                 phase = RUNTIME_PHASE_STOPPED
             else:
-                if native.state != LinuxContainerContainmentPopulationV1.Populated: return Err("machine-fresh-workload-running-unproven")
-                phase = RUNTIME_PHASE_RUNNING
+                # The associated subject observed empty is a workload that ran and exited, as in `start` and `inspect`.
+                phase = if native.state == LinuxContainerContainmentPopulationV1.Populated: RUNTIME_PHASE_RUNNING else: RUNTIME_PHASE_EXITED
         Ok(RuntimeIntentV1(actual.pod_uid, actual.attempt, actual.provider_generation, actual.operation_id,
             actual.engine, actual.native_id, actual.node_boot_id, phase))
 

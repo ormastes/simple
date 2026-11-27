@@ -171,6 +171,7 @@ pub(crate) fn compile_enum_unit<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     enum_name: &str,
+    variant_name: &str,
     disc: u32,
 ) {
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
@@ -181,7 +182,8 @@ pub(crate) fn compile_enum_unit<M: Module>(
     // Nil payload: tagged value 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
     let nil_val = builder.ins().iconst(types::I64, 3);
     emit_enum_name_registration(ctx, builder, enum_name, disc, enum_id, disc_val);
-    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, nil_val);
+    let ctor = crate::codegen::shared::enum_constructor_symbol(enum_name, variant_name);
+    let result = call_runtime_3(ctx, builder, ctor, enum_id, disc_val, nil_val);
     ctx.vreg_values.insert(dest, result);
 }
 
@@ -190,6 +192,7 @@ pub(crate) fn compile_enum_with<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     enum_name: &str,
+    variant_name: &str,
     disc: u32,
     payload: VReg,
 ) {
@@ -200,7 +203,8 @@ pub(crate) fn compile_enum_with<M: Module>(
     );
     let payload_val = ctx.vreg_values[&payload];
     emit_enum_name_registration(ctx, builder, enum_name, disc, enum_id, disc_val);
-    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id, disc_val, payload_val);
+    let ctor = crate::codegen::shared::enum_constructor_symbol(enum_name, variant_name);
+    let result = call_runtime_3(ctx, builder, ctor, enum_id, disc_val, payload_val);
     ctx.vreg_values.insert(dest, result);
 }
 

@@ -17,6 +17,9 @@ use std.common.build_manager.group_process_stream_protocol_v2.GroupProcessStream
 use std.nogc_sync_mut.container.machine_fresh_workload_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_native_dispatch_v3.*
 use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
+use std.nogc_sync_mut.container.machine_fresh_workload_exited_settlement_v3.machine_fresh_workload_exited_cohort_command_v3
+use std.nogc_sync_mut.container.machine_fresh_workload_exit_edges_v3.{MachineFreshWorkloadCohortRetryV3,
+    machine_fresh_workload_exited_cohort_retry_v3, machine_fresh_workload_association_exit_v3}
 use std.common.contracts.container.linux_fresh_workload_v2.*
 use std.common.contracts.container.effect_deadline_v1.*
 use std.common.contracts.container.workspace_preparation_window_v3.container_workspace_launch_expiry_v3
@@ -24,11 +27,13 @@ use std.common.contracts.distributed_operation_state_v2.*
 use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_encode_v3
 use std.common.build_manager.contracts.builder_digest_valid_v1
 use std.common.crypto.sha256.sha256_text
-use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure, time_sample_monotonic_nanos_or_failure, sleep_ms}
 use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_owned_v2, PipedProcessOwnedSpawnV2}
 use std.nogc_sync_mut.io.group_process_owner.{group_process_stream_poll_v2, group_process_stream_terminal_v2}
 use std.nogc_sync_mut.database.wal.WalEntry
 use std.nogc_sync_mut.io.dir_entry_ops.dir_create_private_exclusive_v1
+use std.common.contracts.container.linux_fresh_workload_probe_v3.{linux_fresh_workload_read_action_v3, linux_fresh_workload_read_command_v3, linux_fresh_workload_wait_exit_code_v3}
+use std.nogc_sync_mut.io.linux_fresh_workload_probe_launch_v3.{linux_fresh_workload_probe_bind_v3, linux_fresh_workload_probe_validate_v3}
 
 pub(package) fn workload_publish_v3(storage: MachineStorageOwnerV1, state: MachineFreshWorkloadLifecycleV2,
         entries: [WalEntry]) -> Result<(), text>:
@@ -39,6 +44,28 @@ pub(package) fn workload_publish_v3(storage: MachineStorageOwnerV1, state: Machi
     val retained = state.committed_v2(committed, entries)?
     val replayed = machine_fresh_workload_history_verify_v2(storage, state.history_v2()?)?
     state.publication_verified_v2()
+
+# One begin path; only the launch binding differs. A `wait`/`logs` read is the
+# CPU record's own retained Inspect identity re-projected by the existing closed
+# probe projector (fixed `<verb> -- <native id>` tail). A workspace record, a
+# workspace binding or any non-Inspect action is refused before any row.
+fn workload_launch_bind_v3(custody: LinuxFreshEpochSuccessorCustodyV1, record: MachineFreshWorkloadRecordDispatchV3,
+        binding: Option<LinuxFreshWorkspaceBindingV3>, command: LinuxFreshWorkloadCommandV2, name: text,
+        template: GroupProcessStreamLaunchV2) -> Result<GroupProcessStreamLaunchV2, text>:
+    if linux_fresh_workload_read_action_v3(name).is_err():
+        return machine_fresh_launch_bind_v3(custody, record, binding, command, template)
+    val cpu_only = machine_fresh_record_cpu_v3(record)?
+    if binding.is_some(): return Err("machine-fresh-workload-cpu-binding-mismatch")
+    linux_fresh_workload_probe_bind_v3(custody, linux_fresh_workload_read_command_v3(command, name)?, template)
+
+fn workload_launch_validate_v3(custody: LinuxFreshEpochSuccessorCustodyV1, record: MachineFreshWorkloadRecordDispatchV3,
+        binding: Option<LinuxFreshWorkspaceBindingV3>, command: LinuxFreshWorkloadCommandV2, name: text,
+        launch: GroupProcessStreamLaunchV2) -> Result<(), text>:
+    if linux_fresh_workload_read_action_v3(name).is_err():
+        return machine_fresh_launch_validate_v3(custody, record, binding, command, launch)
+    val cpu_only = machine_fresh_record_cpu_v3(record)?
+    if binding.is_some(): return Err("machine-fresh-workload-cpu-binding-mismatch")
+    linux_fresh_workload_probe_validate_v3(custody, linux_fresh_workload_read_command_v3(command, name)?, launch)
 
 pub(package) fn machine_fresh_workload_begin_v3(storage: MachineStorageOwnerV1,
         custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
@@ -66,14 +93,14 @@ pub(package) fn machine_fresh_workload_begin_v3(storage: MachineStorageOwnerV1,
     dir_create_private_exclusive_v1(template.root)?
     state.record_helper_dir_v3(template.root)?
     val binding = state.workspace_binding_option_v3()?
-    var launch = machine_fresh_launch_bind_v3(custody, record, binding, command, template)?
-    val valid = machine_fresh_launch_validate_v3(custody, record, binding, command, launch)?
+    var launch = workload_launch_bind_v3(custody, record, binding, command, name, template)?
+    val valid = workload_launch_validate_v3(custody, record, binding, command, name, launch)?
     val wire = group_process_stream_template_encode_v3(launch)?
     val states = state.action_begin_v2(name, custody_generation)?
     val continuation = state.helper_continuation_begin_v3(action, command.timeout_ms)?
     val rows = machine_fresh_record_action_batch_entries_v3(record, states, state.native_id_v2()?, wire, now)?
     val committed = workload_publish_v3(storage, state, rows)?
-    val revalidated = machine_fresh_launch_validate_v3(custody, record, binding, command, launch)?
+    val revalidated = workload_launch_validate_v3(custody, record, binding, command, name, launch)?
     # This gate is AFTER potentially delayed binding/publication/readback and
     # immediately BEFORE irreversible consumption and the existing native call.
     # Native launch repeats its checked, conservatively capped wall deadline.
@@ -136,6 +163,12 @@ pub(package) fn machine_fresh_workload_complete_v3(storage: MachineStorageOwnerV
     elif (name == "absence" and not machine_fresh_workload_absence_v2(result.exit_code, result.output)) or (name != "absence" and name != "inspect-exit" and result.exit_code != 0):
         val retained = state.unknown_v2("machine-fresh-workload-command-failed")?
         return Err("machine-fresh-workload-command-failed")
+    # A `wait` helper that exited 0 must have printed one canonical payload exit status.
+    if name == "wait":
+        val payload = linux_fresh_workload_wait_exit_code_v3(result.output)
+        if payload.is_err():
+            val retained = state.unknown_v2(payload.unwrap_err())?
+            return Err(payload.unwrap_err())
     val retired = state.retire_helper_v2()?
     val prior = state.action_state_v2(name)?
     val completed = distributed_operation_transition_v2(prior, "completed", sha256_text(str(result.exit_code) + "\n" + result.output))?
@@ -167,16 +200,48 @@ pub(package) fn machine_fresh_workload_progress_v3(storage: MachineStorageOwnerV
     val completed = state.after_action_v2(machine_fresh_workload_complete_v3(storage, custody, state, observed))?
     Ok(Some(completed))
 
+# The workload exited during association (CPU V2 records only; a workspace sample is never `Exited`).
+# `capture_error` is "" when the subject was captured and the confirmation is already retained; otherwise
+# the pid was gone before capture and the once-only confirmation is run here. The reducer decides from the
+# owner's own two retained samples and its own retained descriptor. On its Ok every descriptor is released
+# and the start is an exited start (exited_start_v3); it is never associated. Every Err, including a
+# descriptor that does not close, returns through after_association_v2 and latches as before.
+fn workload_association_exit_v3(storage: MachineStorageOwnerV1, custody: LinuxFreshEpochSuccessorCustodyV1,
+        state: MachineFreshWorkloadLifecycleV2, custody_generation: i64, capture_error: text) -> Result<(), text>:
+    val record = state.record_v3()?
+    val id = state.native_id_v2()?
+    if capture_error != "":
+        if machine_fresh_record_cpu_v3(record).is_err(): return Err(capture_error)
+        val again = machine_fresh_workload_run_v3(storage, custody, state, custody_generation, LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", None)?
+    val first = machine_fresh_record_start_evidence_v3(record, id, state.output_v2("inspect")?)?
+    val confirmed = machine_fresh_record_start_evidence_v3(record, id, state.output_v2("inspect-confirm")?)?
+    val proven = machine_fresh_workload_association_exit_v3(first, confirmed, capture_error, state.held_subject_v3()?)?
+    state.release_exited_containment_v3()
 
 pub(package) fn machine_fresh_workload_associate_v3(storage: MachineStorageOwnerV1,
         custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2,
         custody_generation: i64) -> Result<(), text>:
     val record = state.record_v3()?
     val id = state.native_id_v2()?
+    # A workload that already exited has no process to capture, so it is never associated. Its start is
+    # proven only by this sample and one confirmation agreeing; the caller derives that from the retained
+    # outputs (exited_start_v3). A disagreeing confirmation latches like every other association failure.
+    val evidence_before = machine_fresh_record_start_evidence_v3(record, id, state.output_v2("inspect")?)?
+    if evidence_before == MachineFreshWorkloadStartEvidenceV3.NeverStarted: return Err("machine-fresh-workload-running-unproven")
+    if evidence_before == MachineFreshWorkloadStartEvidenceV3.Exited:
+        val again = machine_fresh_workload_run_v3(storage, custody, state, custody_generation, LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", None)?
+        val evidence_after = machine_fresh_record_start_evidence_v3(record, id, again.output)?
+        if not machine_fresh_workload_exited_start_confirmed_v3(evidence_before, evidence_after):
+            return Err("machine-fresh-workload-start-evidence-changed")
+        return Ok(())
     val before = machine_fresh_record_inspect_v3(record, id, state.output_v2("inspect")?)?
     val binding = sha256_text(machine_fresh_record_id_v3(record)? + "\n" + id + "\n" + state.output_v2("inspect")?)
-    val captured = state.capture_subject_v2(before, binding)?
+    val captured = state.capture_subject_v2(before, binding)
+    if captured.is_err(): return workload_association_exit_v3(storage, custody, state, custody_generation, captured.unwrap_err())
     val confirmed = machine_fresh_workload_run_v3(storage, custody, state, custody_generation, LinuxFreshWorkloadActionV2.Inspect, "inspect-confirm", nil)?
+    val exit_evidence = machine_fresh_record_start_evidence_v3(record, id, confirmed.output)
+    if exit_evidence.is_ok() and exit_evidence.unwrap() == MachineFreshWorkloadStartEvidenceV3.Exited:
+        return workload_association_exit_v3(storage, custody, state, custody_generation, "")
     val after = machine_fresh_record_inspect_v3(record, id, confirmed.output)?
     val command = machine_fresh_record_command_v3(record, LinuxFreshWorkloadActionV2.Inspect, id)?
     val evidence = state.validate_subject_v2(custody, command, before, after)?
@@ -196,6 +261,41 @@ pub(package) fn machine_fresh_workload_settle_cpu_v3(storage: MachineStorageOwne
     val bound = state.validate_closure_v2(native)?
     val committed = workload_publish_v3(storage, state, state.prepare_settlement_v2(record, absence, time_sample_unix_micros_or_failure() / 1000)?)?
     state.mark_settled_v2()
+
+
+# Exited-start sibling of machine_fresh_workload_settle_cpu_v3 (which stays byte-unchanged and still refuses a
+# start with no captured subject). No native subject exists to close against, so the release rests on the
+# owner's own retained exited samples, its own completed Stop/Remove/Absence, and custody's kernel-side
+# whole-cohort-empty sample taken here, after them. A non-empty cohort or an unbound sample is a plain refusal:
+# nothing is latched, the charge stays retained and destroy may retry. Engine text never releases the charge.
+pub(package) fn machine_fresh_workload_settle_exited_start_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    if state.settled_v2()?: return Ok(())
+    val record = machine_fresh_record_cpu_v3(state.record_v3()?)?
+    if not state.exited_start_v3()?: return Err("machine-fresh-workload-exited-start-unproven")
+    val absence = state.action_state_v2("absence")?
+    if absence.state != "completed": return Err("machine-fresh-workload-absence-unproven")
+    val closure = custody.observe_probe_absence_v3(machine_fresh_workload_exited_cohort_command_v3(record, state.native_id_v2()?)?)?
+    val rows = state.prepare_exited_settlement_v3(absence, closure, time_sample_unix_micros_or_failure() / 1000)?
+    val committed = workload_publish_v3(storage, state, rows)?
+    state.mark_settled_v2()
+
+# Bounded sibling of machine_fresh_workload_settle_exited_start_v3 (which stays unchanged). The engine's own
+# helpers for a container that just exited are still leaving the cohort for a moment after Remove, and the
+# census refuses while they do. Each attempt is the whole settle above with a new full census; only the
+# census refusals the reducer names are repeated, and only inside its attempt and time bound. Nothing is
+# latched: at the bound the caller gets the named retryable refusal and may call destroy or cleanup again.
+pub(package) fn machine_fresh_workload_settle_exited_start_bounded_v3(storage: MachineStorageOwnerV1,
+        custody: LinuxFreshEpochSuccessorCustodyV1, state: MachineFreshWorkloadLifecycleV2) -> Result<(), text>:
+    val started = time_sample_monotonic_nanos_or_failure()
+    for attempt in 1..9:
+        val settled = machine_fresh_workload_settle_exited_start_v3(storage, custody, state)
+        if settled.is_ok(): return settled
+        match machine_fresh_workload_exited_cohort_retry_v3(settled.unwrap_err(), attempt, started, time_sample_monotonic_nanos_or_failure()):
+            case MachineFreshWorkloadCohortRetryV3.Resample(delay_ms): sleep_ms(delay_ms)
+            case MachineFreshWorkloadCohortRetryV3.Exhausted(reason): return Err(reason)
+            case MachineFreshWorkloadCohortRetryV3.Refuse(reason): return Err(reason)
+    Err("machine-fresh-workload-exited-settlement-cohort-retry-bound")
 
 
 # T-01 sibling of machine_fresh_workload_settle_cpu_v3 (which stays byte-unchanged): the same body with the CpuV2
@@ -242,10 +342,12 @@ pub(package) fn machine_fresh_workspace_reserve_v3(storage: MachineStorageOwnerV
 pub(package) fn machine_fresh_cpu_reserve_v3(storage: MachineStorageOwnerV1,
         state: MachineFreshWorkloadLifecycleV2, epoch: MachineFreshEpochRecordV1,
         initial_commit: text, scope: ContainerHostScopeV2, actual: MachineLocalPrincipalSnapshotV1,
-        request: ContainerExecutionRequestV2, template: GroupProcessStreamLaunchV2) -> Result<MachineFreshWorkloadRecordV2, text>:
+        request: ContainerExecutionRequestV2, template: GroupProcessStreamLaunchV2,
+        admission: LinuxFreshWorkloadAdmissionV2) -> Result<MachineFreshWorkloadRecordV2, text>:
     if template.profile_v3.is_none(): return Err("machine-fresh-workload-profile-required")
-    val record = machine_fresh_workload_record_v2(epoch, initial_commit, scope, request,
-        actual.principal_id, actual.identity_digest, template.profile_v3.unwrap().helper_cpu.cpu_millis, template.memory_limit_bytes)?
+    val record = machine_fresh_workload_record_admitted_v2(epoch, initial_commit, scope, request,
+        actual.principal_id, actual.identity_digest, template.profile_v3.unwrap().helper_cpu.cpu_millis, template.memory_limit_bytes,
+        admission)?
     val existing = state.installed_record_v2()
     if existing.is_ok(): return if existing.unwrap() == record: state.record_v2() else: Err("machine-fresh-workload-request-changed")
     val now = time_sample_unix_micros_or_failure() / 1000

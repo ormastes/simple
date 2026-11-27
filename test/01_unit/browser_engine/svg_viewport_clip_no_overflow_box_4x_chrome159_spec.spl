@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Purpose: Pin that an svg after text at a fractional pen clips its shapes at
+its own shifted device viewport at k=4 on a page that has NO `overflow`
+clip box, against Chrome 159. `clip_device_offset_owner_chrome159_spec` AC-4
+pins the same svg on a page that also has `overflow:hidden` boxes; there the
+device-clip pass runs. PR #12165 made the pass return early unless some node
+owns an overflow clip, so on a page without one the svg viewport clip stayed
+k x its whole-CSS-px box and cut the shifted shape's last device column (the
+catalog `animation` page lost the svg rect's right two columns and top row,
+4x 15997 -> 16795 mismatching px).
+Audience: web renderer device-scale pass (Draw IR clip rects).
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=4`, window
+400x300. Runs are device columns whose pixel is blue (b > 200, r < 128).
+
+| case | device row | Chrome runs | base runs |
+|------|-----|-------------|-----------|
+| `ab <svg width=40>` rect 60 wide, no overflow box | 240 | 169..328 | 169..327 |
+"""
+
+"""
+Traceability: REQ-WEB-CLIP-DEVICE-OFFSET-OWNER-001 — at device scale a clip edge follows the device offset of the box that owns it.
+"""
+# @tag: unit, browser_engine, device_scale, clip, svg, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+val K: i32 = 4
+
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}</style></head><body><div style=\"height:50.75px\"></div><div style=\"padding-left:20px\">ab <svg width=\"40\" height=\"20\"><rect width=\"60\" height=\"20\" fill=\"#00f\"></rect></svg></div></body></html>"
+
+var g_px: [u32] = []
+
+fn _px() -> [u32]:
+    if g_px.len() == 0:
+        g_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, K, "cpu_simd")
+    g_px
+
+# Blue runs " a..b" on device row y between device columns x0 and x1.
+fn _runs(y: i32, x0: i32, x1: i32) -> text:
+    val px = _px()
+    val w = CSS_W * K
+    var out = ""
+    var x = x0
+    var inr = false
+    var start = 0
+    while x <= x1:
+        var blue = false
+        if x < x1:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 200 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+describe "An svg viewport clip follows its own device offset without an overflow box (Chrome 159, k=4)":
+    it "AC-1: an svg at a fractional pen clips its rect at device column 328 on a page with no overflow clip":
+        expect(_px().len()).to_equal((CSS_W * K * CSS_H * K) as i64)
+        expect(_runs(240, 150, 400)).to_equal(" 169..328")

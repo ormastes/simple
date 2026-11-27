@@ -10,12 +10,16 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 
 ## Counts
 
-- ARCHIVE_EVIDENCE: 5
+- ARCHIVE_EVIDENCE: 5 (owner: keep)
 - BOTH: 3
 - DEAD: 1
-- DEAD_CANDIDATE: 9
+- DEAD_CANDIDATE: 8 (owner: keep)
 - OWNED_HELLO_SANITY: 13
-- P3_PLUS_ONLY: 53 (+1 sdk-observer, -1 durable_wal_fsync)
+- P3_PLUS_ONLY: 33 (net, after 21 rows moved to the four classes below; includes sdk-observer and durable_wal_fsync)
+- INDEPENDENT_ORACLE: 9 (policy exception, stays Python)
+- BLOCKED: 5 (see `python_test_oracle_piped_process_gaps_2026-11-27.md`)
+- BENCHMARK_FIXTURE: 1 (kept)
+- PERF_LANE: 6 (owned by the perf lane)
 - PRE_P2_ONLY: 20
 
 ## Files
@@ -23,11 +27,11 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | file | class | callers | note |
 |---|---|---|---|
 | `build/review/p3fix-caret2-20261111-logs/devhub_interpreter_driver.py` | DEAD | - | tracked debris under build/review; zero references; deleted in this PR |
-| `doc/01_research/domain/simple_clang_header_cache_2026-09-25/evidence/run_probes.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete |
-| `doc/08_tracking/bug/evidence/runtime_value_get_type_2026_11_14/run_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/cache_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/extract.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete |
-| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete |
+| `doc/01_research/domain/simple_clang_header_cache_2026-09-25/evidence/run_probes.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
+| `doc/08_tracking/bug/evidence/runtime_value_get_type_2026_11_14/run_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/cache_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/extract.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
+| `doc/08_tracking/bug/evidence/target_profile_2026_11_14/run_probe.py` | ARCHIVE_EVIDENCE | - | bug/research evidence script, not executed by any phase; owner decides archive vs delete; owner decision 2026-11-27: keep (backs bug reports) |
 | `scripts/audit/unchanged-materialized-alias.py` | P3_PLUS_ONLY | scripts/audit/direct-env-runtime-guard.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/bench/checker-performance.py` | P3_PLUS_ONLY | test/01_unit/scripts/checker_performance_harness_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/bootstrap/bootstrap-module-progress.py` | BOTH | scripts/bootstrap/bootstrap-phase-verification.shs | bootstrap-phase-verification.shs runs for p2 and p3/p4 |
@@ -55,21 +59,21 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/bootstrap/tests/sanity-base-controls-test.py` | OWNED_HELLO_SANITY | .github/workflows/repo-hygiene.yml | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/bootstrap/tests/windows-collector-root-reap-test.py` | PRE_P2_ONLY | .github/workflows/repo-hygiene.yml | seed/stage2/phase1 bootstrap path or its regression test |
 | `scripts/bootstrap/tests/windows-output-root-env-test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
-| `scripts/bootstrap/tool-code-authority.py` | BOTH | scripts/bootstrap/lib/product-tool-authority.shs scripts/bootstrap/run-bootstrap-test-wave.py | product-tool-authority.shs (stage2 products and p3 tool products) |
+| `scripts/bootstrap/tool-code-authority.py` | BOTH | scripts/bootstrap/lib/product-tool-authority.shs scripts/bootstrap/run-bootstrap-test-wave.py | product-tool-authority.shs (stage2 products and p3 tool products). **Twin: `scripts/bootstrap/tool-code-authority.spl`** — `product-tool-authority.shs` routes producer phase3/phase4 to it on `SIMPLE_VERIFIED_STAGE_BINARY` + `SIMPLE_VERIFIED_STAGE_PIN` (fails closed, no Python fallback); phase1-2 stay on Python. Parity: `scripts/bootstrap/tests/tool-code-authority-twin-parity-test.shs`, routing: `product-tool-authority-routing-test.shs` (13/13 + 6/6). Perf: median 42 s vs Python 11 s on the 499-member closure — filed `doc/08_tracking/bug/tool_code_authority_twin_slower_than_python_2026-11-27.md`. verification-pending |
 | `scripts/build/tests/run-build-test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
 | `scripts/check/check-bootstrap-phase-feature-matrix.py` | P3_PLUS_ONLY | test/01_unit/scripts/bootstrap_phase_feature_matrix_test.py | stage3/stage4 (p3+) path |
 | `scripts/check/check-bootstrap-phase-live.py` | P3_PLUS_ONLY | scripts/bootstrap/stage4-tooling-matrix.shs test/01_unit/scripts/bootstrap_phase_live_test.py | stage3/stage4 (p3+) path |
-| `scripts/check/check-coff-partial-link.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
-| `scripts/check/check-coff-projection.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
-| `scripts/check/check-focused-native-output.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
+| `scripts/check/check-coff-partial-link.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
+| `scripts/check/check-coff-projection.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
+| `scripts/check/check-focused-native-output.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
 | `scripts/check/check-rt-c-contract-compile.py` | P3_PLUS_ONLY | config/check/must_check_gates.sdn scripts/check/run-rt-map-checks.shs test/01_unit/app/check/rt_c_contract_compile_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/check/check-rt-host-map.py` | P3_PLUS_ONLY | .github/workflows/code-idiom-gates.yml config/check/must_check_gates.sdn scripts/check/check-rt-c-contract-compile.py +3 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/check/check-rt-pointer-ref-map.py` | P3_PLUS_ONLY | .github/workflows/code-idiom-gates.yml config/check/must_check_gates.sdn scripts/check/check-rt-c-contract-compile.py +4 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/check/check-runtime-binary-size-matched-link.py` | P3_PLUS_ONLY | scripts/check/check-runtime-binary-size-startup-cohort.shs test/01_unit/scripts/runtime_binary_size_startup_cohort_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `scripts/check/check-windows-cross-caller.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
-| `scripts/check/check-windows-cross-import-authority.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
-| `scripts/check/check-windows-private-root-sdk.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
-| `scripts/check/classify-compiled-check-results.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
+| `scripts/check/check-windows-cross-caller.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
+| `scripts/check/check-windows-cross-import-authority.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
+| `scripts/check/check-windows-private-root-sdk.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
+| `scripts/check/classify-compiled-check-results.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
 | `scripts/check/compiled-check-tree.py` | P3_PLUS_ONLY | scripts/check/classify-compiled-check-results.py test/01_unit/scripts/compiled_check_tree_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/check/diagnose_macos_existing_hostarch.py` | P3_PLUS_ONLY | .github/workflows/macos-existing-candidate-hostarch-diagnostic.yml .github/workflows/macos-phase23-evidence.yml | port blocked: runs inside lldb's embedded Python (`command script import`, `import lldb`); needs owner exception |
 | `scripts/check/lib/bootstrap-stage3/sanity-base-controls.py` | OWNED_HELLO_SANITY | scripts/bootstrap/tests/sanity-base-controls-test.py scripts/check/lib/bootstrap-stage3/sanity.shs | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
@@ -85,15 +89,15 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `scripts/check/run-item5-matched-app-performance.py` | OWNED_HELLO_SANITY | - | owned by hello-sanity lane (pre-p2 trust gates, hash-pinned); not touched here |
 | `scripts/generate/public_suffix_idna_aliases.py` | P3_PLUS_ONLY | scripts/generate/generate-public-suffix-list.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
 | `scripts/resource/freebsd-reaper-regression.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `scripts/test/test-arm32-authenticated-syscall-abi.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place |
+| `scripts/test/test-arm32-authenticated-syscall-abi.py` | DEAD_CANDIDATE | - | no caller; repo_hygiene debt doc marks it owner-active (touched >=2026-11-23); left in place; owner decision 2026-11-27: keep (owner-active) |
 | `scripts/test/test-darwin-footprint-guard.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` | P3_PLUS_ONLY | scripts/tool/renderdoc-export-events.shs test/02_integration/tool/renderdoc_exporter_contract_test.shs | port blocked: runs inside qrenderdoc embedded Python |
-| `scripts/tool/renderdoc-target-control-trigger.py` | P3_PLUS_ONLY | scripts/check/check-renderdoc-chrome-target-control.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | P3_PLUS_ONLY | scripts/tool/riscv64-unknown-elf-gcc-wrapper.cmd scripts/tool/riscv64-unknown-elf-gxx-wrapper.cmd | dev toolchain wrapper (exec by .cmd shims) |
+| `scripts/tool/renderdoc-qrenderdoc-python-smoke.py` | P3_PLUS_ONLY | scripts/tool/renderdoc-export-events.shs test/02_integration/tool/renderdoc_exporter_contract_test.shs | EXCEPTION (owner default 2026-11-27): runs inside qrenderdoc embedded Python (`import renderdoc`); stays Python |
+| `scripts/tool/renderdoc-target-control-trigger.py` | P3_PLUS_ONLY | scripts/check/check-renderdoc-chrome-target-control.shs | EXCEPTION (owner default 2026-11-27): runs inside qrenderdoc embedded Python (`import renderdoc`); stays Python |
+| `scripts/tool/riscv64-unknown-elf-tool-wrapper.py` | PORTED 2026-11-27 | scripts/tool/riscv64-unknown-elf-{gcc,gxx}-wrapper.cmd | now `scripts/tool/riscv64-unknown-elf-tool-wrapper.spl` (+ `scripts/tool/lib/riscv64_tool_wrapper_policy.spl`, spec `test/01_unit/scripts/riscv64_tool_wrapper_spec.spl`); `.py` deleted |
 | `test/00_quick/bootstrap/stage3_cgroupfs_kernel.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
 | `test/00_unit/scripts/stage4_retained_self_evidence_test.py` | P3_PLUS_ONLY | - | stage3/stage4 (p3+) path |
-| `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/01_unit/runtime/windows_terminal_raw_bytes/run-term-byte-fixtures.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
+| `test/01_unit/runtime/windows_terminal_raw_bytes/project-controlled-provider.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |
+| `test/01_unit/runtime/windows_terminal_raw_bytes/run-term-byte-fixtures.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |
 | `test/01_unit/scripts/bootstrap_campaign_nested_session_test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `test/01_unit/scripts/bootstrap_essential_apps_gate_test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `test/01_unit/scripts/bootstrap_phase_feature_matrix_test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
@@ -103,36 +107,36 @@ Callers = tree files outside `doc/`, `*.md` and the hygiene baseline naming the 
 | `test/01_unit/scripts/native_aot_suite_contract_test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `test/01_unit/scripts/process_group_bounded_log_windows_test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
 | `test/01_unit/scripts/windows_collector_helper_hash_test.py` | PRE_P2_ONLY | - | seed/stage2/phase1 bootstrap path or its regression test (no caller: standalone test or unwired; owner review) |
-| `test/02_integration/app/fixtures/lsp_stdio_live_protocol_linux_evidence.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/02_integration/app/lsp_native_stdio_protocol_test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/02_integration/app/mcp_native_stdio_protocol_test.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py` | P3_PLUS_ONLY | - | port blocked: exercises kernel_wrapper.py |
-| `test/05_perf/startup/class_a/fixtures/class_a.py` | P3_PLUS_ONLY | scripts/check/check-startup-class-a-matrix.shs test/05_perf/startup/class_a/startup_class_a_schema_contract_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/database/sqlcipher4/devhub1_crypto_oracle.py` | P3_PLUS_ONLY | test/02_integration/app/devhub/messenger/devhub1_oss_interop_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/database/sqlcipher4/gen_boundary_oracles.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/fixtures/database/sqlcipher4/gen_dense_messenger_fixture.py` | P3_PLUS_ONLY | test/fixtures/database/sqlcipher4/dense_ground_truth.json test/support/devhub_messenger_dense.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/database/sqlcipher4/gen_sqlcipher4_fixture.py` | P3_PLUS_ONLY | test/01_unit/lib/database/codec/sqlcipher4_independent_oracle_spec.spl test/01_unit/lib/database/server/storage_port_spec.spl test/02_integration/app/devhub/messenger/sqlcipher_messenger_e2e_spec.spl +1 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/database/sqlite/gen_fixtures.py` | P3_PLUS_ONLY | test/01_unit/lib/database/sqlite_format/header_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/devhub/fresh_secured_db/provision.py` | P3_PLUS_ONLY | build/review/p3fix-caret1-20261111.sdn build/review/p3fix-caret2-20261111.sdn +4 | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/devhub/native_http_curl/verify_loopback.py` | P3_PLUS_ONLY | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/devhub/native_minio_binary_put/verify_health_cli.py` | P3_PLUS_ONLY | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/fixtures/devhub/native_minio_binary_put/verify_loopback.py` | P3_PLUS_ONLY | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/perf/bench/durable_wal_fsync.py` | DEAD_CANDIDATE | - (mentioned by name in test/05_perf/bench/durable_wal_fsync.{shs,spl}, not exec'd) | superseded by the Simple bench twin; owner confirms before delete |
-| `test/perf/dbserver/live_pgbench_compare.py` | P3_PLUS_ONLY | test/perf/dbserver/test_live_pgbench_compare.py | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/perf/dbserver/pgwire_smoke_client.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/perf/dbserver/test_live_pgbench_compare.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `test/perf/webserver/live_h2load_compare.py` | P3_PLUS_ONLY | test/05_perf/webserver/live_h2load_compare.shs test/perf/webserver/test_live_h2load_compare.py | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/perf/webserver/live_static_compare.py` | P3_PLUS_ONLY | test/01_unit/perf/live_static_compare_contract_test.shs | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) |
-| `test/perf/webserver/test_live_h2load_compare.py` | P3_PLUS_ONLY | - | repo gate / test oracle / perf or dev tool (runs on p3+ toolchain) (no caller: unwired) |
-| `tools/jupyter/kernel_wrapper.py` | P3_PLUS_ONLY | scripts/test/jupyter-docker-test.shs test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py test/03_system/tools/jupyter/jupyter_kernel_install_system_spec.spl +5 | port blocked: Jupyter kernel protocol host is Python |
-| `tools/jupyter/labextension/simple_labextension/__init__.py` | P3_PLUS_ONLY | - | port blocked: JupyterLab package shim |
+| `test/02_integration/app/fixtures/lsp_stdio_live_protocol_linux_evidence.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |
+| `test/02_integration/app/lsp_native_stdio_protocol_test.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |
+| `test/02_integration/app/mcp_native_stdio_protocol_test.py` | BLOCKED | - | BLOCKED on python_test_oracle_piped_process_gaps_2026-11-27.md (holds child stdin open; needs piped stderr, byte-safe I/O, env on the piped path) |
+| `test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py` | P3_PLUS_ONLY | - | EXCEPTION (owner default 2026-11-27): Jupyter kernel protocol host is Python by protocol; stays Python |
+| `test/05_perf/startup/class_a/fixtures/class_a.py` | BENCHMARK_FIXTURE | scripts/check/check-startup-class-a-matrix.shs test/05_perf/startup/class_a/startup_class_a_schema_contract_test.shs | kept: the Python contestant of the cross-language startup matrix (siblings class_a.c/.rs/.go/.js/Java); porting destroys the benchmark |
+| `test/fixtures/database/sqlcipher4/devhub1_crypto_oracle.py` | INDEPENDENT_ORACLE | test/02_integration/app/devhub/messenger/devhub1_oss_interop_spec.spl | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/database/sqlcipher4/gen_boundary_oracles.py` | INDEPENDENT_ORACLE | - | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/database/sqlcipher4/gen_dense_messenger_fixture.py` | INDEPENDENT_ORACLE | test/fixtures/database/sqlcipher4/dense_ground_truth.json test/support/devhub_messenger_dense.spl | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/database/sqlcipher4/gen_sqlcipher4_fixture.py` | INDEPENDENT_ORACLE | test/01_unit/lib/database/codec/sqlcipher4_independent_oracle_spec.spl test/01_unit/lib/database/server/storage_port_spec.spl test/02_integration/app/devhub/messenger/sqlcipher_messenger_e2e_spec.spl +1 | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/database/sqlite/gen_fixtures.py` | INDEPENDENT_ORACLE | test/01_unit/lib/database/sqlite_format/header_spec.spl | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/devhub/fresh_secured_db/provision.py` | INDEPENDENT_ORACLE | build/review/p3fix-caret1-20261111.sdn build/review/p3fix-caret2-20261111.sdn +4 | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/devhub/native_http_curl/verify_loopback.py` | INDEPENDENT_ORACLE | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/devhub/native_minio_binary_put/verify_health_cli.py` | INDEPENDENT_ORACLE | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/fixtures/devhub/native_minio_binary_put/verify_loopback.py` | INDEPENDENT_ORACLE | test/03_system/app/devhub/feature/minio_binary_put_spec.spl | independent oracle by design (non-Simple is the point); policy exception, stays Python; porting makes the spec compare Simple against Simple |
+| `test/perf/bench/durable_wal_fsync.py` | P3_PLUS_ONLY | - | NOT deleted (owner condition unmet, 2026-11-27): `test/05_perf/bench/durable_wal_fsync.shs` only `exec python3`s a byte-identical heredoc copy of this file, and `durable_wal_fsync.spl` measures the Simple runtime's fsync path (a different benchmark), so no pure-Simple twin covers the host-reference probe. Needs a real port of the .py and the .shs wrapper |
+| `test/perf/dbserver/live_pgbench_compare.py` | PERF_LANE | test/perf/dbserver/test_live_pgbench_compare.py | owned by the perf lane (live compare harnesses); not ported by the test-oracle lane |
+| `test/perf/dbserver/pgwire_smoke_client.py` | PERF_LANE | - | owned by the perf lane (live compare harnesses); not ported by the test-oracle lane |
+| `test/perf/dbserver/test_live_pgbench_compare.py` | PERF_LANE | - | owned by the perf lane (live compare harnesses); not ported by the test-oracle lane |
+| `test/perf/webserver/live_h2load_compare.py` | PERF_LANE | test/05_perf/webserver/live_h2load_compare.shs test/perf/webserver/test_live_h2load_compare.py | owned by the perf lane (live compare harnesses); not ported by the test-oracle lane |
+| `test/perf/webserver/live_static_compare.py` | PERF_LANE | test/01_unit/perf/live_static_compare_contract_test.shs | owned by the perf lane (live compare harnesses); not ported by the test-oracle lane |
+| `test/perf/webserver/test_live_h2load_compare.py` | PERF_LANE | - | owned by the perf lane (live compare harnesses); not ported by the test-oracle lane |
+| `tools/jupyter/kernel_wrapper.py` | P3_PLUS_ONLY | scripts/test/jupyter-docker-test.shs test/03_system/tools/jupyter/helpers/wrapper_transport_roundtrip.py test/03_system/tools/jupyter/jupyter_kernel_install_system_spec.spl +5 | EXCEPTION (owner default 2026-11-27): Jupyter kernel protocol host is Python by protocol; stays Python |
+| `tools/jupyter/labextension/simple_labextension/__init__.py` | P3_PLUS_ONLY | - | EXCEPTION (owner default 2026-11-27): Jupyter kernel protocol host is Python by protocol; stays Python |
 
 ## Follow-up PR plan
 
 1. This PR: census, policy text, delete the single DEAD file.
 2. P3_PLUS_ONLY ports by area (repo gates `check-rt-*` -> `.shs` for CI; test oracles / fixture generators; perf compares; stage3/stage4 helpers; dev tools). Host-embedded Python (`renderdoc-qrenderdoc`, Jupyter) is port-blocked and needs an owner exception.
 3. BOTH twins: `run-process-group-bounded-log-windows`, `bootstrap-module-progress`, `tool-code-authority` (Python kept for pre-p2, `.spl`/`.shs` twin for p3+ callers).
-4. DEAD_CANDIDATE / ARCHIVE_EVIDENCE rows need an owner call before deletion.
+4. DEAD_CANDIDATE and ARCHIVE_EVIDENCE rows: owner decided 2026-11-27 to keep all of them.
 
 Each port/twin: TDD, parity on identical inputs (stdout, exit code, receipt bytes), runtime vs Python measured.
 Related: `doc/08_tracking/bug/sanity_fresh_writer_pin_branch_skew_2026-11-27.md`.

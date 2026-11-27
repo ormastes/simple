@@ -685,6 +685,15 @@ pub(super) fn eval_call_expr(
             }
         }
         Expr::FieldAccess { receiver, field } => {
+            // `ns.Class` through a whole-module import: the owner-exact class
+            // of that module (same-named classes of several flattened modules).
+            if let Expr::Identifier(namespace) = receiver.as_ref() {
+                if crate::interpreter::owner_qualified_classes_enabled() && !env.is_local(namespace) {
+                    if let Some(class_name) = crate::interpreter::owner_qualified_namespace_class_symbol(namespace, field) {
+                        return Ok(Some(Value::Constructor { class_name }));
+                    }
+                }
+            }
             // Paren-less arg-less BDD matcher: `expect(x).to_be_nil` (or
             // `expect(x).not.to_be_nil`) parses as a FieldAccess, not a call.
             if super::super::is_argless_bdd_matcher(field) {

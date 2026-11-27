@@ -1173,9 +1173,12 @@ impl<'a> MirLowerer<'a> {
         if *is_generic_template || !fields.iter().all(|(_, t)| scalar(*t)) {
             return Ok(None);
         }
+        // An owner-exact flatten symbol displays under its source name; field
+        // reads keep the real owner symbol (vtable layout lookup).
         let name = name.clone();
+        let display_name = crate::interpreter::flatten_owner_source_name(&name).to_string();
         let fields: Vec<(String, TypeId)> = fields.clone();
-        let mut acc = self.emit_const_string(format!("{name}("))?;
+        let mut acc = self.emit_const_string(format!("{display_name}("))?;
         for (index, (field_name, field_ty)) in fields.into_iter().enumerate() {
             let label = if index == 0 {
                 format!("{field_name}: ")

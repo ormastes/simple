@@ -769,3 +769,32 @@ fn user_enum_shared_name_different_index_is_deterministic() {
     assert_eq!(hash_variant_discriminant("UeDdX"), 0);
     assert_eq!(hash_variant_discriminant("UeDdZ"), 1);
 }
+/// `rt_is_none_variant` is `rt_is_none` plus the stamp `rt_enum_new_none`
+/// leaves on a user variant named `None`: same enum id and discriminant built
+/// by plain `rt_enum_new` (another enum's first variant, a `Result`) never
+/// match, `rt_is_none` ignores the stamp, and an isolated-thread clone keeps it.
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+#[test]
+fn none_variant_stamp_is_read_only_by_rt_is_none_variant() {
+    use super::{rt_enum_new, rt_enum_new_none, rt_is_none, rt_is_none_variant};
+    let q_none = rt_enum_new_none(77, 0, RuntimeValue::NIL);
+    let q_none_payload = rt_enum_new_none(77, 2, RuntimeValue::from_int(4));
+    let col_red = rt_enum_new(79, 0, RuntimeValue::NIL);
+    let same_id_other = rt_enum_new(77, 0, RuntimeValue::NIL);
+    assert!(rt_is_none_variant(q_none) && rt_is_none_variant(q_none_payload));
+    assert!(!rt_is_none_variant(col_red) && !rt_is_none_variant(same_id_other));
+    // The stamp is invisible to the typed-optional test and the enum accessors.
+    assert!(!rt_is_none(q_none));
+    assert_eq!((super::rt_enum_id(q_none), super::rt_enum_discriminant(q_none)), (77, 0));
+    // nil and the builtin None, in both discriminant forms.
+    assert!(rt_is_none_variant(RuntimeValue::NIL) && rt_is_none_variant(super::rt_option_none()));
+    assert!(rt_is_none_variant(rt_enum_new(1, 1, RuntimeValue::NIL)));
+    assert!(!rt_is_none_variant(rt_enum_new(1, 0, RuntimeValue::from_int(3))));
+    // Result (id 0) with either discriminant, raw words.
+    assert!(!rt_is_none_variant(rt_enum_new(0, 0, RuntimeValue::from_int(3))));
+    assert!(!rt_is_none_variant(rt_enum_new(0, 1, RuntimeValue::NIL)));
+    assert!(!rt_is_none_variant(RuntimeValue::from_int(0)) && !rt_is_none_variant(RuntimeValue::from_int(5)));
+    let cloned = q_none.clone_for_isolated_thread().expect("enum clones");
+    assert!(cloned.0 != q_none.0 && rt_is_none_variant(cloned));
+    assert!(!rt_is_none_variant(col_red.clone_for_isolated_thread().expect("enum clones")));
+}

@@ -40,6 +40,59 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
     expr.ty == TypeId::NIL || hir_expr_definitely_returns(expr)
 }
 
+/// An arm whose value is only an EMPTY `[]` / `{}` literal (possibly through
+/// blocks, a nested match/if chain whose every value arm is such a literal).
+/// Its default element/key type is not evidence about the join type, so a
+/// concrete sibling must win (same rule `lower_if` applies to `[]`).
+/// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
+fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(true)
+}
+
+// Some(true) = weak literal, Some(false) = concrete value, None = bottom.
+fn weak_expr(expr: &HirExpr) -> Option<bool> {
+    if hir_arm_is_bottom(expr) {
+        return None;
+    }
+    match &expr.kind {
+        HirExprKind::Array(items) => Some(items.is_empty()),
+        HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
+        HirExprKind::Block(stmts) => weak_stmts(stmts),
+        HirExprKind::LetIn { body, .. } => weak_expr(body),
+        HirExprKind::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => join_weak(weak_expr(then_branch), weak_expr(else_branch)),
+        _ => Some(false),
+    }
+}
+
+fn weak_stmts(stmts: &[HirStmt]) -> Option<bool> {
+    match stmts.last() {
+        Some(HirStmt::Expr(expr)) => weak_expr(expr),
+        Some(HirStmt::If {
+            then_block,
+            else_block: Some(else_block),
+            ..
+        }) => join_weak(weak_stmts(then_block), weak_stmts(else_block)),
+        Some(HirStmt::Return(_)) => None,
+        _ => Some(false),
+    }
+}
+
+fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(x), Some(y)) => Some(x && y),
+    }
+}
+
+/// True when the arm value is concrete (not bottom, not a weak empty literal).
+fn hir_value_is_concrete(expr: &HirExpr) -> bool {
+    weak_expr(expr) == Some(false)
+}
+
 /// Value type of a lowered tail `if`/`else` statement: the first arm whose
 /// tail value is neither bottom (NIL) nor an empty `[]` literal (its default
 /// element type is not evidence, see `lower_if`); an empty literal is used
@@ -50,7 +103,8 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
     fn arm_type(stmts: &[HirStmt]) -> Option<(TypeId, bool)> {
         match stmts.last() {
             Some(HirStmt::Expr(expr)) if !hir_arm_is_bottom(expr) => {
-                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty());
+                let empty = matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty())
+                    || matches!(&expr.kind, HirExprKind::Dict(pairs) if pairs.is_empty());
                 Some((expr.ty, empty))
             }
             Some(HirStmt::If { .. }) => tail_if_type(stmts),
@@ -76,6 +130,39 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
         }
     }
     tail_if_type(stmts).map(|(ty, _)| ty)
+}
+
+/// True when the tail value of `expr` (through do-blocks, nested if/match) is
+/// an explicit `[x; n]` repeat. That form carries real element evidence even
+/// when `n` is 0 (it lowers to an empty HIR array), so it is never "weak".
+fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
+    match expr {
+        Expr::ArrayRepeat { .. } => true,
+        Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
+        Expr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            ast_expr_tail_is_array_repeat(then_branch)
+                || else_branch.as_deref().is_some_and(ast_expr_tail_is_array_repeat)
+        }
+        Expr::Match { arms, .. } => arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        _ => false,
+    }
+}
+
+fn ast_stmts_tail_is_array_repeat(stmts: &[ast::Node]) -> bool {
+    match stmts.last() {
+        Some(ast::Node::Expression(e)) => ast_expr_tail_is_array_repeat(e),
+        Some(ast::Node::Match(m)) => m.arms.iter().any(|a| ast_stmts_tail_is_array_repeat(&a.body.statements)),
+        Some(ast::Node::If(i)) => {
+            ast_stmts_tail_is_array_repeat(&i.then_block.statements)
+                || i.elif_branches.iter().any(|(_, _, b)| ast_stmts_tail_is_array_repeat(&b.statements))
+                || i.else_block.as_ref().is_some_and(|b| ast_stmts_tail_is_array_repeat(&b.statements))
+        }
+        _ => false,
+    }
 }
 
 fn expr_is_empty_array_literal(expr: &Expr) -> bool {
@@ -217,6 +304,16 @@ impl Lowerer {
         }
     }
 
+    /// Both types are arrays, or both are dicts: only then may a weak empty
+    /// literal defer to its sibling (an unrelated aggregate keeps the default).
+    fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        matches!(
+            (self.module.types.get(a), self.module.types.get(b)),
+            (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
+                | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
+        )
+    }
+
     /// Lower an if expression to HIR
     ///
     /// Result type follows the then branch, except an empty array literal
@@ -262,6 +359,17 @@ impl Lowerer {
         // no extra handling: `ty` already defaults to `then_hir.ty` above.
         if let Some(other) = else_hir.as_ref() {
             if hir_arm_is_bottom(&then_hir) && !hir_arm_is_bottom(other) {
+                ty = other.ty;
+            }
+            // A then-arm that is only an empty `[]`/`{}` (directly or through a
+            // nested match/if chain, see `hir_value_is_weak_empty`) is not
+            // evidence about the join type: a concrete else-arm wins.
+            if hir_value_is_weak_empty(&then_hir)
+                && hir_value_is_concrete(other)
+                && other.ty != TypeId::ANY
+                && self.same_collection_kind(then_hir.ty, other.ty)
+                && !ast_expr_tail_is_array_repeat(then_branch)
+            {
                 ty = other.ty;
             }
         }
@@ -739,7 +847,15 @@ impl Lowerer {
         // `case Err(e): panic(e); case Ok(v): v` report `Nil` instead of
         // `v`'s real type.
         let then_is_bottom = hir_arm_is_bottom(&then_branch);
-        let result_ty = if then_is_bottom { else_branch.ty } else { then_ty };
+        // A weak empty `[]`/`{}` arm must not win the join over a concrete
+        // sibling (its default element type is not evidence).
+        let then_is_weak_vs_concrete = !then_is_bottom
+            && hir_value_is_weak_empty(&then_branch)
+            && hir_value_is_concrete(&else_branch)
+            && else_branch.ty != TypeId::ANY
+            && self.same_collection_kind(then_ty, else_branch.ty)
+            && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
+        let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -782,6 +898,9 @@ impl Lowerer {
                 // never true for an absent `text?` (rt_string_eq(nil, nil) == 0),
                 // so the arm silently never matched.
                 if matches!(lit_hir.kind, HirExprKind::Nil) {
+                    if subject_ty == TypeId::ANY {
+                        return Ok(self.erased_none_arm_condition(&subject_ref));
+                    }
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -942,6 +1061,10 @@ impl Lowerer {
 
                 // Special handling for None - check both nil and enum None
                 if variant == "None" && !subject_enum_owns_variant {
+                    // An untyped subject can hold a user enum's own `None`.
+                    if subject_ty == TypeId::ANY && matches!(pattern_enum.as_str(), "_" | "Option") {
+                        return Ok(self.erased_none_arm_condition(&subject_ref));
+                    }
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -1107,11 +1230,14 @@ impl Lowerer {
     }
 
     /// Bare-name runtime id of each user enum declaring a `Some` or `None`
-    /// variant, with its `Some` discriminant when it has one. Such values are
-    /// not the raw form of an optional, so a bare `Some` arm over an untyped
-    /// subject only matches them through their own `Some` variant. Cached per
-    /// type-registry size: it is consulted for every erased `Some` arm.
-    pub(crate) fn user_option_shaped_enums(&mut self) -> std::sync::Arc<Vec<(i64, Option<i64>)>> {
+    /// variant, with its `Some` discriminant when it has one and whether it
+    /// declares `None`.
+    /// Such values are not the raw form of an optional, so a bare `Some` arm
+    /// over an untyped subject only matches them through their own `Some`
+    /// variant, and a bare `None` arm also matches their own `None`. Cached
+    /// per type-registry size: it is consulted for every erased `Some`/`None`
+    /// arm.
+    pub(crate) fn user_option_shaped_enums(&mut self) -> std::sync::Arc<Vec<(i64, Option<i64>, bool)>> {
         let count = self.module.types.type_count();
         if let Some((at, cached)) = &self.user_option_shaped_cache {
             if *at == count {
@@ -1119,7 +1245,7 @@ impl Lowerer {
             }
         }
         let builtin_global_option = self.global_option_is_builtin();
-        let mut out: Vec<(i64, Option<i64>)> = Vec::new();
+        let mut out: Vec<(i64, Option<i64>, bool)> = Vec::new();
         for (tid, ty) in self.module.types.iter() {
             let HirType::Enum {
                 name,
@@ -1138,14 +1264,14 @@ impl Lowerer {
                 continue;
             }
             let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
-            if out.iter().any(|(seen, _)| *seen == id) {
+            if out.iter().any(|(seen, _, _)| *seen == id) {
                 continue;
             }
             let some_disc = variants
                 .iter()
                 .any(|(v, _)| v == "Some")
                 .then(|| self.owner_variant_discriminant(tid, Some(name.as_str()), "Some", "hir user Some arm"));
-            out.push((id, some_disc));
+            out.push((id, some_disc, variants.iter().any(|(v, _)| v == "None")));
         }
         // Enums seen only through the project-wide table count too.
         if let Some(defs) = self.global_enum_defs.as_ref() {
@@ -1156,7 +1282,7 @@ impl Lowerer {
                     continue;
                 }
                 let id = i64::from(crate::codegen::shared::enum_runtime_type_id(name));
-                if out.iter().any(|(seen, _)| *seen == id) {
+                if out.iter().any(|(seen, _, _)| *seen == id) {
                     continue;
                 }
                 let owner = self.module.types.lookup(name).unwrap_or(TypeId::ANY);
@@ -1164,7 +1290,7 @@ impl Lowerer {
                     .iter()
                     .any(|(v, _)| v == "Some")
                     .then(|| self.owner_variant_discriminant(owner, Some(name.as_str()), "Some", "hir user Some arm"));
-                out.push((id, some_disc));
+                out.push((id, some_disc, variants.iter().any(|(v, _)| v == "None")));
             }
         }
         let out = std::sync::Arc::new(out);
@@ -1264,7 +1390,7 @@ impl Lowerer {
             ty: TypeId::BOOL,
         };
         let mut all_ok: Option<HirExpr> = None;
-        for &(enum_id, some_disc) in shaped.iter() {
+        for &(enum_id, some_disc, _) in shaped.iter() {
             // Not this enum (the value's own discriminant under E's identity
             // fails), or it is E's `Some` variant.
             let not_e = HirExpr {
@@ -1334,7 +1460,7 @@ impl Lowerer {
         let shaped = self.user_option_shaped_enums();
         let mut chain = unwrap.clone();
         let mut any_some_owner = false;
-        for &(enum_id, some_disc) in shaped.iter() {
+        for &(enum_id, some_disc, _) in shaped.iter() {
             let Some(d) = some_disc else {
                 continue;
             };
@@ -1366,10 +1492,31 @@ impl Lowerer {
         }
         // A user `enum Option` shares id 1 with the builtin on the JIT lane,
         // so the id split cannot skip its payload read.
-        if shaped.iter().any(|&(enum_id, _)| enum_id < 2) {
+        if shaped.iter().any(|&(enum_id, _, _)| enum_id < 2) {
             return chain;
         }
         Self::erased_enum_id_split(subject, ctx, payload_ty, unwrap, chain)
+    }
+
+    /// Arm test for a bare `None` over an untyped subject. The interpreter
+    /// matches nil, the builtin `None`, and any enum value whose own variant is
+    /// named `None`; `rt_is_none` knows only the first two. A user variant
+    /// named `None` is stamped at construction (`enum_constructor_symbol` ->
+    /// `rt_enum_new_none`), so `rt_is_none_variant` answers all three in one
+    /// call with no knowledge of the enum; `Result` and other variants carry no
+    /// stamp. A module that sees no `None`-declaring user enum keeps the plain
+    /// `rt_is_none`.
+    /// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+    pub(crate) fn erased_none_arm_condition(&mut self, subject: &HirExpr) -> HirExpr {
+        let shaped = self.user_option_shaped_enums();
+        let user_none = shaped.iter().any(|&(enum_id, _, has_none)| enum_id >= 2 && has_none);
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: if user_none { "rt_is_none_variant" } else { "rt_is_none" }.to_string(),
+                args: vec![subject.clone()],
+            },
+            ty: TypeId::BOOL,
+        }
     }
 
     /// Arm test for a top-level builtin-optional `case Some(p):`: presence
@@ -1768,7 +1915,16 @@ impl Lowerer {
                 // path below, became irrefutable, and `Ok(nil)` took the
                 // `Ok(Some(c))` arm with `c` unbound.
                 // Bug: doc/08_tracking/bug/native_enum_nil_payload_pattern_2026_10_11.md
-                if self.is_builtin_optional_variant_name(variant) {
+                // `is_builtin_optional_variant_name` is a MODULE-wide name test:
+                // any user enum in the flattened module declaring a `None`/`Some`
+                // variant turns it false, and a `Result<Struct?, E>`'s `Ok(None)`
+                // then fell to the discriminant test below, which is false on the
+                // raw-nil form (match exhausted). The slot's own static type
+                // decides first: a builtin-`Option` slot is always presence/absence.
+                // Bug: doc/08_tracking/bug/native_build_jit_nested_option_result_match_exhausted_2026-11-27.md
+                if self.is_builtin_optional_variant_name(variant)
+                    || ((variant == "Some" || variant == "None") && self.slot_is_builtin_option(slot_ty))
+                {
                     let probe = if variant == "None" { "rt_is_none" } else { "rt_is_some" };
                     let presence = HirExpr {
                         kind: HirExprKind::BuiltinCall {
@@ -2333,6 +2489,25 @@ impl Lowerer {
         }
     }
 
+    /// Is a slot of type `ty` an optional (`T?`) in nil-boxed form? True for the
+    /// builtin generic `Option<T>` enum (not a user enum named `Option`) and for
+    /// a source-declared `T?` (`optional_inner`; a genuine pointer never gets
+    /// Optional semantics). `rt_is_none` checks the enum id, so `T` may itself
+    /// be an enum that owns a `None`/`Some` variant.
+    pub(crate) fn slot_is_builtin_option(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, generic_params, .. }) => {
+                name == "Option"
+                    && !generic_params.is_empty()
+                    && variants.len() == 2
+                    && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
+                    && variants.iter().any(|(n, p)| n == "None" && p.is_none())
+            }
+            Some(HirType::Pointer { .. }) => self.module.types.optional_inner(ty).is_some(),
+            _ => false,
+        }
+    }
+
     /// Stable runtime identity for a statically known enum. Zero keeps the
     /// legacy discriminant-only lane for erased or unresolved user values.
     pub(crate) fn enum_runtime_id_for_type(&self, subject_ty: TypeId) -> i64 {
@@ -2687,7 +2862,12 @@ impl Lowerer {
                 // join took `[]`'s default `[i32]`, and every element read was
                 // narrowed to i32 under the JIT (italic font face lost).
                 // doc/08_tracking/bug/jit_if_arm_tail_if_stmt_typed_nil_italic_lost_2026-11-23.md
-                simple_parser::ast::Node::If(_) if index == last_index => {
+                // A tail `match` STATEMENT is the block's value exactly like a tail
+                // `if`: a nested `match` as the only body of an outer match arm
+                // otherwise typed the whole block NIL/ANY, so `files[k].as_str()`
+                // on the bound payload reached codegen with an erased receiver
+                // (CODEGEN-AMBIGUOUS-METHOD).
+                simple_parser::ast::Node::If(_) | simple_parser::ast::Node::Match(_) if index == last_index => {
                     let lowered = self.lower_node(stmt, ctx)?;
                     if let Some(ty) = hir_tail_if_value_type(&lowered) {
                         result_ty = ty;

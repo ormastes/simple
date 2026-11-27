@@ -124,6 +124,7 @@ fn qualified_runtime_arity(method: &str, rt_name: &str) -> Option<usize> {
         | "rt_dict_keys"
         | "rt_dict_values"
         | "rt_is_none"
+        | "rt_is_none_variant"
         | "rt_is_some"
         | "rt_is_present"
         | "rt_enum_payload" => Some(1),
@@ -2569,6 +2570,7 @@ impl LlvmBackend {
                                 | "rt_index_set"
                                 | "rt_contains"
                                 | "rt_is_none"
+                                | "rt_is_none_variant"
                                 | "rt_is_some"
                                 | "rt_is_present"
                                 | "rt_enum_check_discriminant"

@@ -1,0 +1,192 @@
+# Writes the Enrolled Linux Host signed fixtures that the canonical encoders can produce without a live Host.
+# Run in the guest as root with the self-hosted binary (check-linux-orchestrator-host-qemu.shs --run-specs):
+#   SIMPLE_ORCH_FIXTURE_KEY_STORE=<dir> SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT=<dir> SIMPLE_ORCH_FIXTURE_HOST_ROOT=<dir> \
+#   SIMPLE_ORCH_FIXTURE_MACHINE_PARENT=<dir> SIMPLE_ORCH_FIXTURE_INPUT_DIR=<dir> \
+#   SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST=<sha256 hex> [SIMPLE_ORCH_FIXTURE_CARET_REQUEST=<file>] \
+#     bin/simple run test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl
+# Optional: SIMPLE_ORCH_FIXTURE_CONTROLLER (fixture-controller), SIMPLE_ORCH_FIXTURE_APPROVER (fixture-approver),
+# SIMPLE_ORCH_FIXTURE_HOST_ID (simple-orch-host), SIMPLE_ORCH_FIXTURE_SCOPE (fixture-scope),
+# SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE (/etc/machine-id), SIMPLE_ORCH_FIXTURE_CARET_CONTROLLER (ctrl-qual).
+# Profiles (todo 481): SIMPLE_ORCH_FIXTURE_PROFILE_DIR (e.g. /etc/simple/container) plus the installed-host facts
+#   SIMPLE_ORCH_FIXTURE_PODMAN_VERSION (computes the observed engine identity; unset = BLOCKED provider-identity),
+#   SIMPLE_ORCH_FIXTURE_SERVICE_NAME, _SERVICE_UID, _SERVICE_GID, _PODMAN_PATH, _PODMAN_SHA256, _BROKER_SHA256 (no
+#   defaults; absent = BLOCKED) and _RUN_ROOT, _GRAPH_ROOT, _PARTITION_CGROUP, _HOST_UNIT, _PROVIDER_UNIT,
+#   _PROVIDER_SOCKET_UNIT, _BROKER_PATH, _SUBID_START/_COUNT, _WORKLOAD_BUILD_ROOT_PREFIX, _WORKLOAD_TERMINAL_MODE
+#   (defaults match the guest wrapper). engine-policy.sdn is written to SIMPLE_ORCH_FIXTURE_INPUT_DIR.
+# Each produced class prints `FIXTURE OK <class> <path>`; a class whose inputs are absent prints
+# `FIXTURE BLOCKED <class>: <reason>`; a refusal or an unset required variable prints
+# `FIXTURE ERROR <class>: <reason>`; the last line is always `FIXTURE DONE`.
+# Keys are fresh OS-entropy seeds on every run. The dispatch root is installed before any key is written and
+# keys are created exclusively, so re-running over a used guest overlay reports ERROR instead of rotating keys.
+use std.nogc_sync_mut.io_runtime.{env_get, file_write_exact}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_encode_v3
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.controller_dispatch_grant_clock_v1
+use test.fixtures.orchestrator.enrolled_host_signed_fixture_v1.*
+
+fn gen_env_v1(key: text, fallback: text) -> text:
+    val value = env_get(key)
+    if value == "": fallback else: value
+
+fn gen_machine_id_v1(path: text) -> Result<text, text>:
+    val source = file_read_regular_no_follow_bounded(path, 4096)?
+    var line = source
+    if line.ends_with("\n"): line = line.substring(0, line.len() - 1)
+    if line == "": return Err("empty machine id at " + path)
+    Ok(line)
+
+fn gen_inputs_v1() -> Result<EnrolledFixtureInputsV1, text>:
+    for key in ["SIMPLE_ORCH_FIXTURE_KEY_STORE", "SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT", "SIMPLE_ORCH_FIXTURE_HOST_ROOT",
+            "SIMPLE_ORCH_FIXTURE_MACHINE_PARENT", "SIMPLE_ORCH_FIXTURE_INPUT_DIR", "SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST"]:
+        if env_get(key) == "": return Err(key + " unset")
+    val now = controller_dispatch_grant_clock_v1()?
+    val machine_id = gen_machine_id_v1(gen_env_v1("SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE", "/etc/machine-id"))?
+    Ok(EnrolledFixtureInputsV1(controller_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_CONTROLLER", "fixture-controller"),
+        approver_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_APPROVER", "fixture-approver"),
+        principal: "fixture-operator", project: "fixture-project",
+        physical_host_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_HOST_ID", "simple-orch-host"),
+        service_scope_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_SCOPE", "fixture-scope"), native_machine_id: machine_id,
+        provider_identity_digest: env_get("SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST"),
+        machine_parent: env_get("SIMPLE_ORCH_FIXTURE_MACHINE_PARENT"), host_root: env_get("SIMPLE_ORCH_FIXTURE_HOST_ROOT"),
+        physical_cpu_millis: 8000, physical_memory_bytes: 8589934592, reserved_cpu_millis: 1000,
+        reserved_memory_bytes: 1073741824, now_ms: now))
+
+# Strict non-negative decimal (no sign, no spaces); Err names the variable.
+fn gen_number_v1(key: text, fallback: text) -> Result<i64, text>:
+    val value = gen_env_v1(key, fallback)
+    if value == "": return Err(key + " unset")
+    if value.byte_len() > 18: return Err(key + " not a decimal")
+    var number = 0
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return Err(key + " not a decimal")
+        number = number * 10 + (byte as i64 - 48)
+    Ok(number)
+
+fn gen_required_v1(key: text) -> Result<text, text>:
+    val value = env_get(key)
+    if value == "": return Err(key + " unset")
+    Ok(value)
+
+# Installed-host facts for the three profiles. UIDs, the podman path and both executable sha256 values have no
+# default: an absent one is BLOCKED, never a filler. Topology defaults match the guest wrapper's provisioning.
+fn gen_host_profile_v1() -> Result<EnrolledFixtureHostProfileInputsV1, text>:
+    val run_root = gen_env_v1("SIMPLE_ORCH_FIXTURE_RUN_ROOT", "/run/simple-host/podman")
+    Ok(EnrolledFixtureHostProfileInputsV1(authority_id: gen_env_v1("SIMPLE_ORCH_FIXTURE_AUTHORITY", "fixture-authority"),
+        service_name: gen_required_v1("SIMPLE_ORCH_FIXTURE_SERVICE_NAME")?,
+        service_uid: gen_number_v1("SIMPLE_ORCH_FIXTURE_SERVICE_UID", "")?,
+        service_gid: gen_number_v1("SIMPLE_ORCH_FIXTURE_SERVICE_GID", "")?,
+        subid_start: gen_number_v1("SIMPLE_ORCH_FIXTURE_SUBID_START", "200000")?,
+        subid_count: gen_number_v1("SIMPLE_ORCH_FIXTURE_SUBID_COUNT", "65536")?,
+        host_unit: gen_env_v1("SIMPLE_ORCH_FIXTURE_HOST_UNIT", "simple-orchestrator-host.service"),
+        provider_unit: gen_env_v1("SIMPLE_ORCH_FIXTURE_PROVIDER_UNIT", "simple-podman.service"),
+        provider_socket_unit: gen_env_v1("SIMPLE_ORCH_FIXTURE_PROVIDER_SOCKET_UNIT", "simple-podman.socket"),
+        partition_cgroup: gen_env_v1("SIMPLE_ORCH_FIXTURE_PARTITION_CGROUP", "/sys/fs/cgroup/system.slice"),
+        provider_executable: gen_required_v1("SIMPLE_ORCH_FIXTURE_PODMAN_PATH")?,
+        provider_executable_sha256: gen_required_v1("SIMPLE_ORCH_FIXTURE_PODMAN_SHA256")?,
+        broker_executable: gen_env_v1("SIMPLE_ORCH_FIXTURE_BROKER_PATH", "/opt/simple/bin/simple"),
+        broker_executable_sha256: gen_required_v1("SIMPLE_ORCH_FIXTURE_BROKER_SHA256")?,
+        graph_root: gen_env_v1("SIMPLE_ORCH_FIXTURE_GRAPH_ROOT", "/var/lib/simple-host/podman/graph"), run_root: run_root,
+        partition_cpu_millis: gen_number_v1("SIMPLE_ORCH_FIXTURE_PARTITION_CPU_MILLIS", "6000")?,
+        partition_memory_bytes: gen_number_v1("SIMPLE_ORCH_FIXTURE_PARTITION_MEMORY_BYTES", "6442450944")?,
+        outside_cpu_millis: gen_number_v1("SIMPLE_ORCH_FIXTURE_OUTSIDE_CPU_MILLIS", "1000")?,
+        outside_memory_bytes: gen_number_v1("SIMPLE_ORCH_FIXTURE_OUTSIDE_MEMORY_BYTES", "1073741824")?,
+        workload_build_root_prefix: gen_env_v1("SIMPLE_ORCH_FIXTURE_WORKLOAD_BUILD_ROOT_PREFIX", "/var/lib/simple-host/live-work"),
+        workload_terminal_mode: gen_env_v1("SIMPLE_ORCH_FIXTURE_WORKLOAD_TERMINAL_MODE", "tty")))
+
+fn gen_write_public_v1(class: text, path: text, bytes: text) -> bool:
+    if not file_atomic_write_mode(path, bytes, 0o644):
+        print "FIXTURE ERROR " + class + ": cannot write " + path
+        return false
+    print "FIXTURE OK " + class + " " + path
+    true
+
+# The three /etc/simple/container profiles (todo 481) and engine-policy.sdn, the one pinned input with an encoder.
+fn gen_profiles_v1(inputs: EnrolledFixtureInputsV1):
+    val dir = env_get("SIMPLE_ORCH_FIXTURE_PROFILE_DIR")
+    if dir == "":
+        print "FIXTURE BLOCKED profiles: SIMPLE_ORCH_FIXTURE_PROFILE_DIR unset"
+        return
+    val host = gen_host_profile_v1()
+    if host.is_err():
+        print "FIXTURE BLOCKED profiles: " + host.unwrap_err()
+        return
+    match enrolled_fixture_profiles_v1(inputs, host.unwrap()):
+        case Ok(profiles):
+            val written = (gen_write_public_v1("machine-policy", dir + "/machine-policy.sdn", profiles.machine_policy) and
+                gen_write_public_v1("fresh-epoch-profile", dir + "/fresh-epoch-profile.sdn", profiles.fresh_epoch_profile) and
+                gen_write_public_v1("supervisor-profile", dir + "/supervisor-profile.sdn", profiles.supervisor_profile))
+            if written:
+                val input_dir = env_get("SIMPLE_ORCH_FIXTURE_INPUT_DIR")
+                gen_write_public_v1("engine-policy", input_dir + "/engine-policy.sdn", profiles.engine_policy)
+        case Err(reason): print "FIXTURE ERROR profiles: " + reason
+
+fn gen_authority_v1(inputs: EnrolledFixtureInputsV1) -> Result<EnrolledFixtureAuthorityV1, text>:
+    val authority = enrolled_fixture_authority_v1(inputs)?
+    # Install first: a dispatch root already holding another policy refuses here, before any key is written,
+    # and keys are created exclusively, so a re-run can never leave keys that the installed policy does not pin.
+    val context = enrolled_fixture_dispatch_install_v1(env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT"), inputs,
+        authority.policy_bytes)?
+    print "FIXTURE OK dispatch " + env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT")
+    val store = env_get("SIMPLE_ORCH_FIXTURE_KEY_STORE")
+    val issuer_path = enrolled_fixture_write_key_v1(store, authority.issuer_key, authority.issuer.file)?
+    val approver_path = enrolled_fixture_write_key_v1(store, authority.approver_key, authority.approver.file)?
+    print "FIXTURE OK key " + issuer_path
+    print "FIXTURE OK key " + approver_path
+    val parent_policy = inputs.machine_parent + "/authority-policy.sdn"
+    if not file_atomic_write_mode(parent_policy, authority.policy_bytes, 0o600): return Err("cannot write " + parent_policy)
+    print "FIXTURE OK authority " + parent_policy
+    Ok(authority)
+
+fn gen_binding_v1(inputs: EnrolledFixtureInputsV1, authority: EnrolledFixtureAuthorityV1):
+    val dir = env_get("SIMPLE_ORCH_FIXTURE_INPUT_DIR")
+    val pins = enrolled_fixture_pins_v1(dir)
+    if pins.is_err():
+        print "FIXTURE BLOCKED binding: " + pins.unwrap_err() + " (host-config encoder and live template measurements missing, todo 484)"
+        return
+    match enrolled_fixture_binding_v1(inputs, authority.policy_bytes, pins.unwrap()):
+        case Ok(binding):
+            val bytes = host_linux_service_enrollment_encode_v3(binding)
+            if bytes.is_err():
+                print "FIXTURE ERROR binding: " + bytes.unwrap_err()
+                return
+            if not file_write_exact(dir + "/binding.sdn", bytes.unwrap()):
+                print "FIXTURE ERROR binding: cannot write " + dir + "/binding.sdn"
+                return
+            print "FIXTURE OK binding " + dir + "/binding.sdn"
+        case Err(reason): print "FIXTURE ERROR binding: " + reason
+
+fn gen_caret_request_v1():
+    val path = env_get("SIMPLE_ORCH_FIXTURE_CARET_REQUEST")
+    if path == "": return
+    match enrolled_fixture_gateway_inspect_v1(gen_env_v1("SIMPLE_ORCH_FIXTURE_CARET_CONTROLLER", "ctrl-qual"), "req-qual-1"):
+        case Ok(source):
+            if file_atomic_write_mode(path, source, 0o600): print "FIXTURE OK caret-request " + path
+            else: print "FIXTURE ERROR caret-request: cannot write " + path
+        case Err(reason): print "FIXTURE ERROR caret-request: " + reason
+
+fn gen_main_v1():
+    gen_caret_request_v1()
+    match gen_inputs_v1():
+        case Ok(base):
+            var inputs = base
+            val host = gen_host_profile_v1()
+            if host.is_ok():
+                match enrolled_fixture_engine_identity_v1(host.unwrap(), env_get("SIMPLE_ORCH_FIXTURE_PODMAN_VERSION")):
+                    case Ok(identity):
+                        inputs.provider_identity_digest = identity
+                        print "FIXTURE OK provider-identity " + identity
+                    case Err(_): print "FIXTURE BLOCKED provider-identity: SIMPLE_ORCH_FIXTURE_PODMAN_VERSION unset; the machine policy and binding keep SIMPLE_ORCH_FIXTURE_PROVIDER_DIGEST, which is not the observed engine identity"
+            gen_profiles_v1(inputs)
+            match gen_authority_v1(inputs):
+                case Ok(authority): gen_binding_v1(inputs, authority)
+                case Err(reason): print "FIXTURE ERROR authority: " + reason
+        case Err(reason): print "FIXTURE ERROR authority: " + reason
+    print "FIXTURE BLOCKED v6-requests: attach/invoke/detach need the live Host association, plan and pane binding (todo 485)"
+    print "FIXTURE BLOCKED installer-parent: needs binding + credential plus host-config and the helper templates of todo 484 (todo 486)"
+    print "FIXTURE BLOCKED host-config: no canonical HostConfig encoder; host_config_v1 has decode_host_config only (todo 484)"
+    print "FIXTURE BLOCKED helper-templates: broker-policy, agent-helper-template and remote-build-helper-template need the live broker cgroup device/inode/generation, its policy digest and the helper/broker executable digests; no producer measures them (todo 484)"
+    # Completion sentinel: the wrapper treats its absence (crash, timeout) as FAIL.
+    print "FIXTURE DONE"
+
+gen_main_v1()

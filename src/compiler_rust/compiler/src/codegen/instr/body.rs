@@ -379,7 +379,7 @@ pub(super) fn build_vreg_types(
                             "rt_env_get" | "rt_get_env" | "rt_file_read_text" | "rt_file_read_text_rv" => {
                                 Some(TypeId::STRING)
                             }
-                            "rt_is_some" | "rt_is_present" | "rt_is_none" => Some(TypeId::BOOL),
+                            "rt_is_some" | "rt_is_present" | "rt_is_none" | "rt_is_none_variant" => Some(TypeId::BOOL),
                             "rt_string_eq" | "rt_native_eq" | "rt_native_neq" | "rt_native_cmp" => Some(TypeId::I64),
                             // Array/collection length returns a native i64. Recording
                             // it here types the `len()` result VReg so a CHAINED
@@ -754,6 +754,44 @@ fn compile_naked_function_body<M: Module>(
     builder.seal_block(entry);
     builder.finalize();
     Ok(())
+}
+
+/// Indices into `func.blocks` in reverse post-order from the entry block
+/// (iterative: nested if/else chains are thousands of blocks deep); blocks
+/// unreachable from the entry follow in storage order.
+fn reverse_post_order(func: &MirFunction) -> Vec<usize> {
+    let index_of: HashMap<BlockId, usize> = func.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    let succs = |i: usize| -> Vec<usize> {
+        let mut v: Vec<usize> = func.blocks[i]
+            .terminator
+            .successors()
+            .into_iter()
+            .filter_map(|s| index_of.get(&s).copied())
+            .collect();
+        v.reverse(); // popped from the back: visit in terminator order
+        v
+    };
+    let mut seen = vec![false; func.blocks.len()];
+    let mut post: Vec<usize> = Vec::with_capacity(func.blocks.len());
+    if let Some(&entry) = index_of.get(&func.entry_block) {
+        seen[entry] = true;
+        let mut stack: Vec<(usize, Vec<usize>)> = vec![(entry, succs(entry))];
+        while let Some((node, pending)) = stack.last_mut() {
+            if let Some(next) = pending.pop() {
+                if !seen[next] {
+                    seen[next] = true;
+                    let s = succs(next);
+                    stack.push((next, s));
+                }
+            } else {
+                post.push(*node);
+                stack.pop();
+            }
+        }
+    }
+    post.reverse();
+    post.extend((0..func.blocks.len()).filter(|i| !seen[*i]));
+    post
 }
 
 /// Compile a complete MIR function body.
@@ -1145,7 +1183,32 @@ pub fn compile_function_body<M: Module>(
         }
     }
 
-    for mir_block in &func.blocks {
+    // Translate blocks in reverse post-order from the entry (unreachable blocks
+    // after, in storage order) and seal each block as soon as every predecessor
+    // has been emitted. Storage order is not flow order (a value-position
+    // `match` stores merge blocks before the nested else-chain), and sealing
+    // everything at the end makes cranelift's SSA builder resolve each
+    // cross-block use through the whole chain: quadratic, minutes for a
+    // 1100+ arm `match`. Generator/async state machines keep storage order and
+    // the final seal-all, since their dispatch blocks add extra edges.
+    let early_seal = generator_states.is_none() && async_states.is_none();
+    let translation_order: Vec<usize> = if early_seal {
+        reverse_post_order(func)
+    } else {
+        (0..func.blocks.len()).collect()
+    };
+    let mut pending_preds: HashMap<BlockId, usize> = HashMap::new();
+    if early_seal {
+        for b in &func.blocks {
+            for s in b.terminator.successors() {
+                *pending_preds.entry(s).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut sealed_early: HashSet<BlockId> = HashSet::new();
+
+    for &block_index in &translation_order {
+        let mir_block = &func.blocks[block_index];
         if generator_states.is_some() && mir_block.id == func.entry_block {
             continue;
         }
@@ -1565,10 +1628,27 @@ pub fn compile_function_body<M: Module>(
                 builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
             }
         }
+
+        if early_seal {
+            for succ in mir_block.terminator.successors() {
+                if let Some(count) = pending_preds.get_mut(&succ) {
+                    *count -= 1;
+                    if *count == 0 && succ != func.entry_block {
+                        if let Some(&succ_cl) = blocks.get(&succ) {
+                            builder.seal_block(succ_cl);
+                            sealed_early.insert(succ);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // Seal all blocks after all predecessors are known
+    // Seal all remaining blocks after all predecessors are known
     for mir_block in &func.blocks {
+        if sealed_early.contains(&mir_block.id) {
+            continue;
+        }
         let cl_block = *blocks.get(&mir_block.id).unwrap();
         builder.seal_block(cl_block);
     }

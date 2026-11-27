@@ -1,0 +1,119 @@
+# Pure DATA fixtures over the error reporting of simple_container_fresh_cleanup_v2: one reducer per
+# cleanup stage, folded here the way the API folds it, plus the shape of the API function itself.
+# The API function itself is run only on an open value with no owner left; its three stages need custody
+# and are exercised only in the guest.
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.common.contracts.container.fresh_cleanup_stage_v2.*
+use std.nogc_async_mut.container.api_v2.{SimpleContainerFreshOpenV2, simple_container_fresh_cleanup_v2}
+
+val STAGE_RETRYABLE = "machine-fresh-workload-exited-settlement-cohort-retryable:fresh-epoch-native-preexisting-service-or-subuid-process"
+val STAGE_RETAINED = "machine-fresh-workload-charge-retained"
+val STAGE_CONSUMED = "fresh-epoch-native-scan-close-consumed-error"
+
+# What one stage answered: (closed, owner retained, error).
+struct StageAnswerV2:
+    closed: bool
+    owner_retained: bool
+    error: text
+
+struct CleanupFoldV2:
+    closed: bool
+    reported: text
+    kept: text
+
+# Mirrors simple_container_fresh_cleanup_v2: stages in order, stop at the first one that is not released.
+fn stage_fold_v2(kept_before: text, answers: [StageAnswerV2]) -> CleanupFoldV2:
+    var kept = kept_before
+    for answer in answers:
+        val stage = container_fresh_cleanup_stage_v2(kept, answer.closed, answer.owner_retained, answer.error)
+        kept = stage.kept
+        if not stage.released: return CleanupFoldV2(closed: false, reported: stage.reported, kept: kept)
+    CleanupFoldV2(closed: true, reported: kept, kept: kept)
+
+fn stage_ok_v2() -> StageAnswerV2: StageAnswerV2(closed: true, owner_retained: false, error: "")
+fn stage_refused_v2(reason: text) -> StageAnswerV2: StageAnswerV2(closed: false, owner_retained: true, error: reason)
+
+fn stage_body_v2(source: text, anchor: text) -> text:
+    val at = source.index_of(anchor)
+    if at < 0: return ""
+    val tail = source.substring(at, source.byte_len())
+    val stop = tail.index_of("\n\n")
+    if stop >= 0: tail.substring(0, stop) else: tail
+
+describe "Container fresh cleanup stage V2":
+    it "reports a refusal for that attempt only and keeps nothing of it":
+        val first = stage_fold_v2("", [stage_refused_v2(STAGE_RETRYABLE), stage_ok_v2(), stage_ok_v2()])
+        expect(first.closed).to_equal(false)
+        expect(first.reported).to_equal(STAGE_RETRYABLE)
+        expect(first.kept).to_equal("")
+        step("The same stage then closes: the cleanup is clean, with no text from the refused attempt")
+        val second = stage_fold_v2(first.kept, [stage_ok_v2(), stage_ok_v2(), stage_ok_v2()])
+        expect(second.closed).to_equal(true)
+        expect(second.reported).to_equal("")
+
+    it "reports the latest refusal, not the first one":
+        val first = stage_fold_v2("", [stage_refused_v2(STAGE_RETRYABLE)])
+        val second = stage_fold_v2(first.kept, [stage_refused_v2(STAGE_RETAINED)])
+        expect(second.closed).to_equal(false)
+        expect(second.reported).to_equal(STAGE_RETAINED)
+        expect(second.kept).to_equal("")
+
+    it "keeps the error of a stage that gave up its owner through a later refusal and a later success":
+        step("Stage 1 closes with an error and is gone; stage 2 refuses")
+        val first = stage_fold_v2("", [StageAnswerV2(closed: true, owner_retained: false, error: STAGE_CONSUMED),
+            stage_refused_v2(STAGE_RETRYABLE)])
+        expect(first.closed).to_equal(false)
+        expect(first.reported).to_equal(STAGE_RETRYABLE)
+        expect(first.kept).to_equal(STAGE_CONSUMED)
+        step("The retry no longer has stage 1 to run; its error is still reported")
+        val second = stage_fold_v2(first.kept, [stage_ok_v2(), stage_ok_v2()])
+        expect(second.closed).to_equal(true)
+        expect(second.reported).to_equal(STAGE_CONSUMED)
+        step("Among kept errors the first one wins")
+        val both = stage_fold_v2(STAGE_CONSUMED, [StageAnswerV2(closed: true, owner_retained: false, error: "later-consumed-error")])
+        expect(both.reported).to_equal(STAGE_CONSUMED)
+
+    it "keeps the error the open value already carried":
+        val clean = stage_fold_v2("fresh-epoch-open-refused", [stage_ok_v2(), stage_ok_v2()])
+        expect(clean.closed).to_equal(true)
+        expect(clean.reported).to_equal("fresh-epoch-open-refused")
+        step("A refusal is still what a refused attempt reports")
+        val refused = stage_fold_v2("fresh-epoch-open-refused", [stage_refused_v2(STAGE_RETRYABLE)])
+        expect(refused.reported).to_equal(STAGE_RETRYABLE)
+        expect(refused.kept).to_equal("fresh-epoch-open-refused")
+
+    it "names a stage that answers without a reason":
+        step("Retained without a reason: the kept error if there is one, else a name")
+        expect(stage_fold_v2("", [StageAnswerV2(closed: false, owner_retained: true, error: "")]).reported).to_equal(
+            "container-fresh-cleanup-stage-retained")
+        expect(stage_fold_v2("fresh-epoch-open-refused", [StageAnswerV2(closed: true, owner_retained: true, error: "")]).reported).to_equal(
+            "fresh-epoch-open-refused")
+        step("Not closed and no owner left to retry: a kept failure, never silently clean")
+        val lost = stage_fold_v2("", [StageAnswerV2(closed: false, owner_retained: false, error: "")])
+        expect(lost.closed).to_equal(false)
+        expect(lost.reported).to_equal("container-fresh-cleanup-stage-unclosed")
+        expect(lost.kept).to_equal("container-fresh-cleanup-stage-unclosed")
+        val lost_named = stage_fold_v2("", [StageAnswerV2(closed: false, owner_retained: false, error: STAGE_CONSUMED)])
+        expect(lost_named.kept).to_equal(STAGE_CONSUMED)
+        expect(stage_fold_v2(lost.kept, [stage_ok_v2()]).reported).to_equal("container-fresh-cleanup-stage-unclosed")
+
+    it "is what the API folds over its three stages":
+        val api = file_read_text("src/lib/nogc_async_mut/container/api_v2.spl")
+        val body = stage_body_v2(api, "pub fn simple_container_fresh_cleanup_v2(")
+        expect(body.byte_len() > 0).to_equal(true)
+        expect(body.split("container_fresh_cleanup_stage_v2(retained.error, ").len()).to_equal(4)
+        expect(body.split("retained.error = stage.kept").len()).to_equal(4)
+        expect(body.split("return SimpleContainerFreshCleanupV2(Some(retained), false, stage.reported)").len()).to_equal(4)
+        expect(body.contains("SimpleContainerFreshCleanupV2(nil, true, retained.error)")).to_equal(true)
+        step("No stage writes its answer onto the retained open value by itself")
+        expect(body.contains("closed.error != \"\": retained.error")).to_equal(false)
+
+    it "runs through the API for an open value with no owner left":
+        val closed = simple_container_fresh_cleanup_v2(SimpleContainerFreshOpenV2(error: "fresh-epoch-open-refused"))
+        expect(closed.closed).to_equal(true)
+        expect(closed.retained.is_none()).to_equal(true)
+        expect(closed.error).to_equal("fresh-epoch-open-refused")
+        val clean = simple_container_fresh_cleanup_v2(SimpleContainerFreshOpenV2())
+        expect(clean.closed).to_equal(true)
+        expect(clean.error).to_equal("")

@@ -1,0 +1,103 @@
+#!/bin/sh
+# Parity: tool-code-authority.py (phases 1-2) vs tool-code-authority.spl
+# (phase 3+ twin) on identical fixture trees. Compares exit code, stdout bytes
+# and the final "ValueError: ..." stderr line; then proves the twin's trust
+# anchor fails closed (exit 2) without a matching verified stage pin.
+#   SIMPLE_VERIFIED_STAGE_BINARY=<stage> sh scripts/bootstrap/tests/tool-code-authority-twin-parity-test.shs
+set -u
+repo=$(CDPATH= cd -P -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 2
+stage=${SIMPLE_VERIFIED_STAGE_BINARY:-}
+[ -n "$stage" ] && [ -f "$stage" ] || { echo 'ERROR: set SIMPLE_VERIFIED_STAGE_BINARY' >&2; exit 2; }
+python=${PYTHON:-python3}
+command -v "$python" >/dev/null 2>&1 || python=python
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+pass=0 fail=0
+hash() { sha256sum "$1" | awk '{print $1}'; }
+ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
+bad() { fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; }
+
+pin="$tmp/provenance.env"
+printf '%s\n' schema=simple-bootstrap-stage3-provenance-v5 status=pass \
+  artifact_kind=pure-simple-bootstrap-compiler "stage3_sha256=$(hash "$stage")" >"$pin"
+
+# Fixture: a committed tool closure plus a manifest generator.
+make_tree() {
+  root=$1
+  mkdir -p "$root/scripts/bootstrap/lib" "$root/scripts/check/lib"
+  printf 'echo entry\n' >"$root/scripts/bootstrap/entry.shs"
+  printf 'helper=1\r\nline two\n' >"$root/scripts/bootstrap/lib/helper.shs"
+  printf 'package P; 1;\n' >"$root/scripts/check/lib/P.pm"
+  git -C "$root" init -q && git -C "$root" config core.autocrlf false &&
+    git -C "$root" add -A && git -C "$root" -c user.name=t -c user.email=t@t commit -qm fixture
+}
+write_manifest() {
+  root=$1 out=$2 schema=${3:-simple-bootstrap-tool-code-v1}
+  head=$(git -C "$root" rev-parse HEAD)
+  {
+    printf '{"schema": "%s", "tool_head": "%s", "files": {' "$schema" "$head"
+    sep=
+    for f in $(cd "$root" && find scripts/bootstrap scripts/check/lib -type f | LC_ALL=C sort); do
+      printf '%s"%s": "%s"' "$sep" "$f" "$(hash "$root/$f")"; sep=', '
+    done
+    printf '}}\n'
+  } >"$out"
+}
+
+run_pair() {  # name root manifest sha entry [class]
+  name=$1; shift; class=${5:-}
+  "$python" -B "$repo/scripts/bootstrap/tool-code-authority.py" --root "$1" --manifest "$2" \
+    --sha256 "$3" --entry "$4" >"$tmp/py.out" 2>"$tmp/py.err"; py_rc=$?
+  SIMPLE_VERIFIED_STAGE_PIN=$pin "$stage" run "$repo/scripts/bootstrap/tool-code-authority.spl" \
+    --stage-binary "$stage" --root "$1" --manifest "$2" --sha256 "$3" --entry "$4" \
+    >"$tmp/sp.out" 2>"$tmp/sp.err"; sp_rc=$?
+  py_msg=$(grep '^[A-Za-z]*Error' "$tmp/py.err" | tail -1)
+  sp_msg=$(grep '^ValueError' "$tmp/sp.err" | tail -1)
+  case "$py_msg" in ValueError*) ;; ?*) py_msg=other ;; esac
+  case "$py_msg" in other) sp_msg=other ;; esac
+  # class: pathlib's relative_to wording is host-specific repr; compare the class.
+  [ "$class" != class ] || { py_msg=${py_msg%%:*}; sp_msg=${sp_msg%%:*}; }
+  if [ "$py_rc" = "$sp_rc" ] && cmp -s "$tmp/py.out" "$tmp/sp.out" && [ "$py_msg" = "$sp_msg" ]; then
+    ok "$name (exit $py_rc${py_msg:+, $py_msg})"
+  else
+    bad "$name: python=$py_rc '$py_msg' twin=$sp_rc '$sp_msg'"; sed -n '1,5p' "$tmp/sp.err" >&2
+  fi
+}
+
+t="$tmp/tree"; make_tree "$t"
+m="$tmp/manifest.json"; write_manifest "$t" "$m"; ms=$(hash "$m")
+entry="$t/scripts/bootstrap/entry.shs"
+run_pair accept "$t" "$m" "$ms" "$entry"
+run_pair manifest-identity "$t" "$m" 0000000000000000000000000000000000000000000000000000000000000000 "$entry"
+run_pair entry-outside "$t" "$m" "$ms" "$repo/scripts/bootstrap/tool-code-authority.py" class
+write_manifest "$t" "$tmp/schema.json" other-schema
+run_pair schema "$t" "$tmp/schema.json" "$(hash "$tmp/schema.json")" "$entry"
+sed 's/"tool_head": "[0-9a-f]*"/"tool_head": "abc"/' "$m" >"$tmp/head.json"
+run_pair head-shape "$t" "$tmp/head.json" "$(hash "$tmp/head.json")" "$entry"
+sed 's/"tool_head": "[0-9a-f]*"/"tool_head": "0123456789012345678901234567890123456789"/' "$m" >"$tmp/head2.json"
+run_pair head-differs "$t" "$tmp/head2.json" "$(hash "$tmp/head2.json")" "$entry"
+printf 'extra\n' >"$t/scripts/check/lib/untracked.txt"
+run_pair physical-closure "$t" "$m" "$ms" "$entry"
+rm -f "$t/scripts/check/lib/untracked.txt"
+printf 'tampered\n' >>"$t/scripts/bootstrap/lib/helper.shs"
+run_pair bytes-differ "$t" "$m" "$ms" "$entry"
+write_manifest "$t" "$tmp/tampered.json"
+run_pair not-from-commit "$t" "$tmp/tampered.json" "$(hash "$tmp/tampered.json")" "$entry"
+git -C "$t" checkout -q -- scripts/bootstrap/lib/helper.shs
+run_pair accept-again "$t" "$m" "$ms" "$entry"
+
+# Trust anchor: the twin fails closed (exit 2) without a matching pin.
+expect_anchor() {  # name pin-path
+  SIMPLE_VERIFIED_STAGE_PIN=$2 "$stage" run "$repo/scripts/bootstrap/tool-code-authority.spl" \
+    --stage-binary "$stage" --root "$t" --manifest "$m" --sha256 "$ms" --entry "$entry" \
+    >/dev/null 2>"$tmp/anchor.err"; rc=$?
+  if [ "$rc" = 2 ] && grep -q 'FAIL: verified stage pin' "$tmp/anchor.err"; then ok "$1 (exit 2)"; else bad "$1: exit $rc"; fi
+}
+expect_anchor anchor-no-pin ''
+sed 's/^stage3_sha256=.*/stage3_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$pin" >"$tmp/wrong.env"
+expect_anchor anchor-mismatch "$tmp/wrong.env"
+sed 's/^status=pass/status=fail/' "$pin" >"$tmp/unadmitted.env"
+expect_anchor anchor-unadmitted "$tmp/unadmitted.env"
+
+printf 'tool-code-authority twin parity: %s passed, %s failed\n' "$pass" "$fail"
+[ "$fail" = 0 ] && [ "$pass" -gt 0 ]

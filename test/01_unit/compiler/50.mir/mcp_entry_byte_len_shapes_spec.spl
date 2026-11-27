@@ -1,0 +1,105 @@
+# @req REQ-SSPEC-COMPILER
+"""
+Regression verification for `stage2_compiler_mcp_entry_native_build_blocked_2026_11_11`:
+proves all remaining `.byte_len()` receiver shapes used across `src/app/mcp/**`
+and `src/app/simple_lsp_mcp/**` lower through `HirLowering -> MirLowering`
+directly to `rt_string_len` with zero runtime-fallback errors, including:
+- untyped `val` bindings from helper calls (`body = _mcp_read_chars(...)`)
+- tuple destructuring (`val (check_out, check_exit) = mcp_run_argv(...)`)
+- reassigned mutable bindings (`var detail = out; detail.byte_len()`)
+- nullable `text?` coalescing (`val lib_dir = env_get(...) ?? ""; lib_dir.byte_len()`)
+- substring/trim chained locals (`val after = ...; after.byte_len()`)
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn mcp_byte_len_lower_and_callees(src: text, target_fns: [text]) -> ([text], Dict<text, [text]>):
+    val file = "testdata/fixture_mcp_entry_byte_len_shapes.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_mcp_entry_byte_len_shapes", Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new_for_target(
+        hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir_mod = ml.lower_module(hir)
+    var messages: [text] = []
+    for e in hl.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in ml.errors:
+        messages = messages.push("mir: " + e.message)
+    var found: Dict<text, [text]> = {}
+    for target in target_fns:
+        var calls: [text] = []
+        for f in mir_module_functions_sorted(mir_mod):
+            if f.name == target or f.name.ends_with("." + target):
+                for blk in f.blocks:
+                    for inst in blk.instructions:
+                        match inst.kind:
+                            case MirInstKind.Call(_, func_op, _):
+                                match func_op.kind:
+                                    case MirOperandKind.Const(const_val, _):
+                                        match const_val:
+                                            case MirConstValue.Str(cname):
+                                                calls = calls.push(cname)
+                                            case _: ()
+                                    case _: ()
+                            case _: ()
+        found[target] = calls
+    (messages, found)
+
+fn mcp_list_has(items: [text], needle: text) -> bool:
+    for item in items:
+        if item == needle:
+            return true
+    false
+
+val mcp_byte_len_shapes_src = "extern fn fake_env_opt(k: text) -> text?\n" +
+    "fn helper_text(n: i64) -> text:\n" +
+    "    \"abc\"\n" +
+    "\n" +
+    "fn helper_tuple(n: i64) -> (text, i64):\n" +
+    "    (\"abc\", n)\n" +
+    "\n" +
+    "fn mcp_val_call_shape(n: i64) -> i64:\n" +
+    "    val body = helper_text(n)\n" +
+    "    body.byte_len()\n" +
+    "\n" +
+    "fn mcp_tuple_destruct_shape(n: i64) -> i64:\n" +
+    "    val (out, code) = helper_tuple(n)\n" +
+    "    var detail = out\n" +
+    "    detail.byte_len() + out.byte_len() + code\n" +
+    "\n" +
+    "fn mcp_coalesce_shape() -> i64:\n" +
+    "    val lib_dir = fake_env_opt(\"SIMPLE_LIB\") ?? \"\"\n" +
+    "    lib_dir.byte_len()\n" +
+    "\n" +
+    "fn mcp_slice_chain_shape(raw: text) -> i64:\n" +
+    "    val trimmed = raw.trim()\n" +
+    "    val sub = trimmed.substring(0, trimmed.byte_len())\n" +
+    "    sub.byte_len()\n"
+
+describe "MIR lowering of MCP and LSP entry byte_len receiver shapes":
+    it "lowers val-call, tuple-destructured, optional-coalesced, and chained text byte_len() calls to rt_string_len":
+        val fns = [
+            "mcp_val_call_shape",
+            "mcp_tuple_destruct_shape",
+            "mcp_coalesce_shape",
+            "mcp_slice_chain_shape"
+        ]
+        val res = mcp_byte_len_lower_and_callees(mcp_byte_len_shapes_src, fns)
+        expect(res.0.len()).to_equal(0)
+        val calls_map = res.1
+        for target in fns:
+            val callees = calls_map[target]
+            expect(mcp_list_has(callees, "rt_string_len")).to_equal(true)
+            expect(mcp_list_has(callees, "rt_string_to_int_lenient")).to_equal(false)

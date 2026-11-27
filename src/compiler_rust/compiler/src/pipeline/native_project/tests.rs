@@ -10832,3 +10832,173 @@ fn erased_some_arm_binds_user_option_and_generic_owner_after_qualification() {
     jit.compile_module(&mir).expect("JIT compilation");
     assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 427);
 }
+
+/// The erased bare-`None` arm names user enums through the qualified identity
+/// too, so a native build matches `Opt.None` and `Q.None` (a `None`-only enum).
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+#[test]
+fn erased_none_arm_user_enum_identity_survives_runtime_name_qualification() {
+    let source = "enum Opt:\n    Some(i64)\n    None\n\nenum Q:\n    Here(i64)\n    None\n\nfn g(x) -> i64:\n    match x:\n        Some(v): return v\n        None: return -5\n    -9\n\nfn q(x) -> i64:\n    match x:\n        None: return -6\n        Here(v): return v\n    -9\n\nfn main() -> i64:\n    g(Opt.Some(4)) * 1000 + g(Opt.None) * -100 + q(Q.None) * -10 + q(Q.Here(3))\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    for name in ["Opt", "Q"] {
+        mir.local_globals.insert(name.to_string());
+    }
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 4563);
+}
+
+/// The erased `f64?` boundary (Option `Some` -> tagged float) tests the
+/// builtin Option identity, which native qualification must leave alone.
+/// seed_jit_erased_f64_option_some_binds_raw_bits_2026-11-27
+#[test]
+fn erased_f64_option_some_boundary_survives_runtime_name_qualification() {
+    let source = "enum Opt:\n    Some(i64)\n    None\n\nfn h(x) -> i64:\n    match x:\n        Some(v):\n            if v == 0.1:\n                return 1\n            return 3\n        None: return 4\n    5\n\nfn main() -> i64:\n    val a: f64? = Some(0.1)\n    val c: f64? = None\n    h(a) * 100 + h(c) * 10 + h(Opt.None)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    mir.local_globals.insert("Opt".to_string());
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 144);
+}
+
+/// The bare `None` arm tests the stamp the constructors leave, so it carries no
+/// enum id for qualification to re-point: None-first owners sharing a
+/// discriminant still match exactly after qualification, and Result values
+/// never do.
+/// seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27
+#[test]
+fn erased_none_arm_stamp_survives_runtime_name_qualification() {
+    let source = "enum Q1:\n    None\n    A(i64)\n\nenum Q2:\n    None\n    B(i64)\n\nfn g(x) -> i64:\n    match x:\n        None: return 1\n        _: return 0\n    -9\n\nfn main() -> i64:\n    val ok: Result<i64, text> = Ok(3)\n    var s = 0\n    var i = 0\n    while i < 2:\n        s = s * 10000 + g(Q1.None) * 1000 + g(Q2.None) * 100 + g(Q2.B(4)) * 10 + g(ok)\n        i = i + 1\n    s\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    for name in ["Q1", "Q2"] {
+        mir.local_globals.insert(name.to_string());
+    }
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner_set",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    // One arm, one call, and nothing but the subject in it.
+    let tests: Vec<usize> = mir
+        .functions
+        .iter()
+        .flat_map(|f| f.blocks.iter().flat_map(|b| b.instructions.iter()))
+        .filter_map(|inst| match inst {
+            crate::mir::MirInst::Call { target, args, .. } if target.name() == "rt_is_none_variant" => Some(args.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tests, vec![1]);
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 11_001_100);
+}
+
+/// Typed `f64?` readers over an explicit `Some(x)` (the Option enum holding the
+/// RAW IEEE bits) built as a real native archive and linked against the core-C
+/// runtime: every reader must return `x` exactly. Bit `k` of the result marks
+/// a mismatch; the denormals `4.9e-324`, `* 2.0` and `* 9.0` carry the low-3-bit
+/// patterns 0b001 (TAG_HEAP) and 0b010 (TAG_FLOAT).
+/// seed_jit_explicit_f64_option_some_typed_readers_lose_low_mantissa_bits_2026-11-27
+#[cfg(target_os = "linux")]
+#[test]
+fn native_typed_f64_option_some_readers_keep_exact_bits_against_c_runtime() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("probe.spl"),
+        concat!(
+            "fn same(g: f64, w: f64) -> bool:\n    if w != w:\n        return g != g\n",
+            "    if w == 0.0:\n        return g == 0.0 and (1.0 / g) == (1.0 / w)\n    g == w\n",
+            "fn bit(ok: bool, k: i64) -> i64:\n    if ok:\n        return 0\n    k\n",
+            "fn mk(x: f64) -> f64?:\n    return Some(x)\n",
+            "fn readers(x: f64) -> i64:\n    var r = 0\n    val c: f64? = Some(x)\n",
+            "    r = r + bit(same(c ?? 9.0, x), 1)\n",
+            "    var iv = 9.0\n    if val v = c:\n        iv = v\n    r = r + bit(same(iv, x), 2)\n",
+            "    r = r + bit(same(c.unwrap(), x), 4)\n",
+            "    r = r + bit(same(mk(x) ?? 9.0, x), 8)\n",
+            "    r\n",
+            // `[f64].at` boxes the payload as a heap float: the C twin of
+            // rt_option_float_bits must read that form too.
+            "fn boxed(c: f64?, x: f64) -> i64:\n    var mv = 9.0\n    match c:\n        Some(v): mv = v\n        None: mv = 8.0\n",
+            "    bit(same(c ?? 9.0, x), 1) + bit(same(mv, x), 2) + bit(same(c.unwrap(), x), 4)\n",
+            "fn check() -> i64:\n    val ys: [f64] = [0.1, 0.2]\n",
+            "    readers(0.1) + readers(4.9e-324 * 2.0) * 16 + readers(1e-300) * 4096 + boxed(ys.at(0), 0.1) * 65536 + (readers(4.9e-324) + readers(4.9e-324 * 9.0)) * 524288\n",
+        ),
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "cranelift".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("native-project compilation");
+    assert_eq!(result.failed, 0);
+    let runtime = build_core_c_runtime_library(temp.path()).expect("real core-C runtime");
+    let runner = temp.path().join("runner.c");
+    fs::write(
+        &runner,
+        "#include <stdint.h>\n#include <stdio.h>\nextern int64_t probe__check(void);\nint main(void) {\n    int64_t r = probe__check();\n    printf(\"mismatch=%lld\\n\", (long long)r);\n    return r != 0;\n}\n",
+    )
+    .unwrap();
+    let executable = temp.path().join("probe");
+    let link = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root_for_native_project_tests().join("src/runtime"))
+        .arg(runner)
+        .arg(archive)
+        .arg(runtime)
+        .args(["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm", "-o"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+    let output = std::process::Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "typed f64? readers lost payload bits: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

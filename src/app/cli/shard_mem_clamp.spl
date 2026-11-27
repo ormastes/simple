@@ -616,13 +616,20 @@ pub fn native_mir_shard_fallback_action_v1(parallel: i64, retried: bool, inproce
 # footprint 0), they each grew to ~11 GB commit, the host commit limit ran out
 # and every worker died in Rust's alloc-error abort. Until a peak is measured
 # for this producer, price a worker at twice the static estimate; an explicit
-# SIMPLE_*_SHARD_WORKER_KB override (override_kib > 0) is honored as-is.
+# SIMPLE_*_SHARD_WORKER_KB override (override_kib > 0) is honored as-is while
+# no peak is recorded.
 # Once a peak IS recorded for this producer it, not the static default, prices
 # the worker (2026-11-09: a 26 GiB static default refused workers whose
 # measured peak was 3.4-7.4 GB; build_tr.log mir-shard peak 7364284 kB).
 # Live observation still raises the estimate during the run.
+# Under an override the record keeps its 25% margin too, with the override as a
+# floor. Priced raw, a record up to half the tree worker budget re-admitted two
+# workers (stage 2 compiler_cli_build 2026-11-27 ran two workers into the
+# 60 GiB cap under the campaign's 9 GB override).
 pub fn shard_commit_unmeasured_estimate_kib_v1(static_kib: i64, recorded_peak_kib: i64, override_kib: i64 = 0) -> i64:
-    if override_kib > 0: return shard_commit_estimate_kib_v1(override_kib, recorded_peak_kib)
+    if override_kib > 0:
+        if recorded_peak_kib <= 0: return override_kib
+        return shard_commit_estimate_kib_v1(override_kib, shard_measured_estimate_kib_v1(recorded_peak_kib))
     if recorded_peak_kib > 0: shard_measured_estimate_kib_v1(recorded_peak_kib) else: static_kib * 2
 
 # 0xC0000409 (-1073740791 / 3221226505) is the Windows fast-fail that Rust's

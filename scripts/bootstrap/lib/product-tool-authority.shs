@@ -9,11 +9,31 @@ tool_root=$(CDPATH= cd -P -- "$tool_root" && pwd -P) || exit 2
 [ "$script_root" = "$tool_root/scripts/bootstrap" ] || {
   echo 'bootstrap tool entry outside declared tool root' >&2; exit 2;
 }
+# Phase routing (python_phase_census_2026-11-27, BOTH row): producer phases 1-2
+# keep the Python validator; phase 3+ runs the pure-Simple twin on the verified
+# stage binary, whose digest must match SIMPLE_VERIFIED_STAGE_PIN (no Python
+# fallback). The phase comes from the caller's product_phase, else the value an
+# owning parent exported; children inherit it.
+tool_authority_phase=${product_phase:-${SIMPLE_BOOTSTRAP_TOOL_PHASE:-}}
+[ -z "$tool_authority_phase" ] || export SIMPLE_BOOTSTRAP_TOOL_PHASE="$tool_authority_phase"
 bootstrap_product_tool_verify() {
   [ "$tool_root" != "$source_root" ] || return 0
   [ -n "${SIMPLE_BOOTSTRAP_TOOL_MANIFEST:-}" ] &&
-    [ -n "${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" ] &&
-    [ -n "${SIMPLE_BOOTSTRAP_TOOL_PYTHON:-}" ] || return 2
+    [ -n "${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" ] || return 2
+  case "$tool_authority_phase" in
+    phase3|phase4|stage3|stage4)
+      [ -n "${SIMPLE_VERIFIED_STAGE_BINARY:-}" ] && [ -x "$SIMPLE_VERIFIED_STAGE_BINARY" ] &&
+        [ -n "${SIMPLE_VERIFIED_STAGE_PIN:-}" ] || {
+        echo 'phase 3+ tool authority requires SIMPLE_VERIFIED_STAGE_BINARY and SIMPLE_VERIFIED_STAGE_PIN; no Python fallback' >&2
+        return 2
+      }
+      "$SIMPLE_VERIFIED_STAGE_BINARY" run "$script_root/tool-code-authority.spl" \
+        --stage-binary "$SIMPLE_VERIFIED_STAGE_BINARY" \
+        --root "$tool_root" --manifest "$SIMPLE_BOOTSTRAP_TOOL_MANIFEST" \
+        --sha256 "$SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256" --entry "$script_root/$(basename -- "$0")"
+      return ;;
+  esac
+  [ -n "${SIMPLE_BOOTSTRAP_TOOL_PYTHON:-}" ] || return 2
   "$SIMPLE_BOOTSTRAP_TOOL_PYTHON" -B "$script_root/tool-code-authority.py" \
     --root "$tool_root" --manifest "$SIMPLE_BOOTSTRAP_TOOL_MANIFEST" \
     --sha256 "$SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256" --entry "$script_root/$(basename -- "$0")"

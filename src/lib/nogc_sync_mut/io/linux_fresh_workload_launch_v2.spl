@@ -31,6 +31,13 @@ pub fn linux_fresh_workload_project_launch_v2(profile: LinuxFreshEpochProfileV1,
 
 pub fn linux_fresh_workload_argv_v2(profile: LinuxFreshEpochProfileV1, command: LinuxFreshWorkloadCommandV2) -> Result<[text], text>:
     linux_fresh_workload_command_validate_v2(command)?
+    # Authoritative gate: build roots and a TTY reach argv only when THIS
+    # (installed) profile admits them. Applies to every action of the command.
+    linux_fresh_workload_features_v2(linux_fresh_workload_admission_v2(profile)?, command.build_input_root,
+        command.build_output_root, command.terminal_mode)?
+    # A TTY without --interactive: stdin stays closed, exactly as before.
+    var extensions: [text] = if command.terminal_mode == "tty": ["--tty"] else: []
+    for mount in linux_fresh_workload_build_mounts_v2(command): extensions = extensions + ["--mount", mount]
     val plan = command.request.plan
     val fence = container_scope_fence_id_v2(command.scope)?
     var args = ["--remote=false", "--log-level=error", "--cgroup-manager=cgroupfs", "--root", profile.text_v1("graphRoot")?,
@@ -48,7 +55,7 @@ pub fn linux_fresh_workload_argv_v2(profile: LinuxFreshEpochProfileV1, command: 
                 "--memory=" + str(command.memory_bytes), "--memory-swap=" + str(command.memory_bytes),
                 "--pids-limit=" + str(command.pid_limit), "--network=none", "--read-only", "--read-only-tmpfs=false",
                 "--security-opt=no-new-privileges", "--cap-drop=ALL", "--cgroups=enabled", "--cgroupns=private", "--pid=private",
-                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + profile.text_v1("delegatedCgroup")?,
+                "--privileged=false", "--http-proxy=false", "--cgroup-parent=" + profile.text_v1("delegatedCgroup")?] + extensions + [
                 "--entrypoint", command.entrypoint[0], "--", command.image]
             for at in 1..command.entrypoint.len(): args.push(command.entrypoint[at])
             args = args + command.args

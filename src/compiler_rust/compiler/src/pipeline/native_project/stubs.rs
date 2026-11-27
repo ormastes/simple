@@ -116,6 +116,26 @@ const RT_OPTIONAL_SYMBOLS: &[&str] = &[
     "rt_set_args",
 ];
 
+/// Core runtime symbols a bootstrap/stub-missing link must never weak-stub: a
+/// fabricated body returns 0, which silently corrupts every value that flows
+/// through it (e.g. a stale archive without `rt_option_float_bits` would make
+/// every typed `f64?` read 0.0 or a denormal). Refuse the link instead.
+fn is_unstubbable_core_runtime_symbol(sym: &str) -> bool {
+    matches!(
+        sym,
+        "rt_enum_new"
+            | "rt_enum_new_none"
+            | "rt_is_none_variant"
+            | "rt_enum_check_discriminant"
+            | "rt_enum_check_variant"
+            | "rt_try_is_absent"
+            | "rt_enum_id"
+            | "rt_enum_discriminant"
+            | "rt_enum_payload"
+            | "rt_option_float_bits"
+    )
+}
+
 fn is_runtime_optional_symbol(sym: &str) -> bool {
     let bare = sym.trim_start_matches('_');
     RT_OPTIONAL_SYMBOLS.contains(&bare)
@@ -1409,18 +1429,7 @@ the old fabricating behaviour.",
     let forbidden_core_runtime: Vec<&str> = needs_stub
         .iter()
         .map(|s| s.as_str())
-        .filter(|s| {
-            matches!(
-                *s,
-                "rt_enum_new"
-                    | "rt_enum_check_discriminant"
-                    | "rt_enum_check_variant"
-                    | "rt_try_is_absent"
-                    | "rt_enum_id"
-                    | "rt_enum_discriminant"
-                    | "rt_enum_payload"
-            )
-        })
+        .filter(|s| is_unstubbable_core_runtime_symbol(s))
         .collect();
     if !forbidden_core_runtime.is_empty() {
         return Err(format!(
@@ -1972,6 +1981,13 @@ pub(crate) fn compile_coff_gc_parity_stubs(
 #[cfg(test)]
 mod coff_gc_parity_tests {
     use super::*;
+
+    #[test]
+    fn typed_float_option_reader_is_never_weak_stubbed() {
+        assert!(is_unstubbable_core_runtime_symbol("rt_option_float_bits"));
+        assert!(is_unstubbable_core_runtime_symbol("rt_enum_payload"));
+        assert!(!is_unstubbable_core_runtime_symbol("rt_array_filter"));
+    }
 
     #[test]
     fn parses_lld_link_undefined_symbols() {
