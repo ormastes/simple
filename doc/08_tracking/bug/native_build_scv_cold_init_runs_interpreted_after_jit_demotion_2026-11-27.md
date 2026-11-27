@@ -269,7 +269,7 @@ Seed `simple-local-20261127r.exe`, `SIMPLE_EXECUTION_MODE=jit run src/app/cli/na
   lane copies, so every `llvm_*` call is ambiguous. Whole worker closure falls back to the interpreter
   (2m04s to demote, then interpreted).
 - Fix: those four files now import `std.nogc_sync_mut.sffi.llvm.*` explicitly. After it,
-  no `jit-compile-error` demotion remains; only `reason=hybrid-interp-splice` for `rt_*` externs
+  the llvm ambiguity is gone, but a second jit-compile-error remained (see addendum below); after the addendum only `reason=hybrid-interp-splice` for `rt_*` externs
   (cache_host/heap/sysctl/etc., expected on this seed) plus 7 CODEGEN-AMBIGUOUS-METHOD lines
   (`CudaTypeMapper.map_tuple` bare `map`, 4 candidates) - not fixed here, separate shape.
 - Timings (--help, wall): JIT before fix 2m04 (demote + interp); JIT after fix 3m29 (full JIT compile of
@@ -284,3 +284,16 @@ inherits it, so the worker REQUESTS jit. Before the fix above its closure then h
 (interpreter speed) while the separately spawned parse shards (a different, smaller closure) stay on JIT
 at 0.2-0.4 s per file. Re-measure stage_parse in the real worker with this fix before concluding; the
 shards' front-end cache reuse by stage_parse was not investigated (time box).
+
+### d29-f addendum: second demotion, zero jit-compile-error after fix (2026-11-27)
+
+Correction: after the llvm import fix the worker STILL demoted (`CODEGEN-AMBIGUOUS-METHOD` in
+`CudaTypeMapper.map_tuple`, bare `map` on an untyped `elements.enumerate()` receiver, 4 candidates, then
+`jit-compile-error detail=src/app/cli/native_build_worker.spl` + "JIT compilation failed, falling back
+to interpreter"). Fixed by replacing that `.enumerate().map(...)` with an explicit typed loop in
+src/plugins/backend_cuda/cuda_type_mapper.spl. Demotion count (jit-compile-error / JIT compilation
+failed / CODEGEN-AMBIGUOUS): before any fix 1 / 1 / 0 (jit.log), after llvm fix only 1 / 1 / 7 (jit3.log),
+after cuda fix 0 / 0 / 0 (jit4.log). Remaining: `hybrid-interp-splice` for rt_* externs only (not an error).
+`--help` JIT wall 2m50. Spec stage3_explicit_owner_types_spec.spl 2/2 on seed r.
+The `[engine-demotion]` lines are printed by the Rust seed (src/compiler_rust/common/src/engine_receipt.rs
+and the driver), so teeing them into SIMPLE_BUILD_TRACE_FILE from Simple source is not possible; skipped.
