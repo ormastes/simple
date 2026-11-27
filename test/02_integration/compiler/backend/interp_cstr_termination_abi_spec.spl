@@ -1,0 +1,78 @@
+# Regression spec for
+# doc/08_tracking/bug/rt_interp_cstr_built_name_unterminated_runtime_path_2026-11-26.md
+#
+# The bug: the Rust `rt_interp_cstr` returned `rt_string_data` verbatim, but
+# RuntimeString storage is exactly `len` bytes with no trailing NUL, so a C
+# consumer reading the returned pointer as a C string over-read heap slack
+# past a run-time-built name whenever the Rust definition wins the link (the
+# seed/mixed link; both pure-Simple lanes link the C owner, whose twin returns
+# a terminated buffer). The doc's shape: a `text` extern argument with no
+# `text_extern_abi.spl` row arrives as the single `rt_interp_cstr` word, and
+# callees such as `rt_cuda_module_get_function` read it with C-string rules.
+#
+# This spec runs the device-free fixture (test/fixtures/compiler/
+# interp_cstr_termination/main.spl) through the selected binary's JIT lane
+# and asserts the exact expected stdout: `strlen(rt_interp_cstr(name))`
+# equals `name.byte_len()` for both a built-at-run-time name and an interned
+# literal name. On an unpatched Rust owner the first line reads
+# `strlen=46`-style slack (RED); on the C owner and on the patched Rust
+# owner both lines terminate exactly (GREEN).
+#
+# Authored evidence contract: the defect is only observable where the Rust
+# `rt_interp_cstr` wins the link, i.e. a Rust-seed binary (verified by `nm`/
+# disassembly: the Rust body calls `is_registered_heap_ptr` and writes no
+# terminator). Set SIMPLE_BINARY to such a binary to exercise the guard; the
+# default pure-Simple `bin/simple` carries the C owner and passes trivially.
+# The fixture leaves `SIMPLE_EXECUTION_MODE=jit` forced for the child so the
+# extern call is emitted by native codegen as the single `rt_interp_cstr`
+# word (the interpreter lane converts text arguments through its own shim and
+# would not exercise this path).
+#
+# Requires SIMPLE_BINARY to select the binary under test (defaults to
+# bin/simple).
+
+use std.spec.*
+use std.io_runtime.{env_get_opt, env_set, env_remove_process, file_exists}
+use app.io.process_ops.{process_run_timeout}
+
+val FIXTURE: text = "test/fixtures/compiler/interp_cstr_termination/main.spl"
+val EXPECTED: text = "built len=28 strlen=28\nliteral len=25 strlen=25\nINTERP-CSTR OK"
+
+fn simple_binary() -> text:
+    val configured = env_get_opt("SIMPLE_BINARY") ?? ""
+    if configured != "" and file_exists(configured):
+        return configured
+    "bin/simple"
+
+describe "rt_interp_cstr returns a NUL-terminated string on the Rust runtime owner":
+    it "strlen of the rt_interp_cstr word equals the byte length for built and literal names":
+        step("Run the fixture through the selected binary's JIT lane; an unterminated Rust rt_interp_cstr makes strlen read past byte_len")
+        val binary = simple_binary()
+        expect(file_exists(binary)).to_equal(true)
+        expect(file_exists(FIXTURE)).to_equal(true)
+        val old_mode = env_get_opt("SIMPLE_EXECUTION_MODE")
+        env_set("SIMPLE_EXECUTION_MODE", "jit")
+        val run = process_run_timeout(binary, ["run", FIXTURE], 300000)
+        if old_mode == nil:
+            env_remove_process("SIMPLE_EXECUTION_MODE")
+        else:
+            env_set("SIMPLE_EXECUTION_MODE", old_mode!)
+        expect(run.2).to_equal(0)
+        expect(run.0.replace("\r\n", "\n").trim()).to_equal(EXPECTED)
+
+# Re-verification recipe (Windows scratch build, from the repo root, per the
+# bug doc's lane):
+#   cd src/compiler_rust
+#   CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#     CARGO_TARGET_DIR="$PWD/../build/p3cache/interpcstr/cargo-target" \
+#     TMPDIR="$PWD/../build/p3cache/interpcstr/tmp" \
+#     SIMPLE_HIR_CACHE_DIR="$PWD/../build/p3cache/interpcstr/hir-cache" \
+#     cargo build --release -p simple-driver
+#   # RED on an unpatched tree, GREEN on the patched tree (binary is
+#   # cargo-target/release/simple.exe; the lane's stale bin/simple.exe cannot
+#   # parse current sources, so invoke the runner directly):
+#   cd <repo root>
+#   SIMPLE_BINARY=build/p3cache/interpcstr/cargo-target/release/simple.exe \
+#     build/p3cache/interpcstr/cargo-target/release/simple.exe run \
+#     src/app/test_runner_new/main.spl \
+#     test/02_integration/compiler/backend/interp_cstr_termination_abi_spec.spl
