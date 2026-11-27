@@ -114,3 +114,35 @@ describe "Host-WM headless capture lane contract":
         val script = file_read("examples/06_io/ui/wm_web_standards_showcase_gui.spl")
         expect_headless_lane_contract(script, "wm_web_standards_showcase_host_headless", "compose_scene(b, comp, trace_path)", "blit_child_frame(b, comp, child.pixels, child.w, child.h)")
         expect(script).to_contain("val prefix = \"wm_web_standards_showcase_host_headless\"")
+
+describe "wm web standards child-frame budget regression (wm_web_standards_showcase_child_frame_timeout_2026-08-06)":
+    # @req REQ-SSPEC-SYSTEM
+    # Regression pin for doc/08_tracking/bug/wm_web_standards_showcase_child_frame_timeout_2026-08-06.md:
+    # the headless lane must be reachable without a GUI session and the spawned
+    # child's bridge + first-frame handoff must sit under bounded, env-tunable
+    # budgets that fail closed with a truthful reason (never a silent hang).
+
+    it "dispatches the headless lane before the GUI gate and bounds the child's bridge and first-frame waits":
+        step("Inspect the web standards showcase host-WM wrapper source")
+        val script = file_read("examples/06_io/ui/wm_web_standards_showcase_gui.spl")
+        # Reachability: headless capture dispatches from main() before the
+        # window-only SIMPLE_GUI gate, so the lane runs with no display.
+        expect(script).to_contain("if (env_get(\"SIMPLE_WM_HEADLESS_CAPTURE\") ?? \"\") == \"1\":")
+        expect(script).to_contain("return run_headless_capture(resolve_repo_root())")
+        # Bounded budgets: both handoff waits are deadline-bound and their
+        # budgets are env-tunable (defaults: bridge 300s, first frame 180s).
+        expect(script).to_contain("val bridge_timeout_ms = env_i64(\"SIMPLE_WM_HEADLESS_CAPTURE_BRIDGE_TIMEOUT_MS\", 300000)")
+        expect(script).to_contain("val frame_timeout_ms = env_i64(\"SIMPLE_WM_HEADLESS_CAPTURE_FRAME_TIMEOUT_MS\", 180000)")
+        expect(script).to_contain("fn wait_for_first_child_frame(frame_path: text, timeout_ms: i64) -> ChildFrame:")
+        expect(script).to_contain("while not child.ok and time_now_unix_micros() < deadline:")
+        # Truthful timeout diagnostics: the reason carries the underlying
+        # child-frame failure detail, not a bare "timeout".
+        expect(script).to_contain("child-frame-timeout:{{child.reason}}")
+        # The child's own example watchdog is disabled so the host's bounded
+        # budget (not an unbounded wait) governs the handoff.
+        expect(script).to_contain("env[\"SIMPLE_TIMEOUT_SECONDS\"] = \"0\"")
+        # Windows child launch: the env-overlay native spawn refuses the
+        # interpreted/JIT lane (-95), so the wrapper publishes the client env
+        # in-process and uses the plain async spawn the interpreter supports.
+        expect(script).to_contain("use app.io.env_ops.{{host_os, cwd, env_set}}")
+        expect(script).to_contain("return process_spawn_async(simple_bin, [\"run\", showcase_source_path])")

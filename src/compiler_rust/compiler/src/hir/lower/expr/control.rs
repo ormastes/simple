@@ -467,6 +467,7 @@ impl Lowerer {
                 }
             }
         }
+        self.reject_uninferred_join(&then_hir, else_hir.as_deref(), ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -670,6 +671,7 @@ impl Lowerer {
 
         // Restore context; lambda-local variables must not leak to the outer function.
         ctx.locals.truncate(saved_locals_len);
+        ctx.uninferred_locals.retain(|index, _| *index < saved_locals_len);
         ctx.local_map = saved_local_map;
 
         Ok(HirExpr {
@@ -812,6 +814,7 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_subject_for_patterns(subject, arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value
@@ -920,6 +923,7 @@ impl Lowerer {
             && self.weak_arm_matches_sibling(&then_branch, then_ty, else_branch.ty)
             && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
         let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
+        self.reject_uninferred_join(&then_branch, Some(&else_branch), ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::If {

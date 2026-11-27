@@ -805,7 +805,11 @@ impl MirInterpreter:
                 # :296 already classes it with Nop. Executable backends must skip
                 # it -- rejecting it made every Result-matching module
                 # native-unbuildable (E-BACKEND-LLVM-INST-ResultMatchSemantic).
-                ()
+                # Explicit None, not a unit fall-through: the interpreter host
+                # coerces a unit arm result into a phantom Some(()) error and
+                # aborts the executed match (linked error contract lane of
+                # mir_result_type_erasure_blocks_execution_linked_error_contracts_2026-08-12).
+                None
             case ScalableVecFence(_):
                 ()
             case SimdAddF32x4(dest, a, b) | SimdAddF32x8(dest, a, b) | SimdAddF64x4(dest, a, b) | SimdAddI32x4(dest, a, b) | SimdAddI32x8(dest, a, b):
@@ -1094,6 +1098,22 @@ impl MirInterpreter:
             case MirCallOrigin.Unknown:
                 return (None, Some(InterpError.UnsupportedOperation(op: "E-INTERP-CALL-Origin: unproved callable authority for '{name}'")))
             case MirCallOrigin.Runtime:
+                # A caller-bound model wins over the native bridge. The
+                # interpreter ships no runtime library for the tagged-enum
+                # operations the MIR lowering emits (rt_enum_new,
+                # rt_enum_discriminant, rt_enum_payload,
+                # rt_enum_check_variant), so specs model them in Simple
+                # source, lower them, and bind the models under their runtime
+                # names via set_function_table
+                # (optional_scalar_static_some_spec.spl documents the
+                # pattern). Runtime dispatch must honor that binding before
+                # falling back to the built-in arity bridge, else every
+                # executed Result construction, `?` propagation and Result
+                # match dies as E-INTERP-RUNTIME-Unknown
+                # (mir_result_type_erasure_blocks_execution_linked_error_contracts_2026-08-12,
+                # interpreter-execution arm).
+                if val modeled = self._resolve_function(name):
+                    return self._call_function(modeled, args)
                 val arity = mir_interp_runtime_arity_v1(name)
                 if arity < 0:
                     return (None, Some(InterpError.UnsupportedOperation(op: "E-INTERP-RUNTIME-Unknown: no runtime owner for '{name}'")))

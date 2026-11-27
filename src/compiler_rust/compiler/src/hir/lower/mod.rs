@@ -1,6 +1,7 @@
 mod context;
 pub mod deprecation_warning;
 mod error;
+pub(crate) mod implicit_generic;
 pub(crate) mod expr;
 pub(crate) mod import_loader;
 pub mod lenient_global_diag;

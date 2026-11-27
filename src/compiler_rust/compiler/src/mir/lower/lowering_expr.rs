@@ -243,7 +243,7 @@ impl<'a> MirLowerer<'a> {
             HirExprKind::Array(elements) => self.lower_array_expr(elements, expr_ty),
             HirExprKind::VecLiteral(elements) => self.lower_vec_literal_expr(elements),
             HirExprKind::Dict(pairs) => self.lower_dict_expr(pairs),
-            HirExprKind::ArrayRepeat { value, count } => self.lower_array_repeat_expr(value, count),
+            HirExprKind::ArrayRepeat { value, count } => self.lower_array_repeat_expr(value, count, expr_ty),
 
             HirExprKind::StructInit { ty, fields } => self.lower_struct_init_expr(*ty, fields),
             HirExprKind::FieldAccess { receiver, field_index } => {
