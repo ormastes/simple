@@ -280,10 +280,13 @@ Traps hit while doing it:
   2026-11-27, not run in the guest**: at the Start leader's reap (exit 0 only)
   the group runtime freezes the helper group and moves its members into
   `<delegatedCgroup>/simple-engine-<launch identity>` (`rt_lg_move_residue_v3`,
-  asked for by the thirteenth profile word, `leader_residue_mode` on the Start
-  projection only). The owner kills that group only after its own Stop, Remove
-  and Absence, at four sites (destroy, exited-start settle, probe settle,
-  transfer close; on the probe lane the completed `probe-wait` stands in for
+  asked for by the thirteenth profile word, `leader_residue_mode`, on the two
+  Start projections only: plain `linux_fresh_workload_project_launch_v2` and
+  workspace `linux_fresh_workspace_project_launch_v3`; both clear it for every
+  other action). The owner kills that group only after its own Stop, Remove
+  and Absence, at five sites (destroy, exited-start settle, probe settle,
+  transfer close, workspace settle `machine_workspace_settle_v3` before both of
+  its branches; on the probe lane the completed `probe-wait` stands in for
   Stop);
   earlier it refuses `machine-fresh-workload-engine-group-store-live`, and while
   a group is recorded no settle or close passes
@@ -293,8 +296,12 @@ Traps hit while doing it:
   the sixteen-field profile, `trailing wire fields`); the group has no limits of
   its own (conmon's `container cleanup` peaked at 12 MB and 18 pids, and a low
   limit would kill the monitor); the owner holds a name and a device/inode, not
-  a descriptor; a latched owner keeps its group, like its workload; workspace
-  starts do not ask for the move. Runtime proof:
+  a descriptor; a latched owner keeps its group, like its workload. A new launch
+  projection must set or clear the mode itself: the workspace one passed the
+  base profile through until 2026-11-27, so workspace containers lost conmon.
+  Primary attach, `wait`/`logs` and the socket exec leave nothing behind and
+  never ask; epoch startup V1 admits a `start` operand and has no engine-group
+  owner (open, see the record's path table). Runtime proof:
   `sh scripts/check/check-linux-group-residue-move.shs` (real cgroups, needs a
   delegated user scope, exits 77 without one).
 - Measured there (podman 4.9.3): `--cgroups=split` is refused with a cgroup
