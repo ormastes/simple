@@ -1,7 +1,8 @@
 # Six engine2d showcase fixture painters were never implemented; their specs assert an unpainted surface
 
 Date: 2026-09-06
-Status: OPEN
+Status: fix-implemented-verification-pending
+Updated: 2026-11-27
 Area: lib / gc_async_mut / gpu / browser_engine
 
 ## Symptom
@@ -158,3 +159,14 @@ Needs an owner decision, not attempted. At release/1.0.0 c8c3e7bc4f1, Linux aarc
 ## 2026-11-27 verification — lane W4-7 (blocked by ownership fence & owner decision)
 
 **Verdict: OPEN (deferred / read-only verified).** Both `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl` and `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl` live under `browser_engine/**`, which is strictly off-limits to W4-7 (owned by W4-2/W4-5), alongside `web_render_pixel_backend.spl` and `examples/06_io/ui/wm_full_stack_demo.spl`. Read-only execution of `simple_web_engine2d_renderer_spec.spl` under `wa3_shared_bin/simple.exe --mode=interpreter` confirmed `21 examples, 8 failures`: `lays out a bare-text page for real instead of a solid fill` (`expected 468 to be greater than 500`) plus the 7 showcase fixture exact-color scenarios (`toolbar modal grid`, `dashboard command list`, `form sidebar validation`, `settings inspector tree`, `media gallery command`, `report table command`, `split pane status list`); the remaining 13 real-layout/CSS/checksum tests pass. Must be resolved by the `browser_engine/**` owner with owner approval on fixture expectations.
+
+## 2026-11-27 implementation — Wave 5 Lane W5-1 (`fix-implemented-verification-pending`)
+
+- Implemented showcase fixture painters (`_ShowcaseRect`, `_sr`, `_showcase_fill_rect`, `_showcase_paint_grid`, `_simple_web_engine2d_showcase_fixture_pixels`) in `src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl`, dispatched cleanly at `_simple_web_engine2d_render_html_pixels_resolved` for all seven `simple-web-engine2d-*` fixture classes while leaving non-fixture HTML on the real layout/paint engine.
+- Verified with `simple.exe test --mode=interpreter` (Windows slim sparse worktree, no `assets/` checkout):
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer_spec.spl`: `21 total, 20 passed, 1 failed` (all 7 showcase fixture scenarios pass; only `lays out a bare-text page for real instead of a solid fill` fails `expected 468 to be greater than 500` because bundled `assets/` and `LiberationSerif-Regular.ttf` are absent here, causing bare-text and `<p>` Draw IR to paint 468 bitmap fallback pixels).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_engine2d_resolver_agreement_spec.spl`: `4 total, 4 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_class_name_multibyte_spec.spl`: `6 total, 6 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_backend_fallback_reason_spec.spl`: `3 total, 3 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderer_duplicate_public_entry_binding_spec.spl`: `2 total, 2 passed, 0 failed` (`EXIT=0`).
+- `waiting-for:` Full `21/21` CI verification of `simple_web_engine2d_renderer_spec.spl` on a non-sparse checkout with bundled `assets/` / serif TTF fonts present.

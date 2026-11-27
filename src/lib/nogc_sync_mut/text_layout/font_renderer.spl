@@ -387,7 +387,7 @@ use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, sfnt_gray_glyph_outline, sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdGlyph, SfntLcdOutline}
 use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
-use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
+use std.common.encoding.font_registry.{FontAssetCandidate, FontAssetRuntimeValidation, clear_registered_selected_font_fixtures, register_selected_font_fixture, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
@@ -809,6 +809,7 @@ fn _font_renderer_reset_registered_selected_bytes_for_test():
     _registered_selected_font_blobs = []
     _registered_selected_fonts_only = false
     _last_selected_registration_reason = ""
+    clear_registered_selected_font_fixtures()
 
 # Receipt for the LAST font_renderer_register_selected_bytes call. A module
 # global scalar/text, not a returned aggregate: the baremetal lane loses
@@ -851,14 +852,28 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
         _last_selected_registration_reason = "identity"
         return false
     val active_lock = _browser_default_font_lock_acquire()
-    for registered_path in _registered_selected_font_paths:
-        if registered_path == path:
+    var existing_index: i64 = 0
+    while existing_index < _registered_selected_font_paths.len():
+        if _registered_selected_font_paths[existing_index] == path:
+            _registered_selected_font_blobs[existing_index] = blob
             _browser_default_font_lock_release(active_lock)
             return true
+        existing_index = existing_index + 1
     _registered_selected_font_paths = _registered_selected_font_paths.push(path)
     _registered_selected_font_blobs = _registered_selected_font_blobs.push(blob)
     _browser_default_font_lock_release(active_lock)
     true
+
+pub fn font_renderer_register_font_fixture_bytes(path: text, family: text, blob: [u8]) -> FontAssetRuntimeValidation:
+    """Register a test font fixture in both the provenance registry and in-memory byte cache."""
+    val registered = register_selected_font_fixture(path, family, blob)
+    if not registered.valid:
+        _last_selected_registration_reason = registered.reason
+        return registered
+    if not font_renderer_register_selected_bytes(path, blob):
+        val fail_reason = if _last_selected_registration_reason != "": _last_selected_registration_reason else: "runtime"
+        return FontAssetRuntimeValidation(selected: true, valid: false, family: registered.family, reason: fail_reason)
+    registered
 
 fn _browser_default_font_rebuild_from_path(font_path: text) -> (FontRenderer, bool):
     """Reconstruct a fresh FontRenderer for a cache hit from the ALREADY
