@@ -579,6 +579,7 @@ impl Lowerer {
             Type::Capability { capability, inner } => {
                 // Resolve the inner type first
                 let inner_id = self.resolve_type(inner)?;
+                let is_optional_inner = self.module.types.optional_inner(inner_id).is_some();
 
                 // Get the inner HIR type to check if it's already a pointer
                 if let Some(inner_hir) = self.module.types.get(inner_id) {
@@ -588,11 +589,19 @@ impl Lowerer {
                             capability: _,
                             inner: ptr_inner,
                         } => {
+                            let kind = *kind;
+                            let ptr_inner = *ptr_inner;
+                            if is_optional_inner
+                                && kind == PointerKind::Shared
+                                && *capability == ReferenceCapability::Shared
+                            {
+                                return Ok(self.module.types.register_optional(ptr_inner));
+                            }
                             // Inner is already a pointer, update its capability
                             let ptr_type = HirType::Pointer {
-                                kind: *kind,
+                                kind,
                                 capability: *capability,
-                                inner: *ptr_inner,
+                                inner: ptr_inner,
                             };
                             Ok(self.module.types.register(ptr_type))
                         }

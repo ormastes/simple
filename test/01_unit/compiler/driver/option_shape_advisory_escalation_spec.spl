@@ -1,0 +1,257 @@
+# Purpose and audience: executable prevention specification for driver typecheck
+# advisory escalation of SPL-PAT-001 and Option/Result unwrap_or errors.
+# @req REQ-SSPEC-UNIT
+# Prevention spec for
+# doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+
+use std.spec.*
+use std.spec.step
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1, OptionShapeSeverityVerdictV1, option_shape_severity_verdict_v1}
+use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity}
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr, ExportAttr}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+
+fn opt_driver_fn(sym: SymbolId, name: text, params: [HirParam], ret_ty: HirType, body_val: HirExpr, sp: Span) -> HirFunction:
+    val blk = HirBlock(stmts: [], has: true, value: body_val, span: sp)
+    HirFunction(symbol: sym, name: name,
+        type_params: [], params: params, return_type: ret_ty, body: blk,
+        effects: [], visibility: Visibility.Public, is_async: false,
+        is_static: false, is_public: true, is_method: false, is_mutable: false,
+        is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: sp,
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+
+fn opt_driver_struct(sym: SymbolId, name: text, sp: Span) -> HirStruct:
+    HirStruct(symbol: sym, name: name, type_params: [], fields: [],
+        visibility: Visibility.Public, is_public: true,
+        has_doc_comment: false, doc_comment: "", span: sp,
+        has_layout_attr: false, layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_platform_attr: false, platform_has_error: false,
+        platform_has_warning: false, platform_diagnostic_message: "",
+        platform_diagnostic_line: 0, is_generic_template: false,
+        has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+
+fn opt_driver_class(sym: SymbolId, name: text, methods: Dict<text, SymbolId>, sp: Span) -> HirClass:
+    HirClass(symbol: sym, name: name, type_params: [], fields: [],
+        methods: methods, visibility: Visibility.Public, is_public: true,
+        has_doc_comment: false, doc_comment: "", span: sp,
+        has_layout_attr: false, layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_export_attr: false, export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_platform_attr: false, platform_has_error: false,
+        platform_has_warning: false, platform_diagnostic_message: "",
+        platform_diagnostic_line: 0, is_generic_template: false,
+        has_specialization_of: false, specialization_of: "",
+        type_bindings: {})
+
+fn opt_driver_impl(target_ty: HirType, methods: Dict<text, SymbolId>, sp: Span) -> HirImpl:
+    HirImpl(type_: target_ty, has_trait_: false, trait_: target_ty,
+        type_params: [], where_clause: [], methods: methods,
+        method_return_struct_names: {}, method_return_is_array: {},
+        method_return_is_optional: {}, assoc_type_impls: [], span: sp)
+
+fn opt_driver_mod_single(name: text, ret_ty: HirType, body_val: HirExpr, sp: Span) -> HirModule:
+    var symbols = SymbolTable.new()
+    val sym = symbols.define(name, SymbolKind.Function, Some(ret_ty), sp, Visibility.Public, false, Some("opt_driver_probe"))
+    val blk = HirBlock(stmts: [], has: true, value: body_val, span: sp)
+    val f = HirFunction(symbol: sym, name: name,
+        type_params: [], params: [], return_type: ret_ty, body: blk,
+        effects: [], visibility: Visibility.Public, is_async: false,
+        is_static: false, is_public: true, is_method: false, is_mutable: false,
+        is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil,
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: nil,
+        has_doc_comment: false, doc_comment: "", span: sp,
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: nil, is_generic_template: false)
+    var funcs: Dict<SymbolId, HirFunction> = {}
+    funcs[sym] = f
+    HirModule(name: "opt_driver_probe", path: "opt_driver_probe.spl", imports: [],
+        exports: [], domain_blocks: [], symbols: symbols,
+        functions: funcs, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+        bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+        aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+        types: [], extend_enums: [])
+
+fn is_mandatory_verdict(v: OptionShapeSeverityVerdictV1) -> bool:
+    match v:
+        case OptionShapeSeverityVerdictV1.MandatoryError: true
+        case OptionShapeSeverityVerdictV1.StandardSeverity: false
+
+describe "driver typecheck receipt escalates Option pattern and unwrap_or errors under Advisory":
+    # @manual scenario evidence
+    it "classifies SPL-PAT-001, Option pattern/method, and Result unwrap_or mismatches as mandatory errors":
+        # @req REQ-SSPEC-UNIT
+        step("verify mandatory escalation predicate isolates option shape diagnostics from generic advisory errors")
+        expect(is_mandatory_verdict(option_shape_severity_verdict_v1("[typecheck] m: error[SPL-PAT-001]: bad"))).to_equal(true)
+        expect(is_mandatory_verdict(option_shape_severity_verdict_v1("[typecheck] m: Option method 'unwrap_or' requires an optional receiver"))).to_equal(true)
+        expect(is_mandatory_verdict(option_shape_severity_verdict_v1("[typecheck] m: Option pattern 'Some' expects Option"))).to_equal(true)
+        expect(is_mandatory_verdict(option_shape_severity_verdict_v1("[typecheck] m: Result method 'unwrap_or' default argument type mismatch"))).to_equal(true)
+        expect(is_mandatory_verdict(option_shape_severity_verdict_v1("[typecheck] m: [E-TYPE-NIL-COMPARE] ordinary nil warning"))).to_equal(false)
+
+    it "collect_module_typecheck_receipt_v1 populates receipt.errors even when severity is Advisory":
+        # @req REQ-SSPEC-UNIT
+        step("drive non-optional unwrap_or, mismatched Option.unwrap_or, and valid Option.unwrap_or through collect_module_typecheck_receipt_v1")
+        val sp = Span.empty()
+        val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val opt_ty = HirType(kind: HirTypeKind.Optional(i_ty), span: sp)
+        val str_ty = HirType(kind: HirTypeKind.Str, span: sp)
+        val int6 = HirExpr(kind: HirExprKind.IntLit(6, None), has_type_: true, type_: i_ty, span: sp)
+        val opt6 = HirExpr(kind: HirExprKind.ExistsCheck(int6), has_type_: false, type_: opt_ty, span: sp)
+        val int_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.IntLit(9, None), has_type_: true, type_: i_ty, span: sp), span: sp)
+        val str_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.StringLit("bad", nil), has_type_: true, type_: str_ty, span: sp), span: sp)
+
+        val bad_recv_expr = HirExpr(kind: HirExprKind.MethodCall(int6, "unwrap_or", [int_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        val bad_recv_rec = collect_module_typecheck_receipt_v1("bad_recv", opt_driver_mod_single("f1", i_ty, bad_recv_expr, sp), TypecheckPassSeverity.Advisory)
+        expect(bad_recv_rec.errors.len()).to_equal(1)
+        expect(bad_recv_rec.errors[0]).to_contain("Option method 'unwrap_or' requires an optional receiver")
+
+        val bad_def_expr = HirExpr(kind: HirExprKind.MethodCall(opt6, "unwrap_or", [str_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        val bad_def_rec = collect_module_typecheck_receipt_v1("bad_def", opt_driver_mod_single("f2", i_ty, bad_def_expr, sp), TypecheckPassSeverity.Advisory)
+        expect(bad_def_rec.errors.len()).to_equal(1)
+        expect(bad_def_rec.errors[0]).to_contain("Option method 'unwrap_or' default argument type mismatch")
+
+        val ok_expr = HirExpr(kind: HirExprKind.MethodCall(opt6, "unwrap_or", [int_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        val ok_rec = collect_module_typecheck_receipt_v1("ok_opt", opt_driver_mod_single("f3", i_ty, ok_expr, sp), TypecheckPassSeverity.Advisory)
+        expect(ok_rec.errors.len()).to_equal(0)
+
+    it "rejects Option methods on local nominal types without custom methods while preserving local and cross-module custom methods":
+        # @req REQ-SSPEC-UNIT
+        step("verify local Point struct without unwrap_or fails, local BoxCls/WrapStruct with unwrap_or pass, and cross-module RemoteWrap respects project_modules")
+        val sp = Span.empty()
+        val i_ty = HirType(kind: HirTypeKind.Int(64, true), span: sp)
+        val nil_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: i_ty, span: sp)
+        val int_arg = HirCallArg(name: nil, value: HirExpr(kind: HirExprKind.IntLit(7, None), has_type_: true, type_: i_ty, span: sp), span: sp)
+
+        # (a) Local struct Point without unwrap_or fails under Advisory
+        var s_pt = SymbolTable.new()
+        val pt_sym = s_pt.define("Point", SymbolKind.Struct, nil, sp, Visibility.Public, false, Some("pt_mod"))
+        val pt_ty = HirType(kind: HirTypeKind.Named(pt_sym, []), span: sp)
+        val p_sym_pt = s_pt.define("p", SymbolKind.Parameter, Some(pt_ty), sp, Visibility.Private, false, Some("pt_mod"))
+        val f_sym_pt = s_pt.define("use_pt", SymbolKind.Function, Some(i_ty), sp, Visibility.Public, false, Some("pt_mod"))
+        val p_ref_pt = HirExpr(kind: HirExprKind.NamedVar(p_sym_pt, "p"), has_type_: true, type_: pt_ty, span: sp)
+        val pt_call = HirExpr(kind: HirExprKind.MethodCall(p_ref_pt, "unwrap_or", [int_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        val pt_param = HirParam(symbol: p_sym_pt, name: "p", type_: pt_ty, has_default: false, default: nil_expr, span: sp, is_mutable: false)
+        var pt_funcs: Dict<SymbolId, HirFunction> = {}
+        pt_funcs[f_sym_pt] = opt_driver_fn(f_sym_pt, "use_pt", [pt_param], i_ty, pt_call, sp)
+        var pt_structs: Dict<SymbolId, HirStruct> = {}
+        pt_structs[pt_sym] = opt_driver_struct(pt_sym, "Point", sp)
+        val pt_mod = HirModule(name: "pt_mod", path: "pt_mod.spl", imports: [],
+            exports: [], domain_blocks: [], symbols: s_pt,
+            functions: pt_funcs, gpu_function_targets: {},
+            gpu_function_backend_orders: {}, classes: {}, structs: pt_structs, enums: {},
+            bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+            aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+            types: [], extend_enums: [])
+        val pt_rec = collect_module_typecheck_receipt_v1("pt_mod", pt_mod, TypecheckPassSeverity.Advisory)
+        expect(pt_rec.errors.len()).to_equal(1)
+        expect(pt_rec.errors[0]).to_contain("Option method 'unwrap_or' requires an optional receiver")
+
+        # (b) Local class BoxCls defining unwrap_or in HirClass.methods and struct WrapStruct with HirImpl pass
+        var s_local_ok = SymbolTable.new()
+        val box_sym = s_local_ok.define("BoxCls", SymbolKind.Class, nil, sp, Visibility.Public, false, Some("local_ok_mod"))
+        val wrap_sym = s_local_ok.define("WrapStruct", SymbolKind.Struct, nil, sp, Visibility.Public, false, Some("local_ok_mod"))
+        val box_m_sym = s_local_ok.define("BoxCls.unwrap_or", SymbolKind.Method, Some(i_ty), sp, Visibility.Public, false, Some("local_ok_mod"))
+        val wrap_m_sym = s_local_ok.define("WrapStruct.unwrap_or", SymbolKind.Method, Some(i_ty), sp, Visibility.Public, false, Some("local_ok_mod"))
+        val box_ty = HirType(kind: HirTypeKind.Named(box_sym, []), span: sp)
+        val wrap_ty = HirType(kind: HirTypeKind.Named(wrap_sym, []), span: sp)
+        val bp_sym = s_local_ok.define("b", SymbolKind.Parameter, Some(box_ty), sp, Visibility.Private, false, Some("local_ok_mod"))
+        val wp_sym = s_local_ok.define("w", SymbolKind.Parameter, Some(wrap_ty), sp, Visibility.Private, false, Some("local_ok_mod"))
+        val f_box_sym = s_local_ok.define("use_box", SymbolKind.Function, Some(i_ty), sp, Visibility.Public, false, Some("local_ok_mod"))
+        val f_wrap_sym = s_local_ok.define("use_wrap", SymbolKind.Function, Some(i_ty), sp, Visibility.Public, false, Some("local_ok_mod"))
+        val b_call = HirExpr(kind: HirExprKind.MethodCall(HirExpr(kind: HirExprKind.NamedVar(bp_sym, "b"), has_type_: true, type_: box_ty, span: sp), "unwrap_or", [int_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        val w_call = HirExpr(kind: HirExprKind.MethodCall(HirExpr(kind: HirExprKind.NamedVar(wp_sym, "w"), has_type_: true, type_: wrap_ty, span: sp), "unwrap_or", [int_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        var ok_funcs: Dict<SymbolId, HirFunction> = {}
+        ok_funcs[f_box_sym] = opt_driver_fn(f_box_sym, "use_box", [HirParam(symbol: bp_sym, name: "b", type_: box_ty, has_default: false, default: nil_expr, span: sp, is_mutable: false)], i_ty, b_call, sp)
+        ok_funcs[f_wrap_sym] = opt_driver_fn(f_wrap_sym, "use_wrap", [HirParam(symbol: wp_sym, name: "w", type_: wrap_ty, has_default: false, default: nil_expr, span: sp, is_mutable: false)], i_ty, w_call, sp)
+        var box_methods: Dict<text, SymbolId> = {}
+        box_methods["unwrap_or"] = box_m_sym
+        var ok_classes: Dict<SymbolId, HirClass> = {}
+        ok_classes[box_sym] = opt_driver_class(box_sym, "BoxCls", box_methods, sp)
+        var ok_structs: Dict<SymbolId, HirStruct> = {}
+        ok_structs[wrap_sym] = opt_driver_struct(wrap_sym, "WrapStruct", sp)
+        var wrap_methods: Dict<text, SymbolId> = {}
+        wrap_methods["unwrap_or"] = wrap_m_sym
+        val ok_impls: [HirImpl] = [opt_driver_impl(wrap_ty, wrap_methods, sp)]
+        val local_ok_mod = HirModule(name: "local_ok_mod", path: "local_ok_mod.spl", imports: [],
+            exports: [], domain_blocks: [], symbols: s_local_ok,
+            functions: ok_funcs, gpu_function_targets: {},
+            gpu_function_backend_orders: {}, classes: ok_classes, structs: ok_structs, enums: {},
+            bitfields: {}, traits: {}, impls: ok_impls, constants: {}, static_asserts: [],
+            aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+            types: [], extend_enums: [])
+        val local_ok_rec = collect_module_typecheck_receipt_v1("local_ok_mod", local_ok_mod, TypecheckPassSeverity.Advisory)
+        expect(local_ok_rec.errors.len()).to_equal(0)
+
+        # (c) Cross-module project_modules: RemoteWrap defines unwrap_or in mod_dep, not is_some
+        var s_dep = SymbolTable.new()
+        val dep_rw_sym = s_dep.define("RemoteWrap", SymbolKind.Struct, nil, sp, Visibility.Public, false, Some("mod_dep"))
+        val dep_m_sym = s_dep.define("RemoteWrap.unwrap_or", SymbolKind.Method, Some(i_ty), sp, Visibility.Public, false, Some("mod_dep"))
+        val dep_rw_ty = HirType(kind: HirTypeKind.Named(dep_rw_sym, []), span: sp)
+        var dep_structs: Dict<SymbolId, HirStruct> = {}
+        dep_structs[dep_rw_sym] = opt_driver_struct(dep_rw_sym, "RemoteWrap", sp)
+        var dep_methods: Dict<text, SymbolId> = {}
+        dep_methods["unwrap_or"] = dep_m_sym
+        val dep_mod = HirModule(name: "mod_dep", path: "mod_dep.spl", imports: [],
+            exports: [], domain_blocks: [], symbols: s_dep,
+            functions: {}, gpu_function_targets: {},
+            gpu_function_backend_orders: {}, classes: {}, structs: dep_structs, enums: {},
+            bitfields: {}, traits: {}, impls: [opt_driver_impl(dep_rw_ty, dep_methods, sp)], constants: {}, static_asserts: [],
+            aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+            types: [], extend_enums: [])
+
+        var s_use_ok = SymbolTable.new()
+        val use_rw_sym = s_use_ok.define("RemoteWrap", SymbolKind.Struct, nil, sp, Visibility.Public, false, Some("mod_dep"))
+        val use_rw_ty = HirType(kind: HirTypeKind.Named(use_rw_sym, []), span: sp)
+        val use_p_sym = s_use_ok.define("rw", SymbolKind.Parameter, Some(use_rw_ty), sp, Visibility.Private, false, Some("mod_use"))
+        val use_f_sym = s_use_ok.define("call_remote_ok", SymbolKind.Function, Some(i_ty), sp, Visibility.Public, false, Some("mod_use"))
+        val use_call_ok = HirExpr(kind: HirExprKind.MethodCall(HirExpr(kind: HirExprKind.NamedVar(use_p_sym, "rw"), has_type_: true, type_: use_rw_ty, span: sp), "unwrap_or", [int_arg], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        var use_ok_funcs: Dict<SymbolId, HirFunction> = {}
+        use_ok_funcs[use_f_sym] = opt_driver_fn(use_f_sym, "call_remote_ok", [HirParam(symbol: use_p_sym, name: "rw", type_: use_rw_ty, has_default: false, default: nil_expr, span: sp, is_mutable: false)], i_ty, use_call_ok, sp)
+        val mod_use_ok = HirModule(name: "mod_use", path: "mod_use.spl", imports: [],
+            exports: [], domain_blocks: [], symbols: s_use_ok,
+            functions: use_ok_funcs, gpu_function_targets: {},
+            gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+            bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+            aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+            types: [], extend_enums: [])
+        var proj_ok: Dict<text, HirModule> = {}
+        proj_ok["mod_dep"] = dep_mod
+        proj_ok["mod_use"] = mod_use_ok
+        val remote_ok_rec = collect_module_typecheck_receipt_v1("mod_use", mod_use_ok, TypecheckPassSeverity.Advisory, false, false, proj_ok)
+        expect(remote_ok_rec.errors.len()).to_equal(0)
+
+        var s_use_bad = SymbolTable.new()
+        val bad_rw_sym = s_use_bad.define("RemoteWrap", SymbolKind.Struct, nil, sp, Visibility.Public, false, Some("mod_dep"))
+        val bad_rw_ty = HirType(kind: HirTypeKind.Named(bad_rw_sym, []), span: sp)
+        val bad_p_sym = s_use_bad.define("rw", SymbolKind.Parameter, Some(bad_rw_ty), sp, Visibility.Private, false, Some("mod_use_bad"))
+        val bad_f_sym = s_use_bad.define("call_remote_bad", SymbolKind.Function, Some(i_ty), sp, Visibility.Public, false, Some("mod_use_bad"))
+        val use_call_bad = HirExpr(kind: HirExprKind.MethodCall(HirExpr(kind: HirExprKind.NamedVar(bad_p_sym, "rw"), has_type_: true, type_: bad_rw_ty, span: sp), "is_some", [], MethodResolution.Unresolved), has_type_: false, type_: i_ty, span: sp)
+        var use_bad_funcs: Dict<SymbolId, HirFunction> = {}
+        use_bad_funcs[bad_f_sym] = opt_driver_fn(bad_f_sym, "call_remote_bad", [HirParam(symbol: bad_p_sym, name: "rw", type_: bad_rw_ty, has_default: false, default: nil_expr, span: sp, is_mutable: false)], i_ty, use_call_bad, sp)
+        val mod_use_bad = HirModule(name: "mod_use_bad", path: "mod_use_bad.spl", imports: [],
+            exports: [], domain_blocks: [], symbols: s_use_bad,
+            functions: use_bad_funcs, gpu_function_targets: {},
+            gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {},
+            bitfields: {}, traits: {}, impls: [], constants: {}, static_asserts: [],
+            aop_advices: [], di_bindings: [], arch_rules: [], mock_decls: [],
+            types: [], extend_enums: [])
+        var proj_bad: Dict<text, HirModule> = {}
+        proj_bad["mod_dep"] = dep_mod
+        proj_bad["mod_use_bad"] = mod_use_bad
+        val remote_bad_rec = collect_module_typecheck_receipt_v1("mod_use_bad", mod_use_bad, TypecheckPassSeverity.Advisory, false, false, proj_bad)
+        expect(remote_bad_rec.errors.len()).to_equal(1)
+        expect(remote_bad_rec.errors[0]).to_contain("Option method 'is_some' requires an optional receiver")
+
+        # Without project_modules loaded, external defining_module avoids false positives
+        val remote_unloaded_rec = collect_module_typecheck_receipt_v1("mod_use_bad", mod_use_bad, TypecheckPassSeverity.Advisory)
+        expect(remote_unloaded_rec.errors.len()).to_equal(0)

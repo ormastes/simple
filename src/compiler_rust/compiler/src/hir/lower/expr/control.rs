@@ -969,6 +969,18 @@ impl Lowerer {
                     if subject_ty == TypeId::ANY {
                         return Ok(self.erased_none_arm_condition(&subject_ref));
                     }
+                    crate::hir::lower::option_pattern_shape_diag::report_if_never_option_with_owner(
+                        None,
+                        "nil",
+                        self.module.types.get(subject_ty),
+                        "expression form",
+                        crate::hir::lower::option_pattern_shape_diag::DiagLocation {
+                            file: self.current_file.as_deref(),
+                            function: self.current_function_name.as_deref(),
+                            line: self.current_pattern_span.map(|(line, _)| line),
+                            column: self.current_pattern_span.map(|(_, column)| column),
+                        },
+                    )?;
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -1066,11 +1078,13 @@ impl Lowerer {
                 })
             }
             Pattern::Enum { name: pattern_enum, variant, .. } => {
-                // Warn-only, DEFAULT OFF. Expression-form twin of the statement
-                // check in hir/lower/stmt_lowering.rs; reached for
+                // Warn-only, DEFAULT OFF for Ok/Err; error by default for Some/None.
+                // Expression-form twin of the statement check in
+                // hir/lower/stmt_lowering.rs; reached for
                 // `val x = match subj: case Some(v)`. See
                 // hir/lower/option_pattern_shape_diag.rs.
-                crate::hir::lower::option_pattern_shape_diag::report_if_never_option(
+                crate::hir::lower::option_pattern_shape_diag::report_if_never_option_with_owner(
+                    Some(pattern_enum.as_str()),
                     variant,
                     self.module.types.get(subject_ty),
                     "expression form",

@@ -3653,6 +3653,18 @@ impl Lowerer {
                     if subject_ty == TypeId::ANY {
                         return Ok(self.erased_none_arm_condition(&subject_ref));
                     }
+                    crate::hir::lower::option_pattern_shape_diag::report_if_never_option_with_owner(
+                        None,
+                        "nil",
+                        self.module.types.get(subject_ty),
+                        "statement form",
+                        crate::hir::lower::option_pattern_shape_diag::DiagLocation {
+                            file: self.current_file.as_deref(),
+                            function: self.current_function_name.as_deref(),
+                            line: self.current_pattern_span.map(|(line, _)| line),
+                            column: self.current_pattern_span.map(|(_, column)| column),
+                        },
+                    )?;
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -3784,12 +3796,13 @@ impl Lowerer {
                 Ok(self.named_struct_pattern_condition(&subject_ref, &name, &fields, ctx))
             }
             Pattern::Enum { name: pattern_enum, variant, .. } => {
-                // Warn-only, DEFAULT OFF. This is the statement-form half of the
-                // JIT's pattern decision -- proved by instrumentation to be the
-                // only site reached for `match x: case Some(v)` and for
-                // `if val Some(v) = x`. See
+                // Warn-only, DEFAULT OFF for Ok/Err; error by default for Some/None.
+                // This is the statement-form half of the JIT's pattern decision --
+                // proved by instrumentation to be the only site reached for
+                // `match x: case Some(v)` and for `if val Some(v) = x`. See
                 // hir/lower/option_pattern_shape_diag.rs.
-                crate::hir::lower::option_pattern_shape_diag::report_if_never_option(
+                crate::hir::lower::option_pattern_shape_diag::report_if_never_option_with_owner(
+                    Some(pattern_enum.as_str()),
                     variant,
                     self.module.types.get(subject_ty),
                     "statement form",
