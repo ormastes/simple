@@ -5890,3 +5890,30 @@ pins the border-box form, the default-UA gap is unfiled.
   coverage/gamma question, not a pen question. A smaller case is the table
   `Aligned` cell (579 px): after `Al` the glyphs carry a sub-device-px drift
   (the `l` band is best at dx = 0 / -1 mixed), while `Visible` matches.
+
+## 2026-11-27 (follow-up) — calc() operand kinds, constants, depth, clamp
+- calc() operands now carry a kind: number, length, or UNKNOWN (a function
+  such as `var()`, `min()`, `atan2()`, or a unit other than px/em/rem). UNKNOWN
+  is compatible with both, so `calc(var(--n) * 1px)` stays a valid AUTHOR
+  margin; before, it was INVALID and `_ua_em_block_margin` wrote the UA 1em
+  over it on p/h1-h6/lists. Function names may contain digits (`atan2`).
+- Constants `pi`, `e`, `infinity`, `-infinity` resolve (`nan` reads 0); a
+  division by zero is +-infinity. calc() evaluates in micro units with f64
+  multiply/divide (`calc(48px * 0.6667)` = 32, not 31).
+- Depth cap = Chrome 159's: 100 levels (`calc(` is 1; 99 nested parens OK,
+  100 dropped). An invalid calc() margin reads 0 (dropped), not a digit scrape.
+- Every length clamps to +-33554431 px (`CSS_LENGTH_MAX_MILLI`, Chrome's
+  LayoutUnit max) inside `css_length_milli`, and sub-pixel milli slots that
+  would not fit i32 read 0 (`_css_milli_slot`).
+- Open (layout_engine, handed to the layout lane): the block cursor wraps i32
+  milli-px for a vertical margin above ~2147483 px — base too,
+  `margin-top:30000000px` lands at y -64587. The spec therefore pins the
+  vertical clamp through the debug `margin_t` field, not y.
+- Spec: `test/01_unit/browser_engine/css_calc_operand_clamp_chrome159_spec.spl`.
+- Review fix (same day): only FUNCTIONS and non-length dimensions (`deg`, `s`)
+  are UNKNOWN. `%` and every unit in `CSS_LENGTH_UNITS` (moved from
+  renderer_core.spl to decl_apply.spl so both read one table) stay unresolved
+  LENGTH, so `calc(10% * 10%)`, `calc(1px * 1vw)`, `calc(1vw + 2)`,
+  `calc(5 / 1vw)` are still dropped (Chrome 159 keeps the UA 16px on a <p>).
+  `_css_number_scaled_at` stops multiplying at `limit / 10`; it used to wrap
+  so `calc(1e13px)` read 1 px.
