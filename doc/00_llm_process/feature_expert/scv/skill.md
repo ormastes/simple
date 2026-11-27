@@ -283,3 +283,18 @@ chunks as `scv-gc-<g>-<n>` only when `.scv/store` exists; without it gc is
 unchanged. Enable explicitly with `scv store-init` (never on by default).
 Spec: `test/01_unit/lib/nogc_sync_mut/storage/scv_gc_store_e2e_spec.spl`.
 Details: `doc/00_llm_process/feature_expert/simple_container_store/skill.md`.
+
+## Cold-init refusal names its reason (2026-11-28)
+
+`SCV-E-ADMISSION: git-event-refresh-failed` now carries a suffix:
+`git-event-refresh-failed:<branch>[:<detail>]`, e.g.
+`row-shape:byte_len=0:H examples/10_tooling/README.md`. Read it before
+suspecting the checkout. A `byte_len=0` (or any length that does not match the
+row) means the Stage 2 candidate miscompiled `text.byte_len()`, not that the
+git listing is bad.
+Trap: the Rust seed binds every text `x.byte_len()` in a closure to a lone free
+`fn byte_len`; never declare one (the loader helper is `lb_byte_len`).
+`nm <candidate> | grep byte_utils__` and `objdump --disassemble=<fn>` on the
+pinned candidate find this class in minutes; no rebuild needed.
+Bug: `doc/08_tracking/bug/seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28.md`.
+Spec: `test/01_unit/app/compiler_entrypoint/inventory_refusal_reason_spec.spl`.
