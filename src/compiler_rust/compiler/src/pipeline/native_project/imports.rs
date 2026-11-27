@@ -213,13 +213,24 @@ pub(crate) fn resolve_name_variants(
         if let Some(resolved) = use_map.get(&dotted).or_else(|| import_map.get(&dotted)) {
             return Some(resolved.clone());
         }
-        let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
-        if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
-            return Some(resolved.clone());
-        }
-        let lower_no_sep = format!("{}{}", type_part.to_lowercase(), method_part.to_lowercase());
-        if let Some(resolved) = import_map.get(&lower_no_sep) {
-            return Some(resolved.clone());
+        // Lowercase-joined spellings (`str_slice`, `strslice`) are the
+        // constructor/factory convention for USER types. For a BUILTIN
+        // receiver they must never rebind: the method is a builtin operation
+        // and a same-spelled user free function hijacks every call in the
+        // closure. Measured: `str.slice` bound to
+        // `compiler.frontend.core.types.str_slice` (code-point `s[a:b]`) and
+        // every text `.slice(a, b)` in the stage-2 compiler closure cut at
+        // code-point instead of byte offsets (00.common manifest parsed
+        // "ect:" for "project:"; stage2_test_runner_libunit_project_name_missing_2026-11-27).
+        if !is_builtin_receiver_type(type_part) {
+            let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
+            if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
+                return Some(resolved.clone());
+            }
+            let lower_no_sep = format!("{}{}", type_part.to_lowercase(), method_part.to_lowercase());
+            if let Some(resolved) = import_map.get(&lower_no_sep) {
+                return Some(resolved.clone());
+            }
         }
     }
     if let Some(pos) = name.find('.') {
@@ -235,9 +246,14 @@ pub(crate) fn resolve_name_variants(
                 return Some(resolved.clone());
             }
         }
-        let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
-        if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
-            return Some(resolved.clone());
+        // Same builtin-receiver guard as the `__` branch above: `str.slice`
+        // must not rebind to a user free function `str_slice` through the
+        // lowercase-joined spelling (stage2_test_runner_libunit_project_name_missing_2026-11-27).
+        if !is_builtin_receiver_type(type_part) {
+            let lower_joined = format!("{}_{}", type_part.to_lowercase(), method_part);
+            if let Some(resolved) = use_map.get(&lower_joined).or_else(|| import_map.get(&lower_joined)) {
+                return Some(resolved.clone());
+            }
         }
         // Last-resort bare-method lookup: DISCARDS the type qualifier and matches
         // on the method name alone. For a BUILTIN receiver that is never right --
@@ -2102,5 +2118,42 @@ mod numeric_receiver_resolution_tests {
     fn collection_receiver_still_rejects_bare_import() {
         let import = HashMap::from([("is_empty".to_string(), "unrelated__Sp.is_empty".to_string())]);
         assert_eq!(resolve_name_variants("Array.is_empty", &HashMap::new(), &import), None);
+    }
+
+    #[test]
+    fn builtin_receiver_does_not_bind_lowercase_joined_free_function() {
+        // stage2_test_runner_libunit_project_name_missing_2026-11-27: the
+        // closure exports `compiler.frontend.core.types.str_slice`, so the
+        // lowercase-joined lookup rebound EVERY text `.slice(a, b)` to it;
+        // its code-point `s[a:b]` shifted byte-offset cuts past non-ASCII
+        // text and the 00.common manifest parsed "ect:" for "project:".
+        let hijack = HashMap::from([(
+            "str_slice".to_string(),
+            "compiler__frontend__core__types__str_slice".to_string(),
+        )]);
+        assert_eq!(resolve_name_variants("str.slice", &HashMap::new(), &hijack), None);
+        assert_eq!(resolve_name_variants("str.slice", &hijack, &HashMap::new()), None);
+        for owner in ["text", "String", "str", "Array", "Dict", "i64", "u8"] {
+            let lower_joined = format!("{}_slice", owner.to_lowercase());
+            let colliding = HashMap::from([(lower_joined, "unrelated__helper".to_string())]);
+            let call = format!("{owner}.slice");
+            assert_eq!(resolve_name_variants(&call, &HashMap::new(), &colliding), None, "import map: {call}");
+            assert_eq!(resolve_name_variants(&call, &colliding, &HashMap::new()), None, "use map: {call}");
+        }
+    }
+
+    #[test]
+    fn builtin_receiver_does_not_bind_lowercase_no_sep_free_function() {
+        let colliding = HashMap::from([("strslice".to_string(), "unrelated__helper".to_string())]);
+        assert_eq!(resolve_name_variants("str.slice", &HashMap::new(), &colliding), None);
+    }
+
+    #[test]
+    fn user_type_keeps_lowercase_joined_factory_resolution() {
+        // The constructor/factory convention the lookup exists for:
+        // `TreeSitter.create` -> free function `treesitter_create`.
+        let owned = "bindings__treesitter__treesitter_create".to_string();
+        let import = HashMap::from([("treesitter_create".to_string(), owned.clone())]);
+        assert_eq!(resolve_name_variants("TreeSitter.create", &HashMap::new(), &import), Some(owned));
     }
 }
