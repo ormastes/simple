@@ -2819,6 +2819,7 @@ pub(super) fn bootstrap_mutex_runtime_requested_symbols() -> Vec<String> {
         "rt_process_rss_kib",
         "rt_file_create_excl",
         "rt_file_sync",
+        "rt_dir_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",

@@ -1910,6 +1910,29 @@ int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len) {
 int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len) {
     return rt_fsync_text_path(path_ptr, path_len);
 }
+/* rt_dir_sync(path) -> bool: make directory-entry changes (a no-replace
+ * rename/link into `path`) durable. POSIX: open the directory O_RDONLY|
+ * O_DIRECTORY and fsync it. Windows/NTFS has no portable directory fsync (a
+ * directory handle cannot be flushed) and its metadata is journaled, so a
+ * Windows build returns true when `path` is an existing directory. A missing
+ * path or a non-directory is false on every platform. */
+int         rt_dir_sync(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
+#if defined(_WIN32)
+    DWORD attrs = GetFileAttributesA(path);
+    return (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) ? 1 : 0;
+#else
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0
+#endif
+    int fd = open(path, O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return 0;
+    int ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    return ok ? 1 : 0;
+#endif
+}
 int64_t     rt_crc32_text(const char* text, int64_t text_len) {
     if (!text || text_len <= 0) return 0;
     uint32_t crc = 0xFFFFFFFF;

@@ -857,6 +857,27 @@ pub fn rt_file_fsync_cached(args: &[Value]) -> Result<Value, CompileError> {
     rt_file_fsync(args)
 }
 
+/// `rt_dir_sync(path) -> bool`: make directory-entry changes durable.
+/// Unix: open the directory and fsync it. Windows/NTFS has no portable
+/// directory fsync and journals metadata, so report whether `path` is an
+/// existing directory. Missing path or non-directory is false.
+pub fn rt_dir_sync(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    #[cfg(windows)]
+    {
+        return Ok(Value::Bool(std::path::Path::new(&path).is_dir()));
+    }
+    #[cfg(not(windows))]
+    {
+        if !std::path::Path::new(&path).is_dir() {
+            return Ok(Value::Bool(false));
+        }
+        Ok(Value::Bool(
+            std::fs::File::open(&path).and_then(|dir| dir.sync_all()).is_ok(),
+        ))
+    }
+}
+
 /// CRC32 checksum of a text string. Returns the checksum as i64.
 pub fn rt_crc32_text(args: &[Value]) -> Result<Value, CompileError> {
     let text = extract_content(args, 0)?;

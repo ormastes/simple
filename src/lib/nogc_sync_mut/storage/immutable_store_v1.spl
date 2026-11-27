@@ -18,7 +18,7 @@ use std.common.storage.object_record_v1.{OBJECT_RECORD_V1_VERSION, DigestAliasV1
 use std.nogc_sync_mut.sosix.fs_v1.{file_exists, file_publish_noreplace_raw,
     file_read_regular_no_follow_bounded, file_read_regular_no_follow_bounded_bytes,
     file_write_bytes, secure_temp_dir_raw, dir_create_all, dir_list, dir_remove_all, is_dir,
-    dir_create_new, file_delete, dir_list_optional, rename_path, file_sync, file_modified_time}
+    dir_create_new, file_delete, dir_list_optional, rename_path, file_sync, dir_sync, file_modified_time}
 
 use std.nogc_sync_mut.database.atomic.{atomic_write_bytes}
 use std.nogc_sync_mut.sosix.time.{time_sample_unix_micros_or_failure}
@@ -219,6 +219,27 @@ fn _isv1_join(root: text, rel: text) -> text:
         return root + rel
     root + "/" + rel
 
+# Parent directory of a '/'- or '\'-separated path ("" when it has none).
+fn _isv1_parent_dir(path: text) -> text:
+    var i = path.byte_len() - 1
+    while i >= 0:
+        val ch = path.substring(i, i + 1)
+        if ch == "/" or ch == "\\":
+            return path.substring(0, i)
+        i = i - 1
+    ""
+
+# Make a just-completed no-replace rename durable by syncing the destination's
+# directory. FAIL-OPEN by design: the object/record/alias is already published
+# and visible to readers, so rejecting the ingest would report a failure for
+# state that exists (and a retry would only see "already present"). A failed
+# directory sync can lose the NAME on a crash, never corrupt content; ingest is
+# idempotent so a lost name is re-published by the next ingest of the same key.
+fn _isv1_sync_published_dir(destination: text):
+    val parent = _isv1_parent_dir(destination)
+    if parent != "":
+        val _durable = dir_sync(parent)
+
 fn _isv1_object_path(root: text, key: text) -> text:
     _isv1_join(root, "objects/" + key.substring(0, 2) + "/" + key + ".obj")
 fn _isv1_record_path(root: text, key: text) -> text:
@@ -382,6 +403,8 @@ fn _isv1_publish_text_noreplace(root: text, leaf: text, content: text, destinati
         dir_remove_all(stage)
         return -1
     val published = file_publish_noreplace_raw(staged, destination)
+    if published == 1:
+        _isv1_sync_published_dir(destination)
     # The rename may consume the staged file; remove only our private dir,
     # never the winning destination.
     dir_remove_all(stage)
@@ -554,6 +577,7 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
         published = file_publish_noreplace_raw(staged_object, object_path)
         tries = tries + 1
     if published == 1:
+        _isv1_sync_published_dir(object_path)
         val finish_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
         dir_remove_all(stage)
         if finish_reason != "":
@@ -567,6 +591,7 @@ fn _isv1_publish(root: text, key: text, bytes: [u8], algorithm: text, alias_hex:
                 # read; the stage still exists, so retry the no-replace publish.
                 val retried = file_publish_noreplace_raw(staged_object, object_path)
                 if retried == 1:
+                    _isv1_sync_published_dir(object_path)
                     val retry_reason = _isv1_finish_publish(root, key, bytes.len(), algorithm, alias_hex, profile, from_collision)
                     dir_remove_all(stage)
                     if retry_reason != "":

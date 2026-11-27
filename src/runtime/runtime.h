@@ -1875,6 +1875,7 @@ int64_t     rt_file_size(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_fsync_cached(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
+int         rt_dir_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
