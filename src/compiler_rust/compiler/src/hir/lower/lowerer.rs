@@ -442,6 +442,25 @@ thread_local! {
     static PRIVATE_REF_VIOLATIONS: std::cell::RefCell<Option<Vec<PrivateRefViolation>>> = const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// True while the unit being lowered on this thread has a SCRIPT entry
+    /// file (see `set_entry_script_mode`).
+    static ENTRY_SCRIPT_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Tell the lowerings that follow on this thread whether the entry file is a
+/// script by file kind (`.shs` / `.sscript`; `.spl` is a compiled safe module,
+/// specs included). Script-owned
+/// functions keep dynamically typed value joins; see
+/// `Lowerer::join_value_arms`. Only the run/JIT lane sets it.
+pub fn set_entry_script_mode(on: bool) {
+    ENTRY_SCRIPT_MODE.with(|cell| cell.set(on));
+}
+
+pub(crate) fn entry_script_mode() -> bool {
+    ENTRY_SCRIPT_MODE.with(|cell| cell.get())
+}
+
 fn private_ref_gate_armed() -> bool {
     PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow().is_some())
 }
