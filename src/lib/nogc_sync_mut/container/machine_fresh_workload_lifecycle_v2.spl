@@ -16,6 +16,7 @@ use std.common.contracts.container.linux_fresh_workspace_v3.{LinuxFreshWorkspace
 use std.nogc_sync_mut.container.machine_fresh_workload_inspect_v2.*
 use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.LinuxFreshEpochSuccessorCustodyV1
 use std.common.contracts.container.linux_fresh_workload_v2.{LinuxFreshWorkloadCommandV2, LinuxFreshWorkloadActionV2, LinuxFreshWorkloadClosureV2}
+use std.common.contracts.container.linux_fresh_workload_probe_v3.linux_fresh_workload_read_prior_v3
 use std.common.crypto.sha256.sha256_text
 use std.nogc_sync_mut.container.machine_fresh_workload_history_v2.*
 use std.nogc_sync_mut.container.machine_fresh_workload_settlement_v2.*
@@ -474,6 +475,10 @@ pub class MachineFreshWorkloadLifecycleV2:
         if state.permit != "idle": return Err("machine-fresh-workload-action-already-attempted")
         val probe_action = ["probe-wait", "probe-logs"].contains(action)
         if probe_action and state.probe_custody.is_none(): return Err("machine-probe-profile-not-selected")
+        # Bounded once-only reads of an ordinary CPU workload. The provider probe lane owns its own
+        # probe-wait/probe-logs pair and its own settlement rule, so the two never mix in one record.
+        val read_action = action == "wait" or action == "logs"
+        if read_action and state.probe_custody.is_some(): return Err("machine-fresh-workload-read-probe-lane-owned")
         val prior = match action:
             case "probe-wait": "start"
             case "probe-logs": "probe-wait"
@@ -485,6 +490,8 @@ pub class MachineFreshWorkloadLifecycleV2:
             case "inspect-confirm": "inspect"
             case "primary-attach": "inspect-confirm"
             case "inspect-exit": "inspect-confirm"
+            case "wait": linux_fresh_workload_read_prior_v3(action)?
+            case "logs": linux_fresh_workload_read_prior_v3(action)?
             case "stop": if state.outcome_unknown: "create" else: (if state.probe_custody.is_some(): "probe-logs" else: "inspect-confirm")
             case "remove": "stop"
             case "absence": "remove"

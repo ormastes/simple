@@ -214,6 +214,18 @@ Traps hit while doing it:
   in `}}` silently loses a brace (`Unclosed object`); write `"}" + "}"`.
 - Canonical SDN writes bare strings (`execTerminalMode: tty`, no quotes), so a
   `replace` on the quoted form is a silent no-op; assert the text changed.
-- The fresh route still has no `wait`/`logs` read
-  (`container_fresh_route_wait_logs_unsupported_2026-11-27.md`), so
-  `podman_shared_api_live_spec` cannot go green on admission alone.
+- Fresh-route `wait`/`logs` (2026-11-27,
+  `container_fresh_route_wait_logs_unsupported_2026-11-27.md`): two named
+  stages of the Inspect action, bound through the existing closed probe
+  projection (`linux_fresh_workload_probe_project_v3`, tail
+  `<verb> -- <native id>`). Not new `LinuxFreshWorkloadActionV2` values, not the
+  probe custody lane (that one needs a compiled provider-CLI request and only
+  accepts exit `0`), and no new profile key. `logs` needs a completed `wait`;
+  each read runs once and then replays; a failed read sets `outcome_unknown`,
+  which still allows `destroy`. Source-only so far: `podman_shared_api_live_spec`
+  is not proven green, and a fast-exit workload may be refused at `start`.
+- A new operation name on the fresh route must be added in three places or a
+  later publish fails: the record's closed name list
+  (`machine_fresh_workload_action_initial_v2`), the `prior` table in
+  `action_begin_v2`, and the bind/validate branch in
+  `machine_fresh_workload_begin_v3`. The workspace record keeps its own list.
