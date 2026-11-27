@@ -807,6 +807,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Enum operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_enum_new", &[I32, I32, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_enum_new_none", &[I32, I32, I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_register_name", &[I32, I32, I64, I64, I64], &[]),
     RuntimeFuncSpec::new("rt_enum_check_discriminant", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_enum_check_variant", &[I64, I64, I64], &[I8]),
@@ -819,6 +820,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_expect_or_trap", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_unwrap_or_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_is_none", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_is_none_variant", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_is_some", &[I64], &[I8]),
     // `.?` presence (nil/None OR empty array/dict/string) — see rt_is_present.
     RuntimeFuncSpec::new("rt_is_present", &[I64], &[I8]),

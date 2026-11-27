@@ -1465,6 +1465,9 @@ typedef struct RtCoreMutex {
     int64_t value;
 } RtCoreMutex;
 
+/* RtCoreEnum.reserved2 flag: a variant NAMED `None` of an enum other than the
+ * builtin Option (set by rt_enum_new_none, read by rt_is_none_variant). */
+#define RT_ENUM_FLAG_NONE_VARIANT 1u
 typedef struct RtCoreEnum {
     uint8_t kind;
     uint8_t reserved[3];
@@ -6861,6 +6864,20 @@ int8_t rt_is_none(int64_t value) {
      * resolved the enum again): `?` on an Option calls this per evaluation. */
     RtCoreEnum* e = rt_core_as_enum(value);
     if (!e || (int64_t)e->enum_id != RT_OPTION_ENUM_ID) return 0;
+    int64_t discriminant = (int64_t)e->discriminant;
+    return discriminant == 1 || discriminant == RT_DISC_NONE;
+}
+/* rt_is_none, or a user enum variant named `None` (rt_enum_new_none): the test
+ * of a bare `None` / `nil` arm over an untyped subject. rt_is_none itself must
+ * keep ignoring the flag: a typed `Q?` holding `Q.None` is present. Twin of the
+ * Rust runtime's rt_is_none_variant (value/objects.rs).
+ * seed_jit_any_match_bare_none_arm_misses_user_enum_none_2026-11-27 */
+int8_t rt_is_none_variant(int64_t value) {
+    if (value == rt_core_nil()) return 1;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (!e) return 0;
+    if (__atomic_load_n(&e->reserved2, __ATOMIC_RELAXED) & RT_ENUM_FLAG_NONE_VARIANT) return 1;
+    if ((int64_t)e->enum_id != RT_OPTION_ENUM_ID) return 0;
     int64_t discriminant = (int64_t)e->discriminant;
     return discriminant == 1 || discriminant == RT_DISC_NONE;
 }
@@ -12339,6 +12356,17 @@ int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
         rt_enum_intern_count++;
     }
     return tagged;
+}
+
+/* rt_enum_new for a variant named `None` of a user enum: the object is stamped
+ * so rt_is_none_variant matches it by name. Unit variants are singletons per
+ * (enum_id, discriminant), so the stamp is the same for every holder; it is
+ * set with an atomic OR because the singleton may already be shared. */
+int64_t rt_enum_new_none(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    int64_t value = rt_enum_new(enum_id, discriminant, payload);
+    RtCoreEnum* e = rt_core_as_enum(value);
+    if (e) __atomic_fetch_or(&e->reserved2, RT_ENUM_FLAG_NONE_VARIANT, __ATOMIC_RELAXED);
+    return value;
 }
 
 int64_t rt_enum_discriminant(int64_t value) {

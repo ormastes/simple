@@ -16,7 +16,7 @@ use object::{Object, ObjectSymbol};
 use super::{LinkerError, LinkerResult};
 
 /// Symbols that must have exactly one definition across all link inputs.
-pub(crate) const ABI_UNIQUE_SYMBOLS: &[&str] = &["rt_enum_new"];
+pub(crate) const ABI_UNIQUE_SYMBOLS: &[&str] = &["rt_enum_new", "rt_enum_new_none"];
 
 fn strip_prefix(name: &str) -> &str {
     name.strip_prefix('_').unwrap_or(name)

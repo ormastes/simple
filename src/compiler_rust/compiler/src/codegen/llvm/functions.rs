@@ -1805,16 +1805,17 @@ impl LlvmBackend {
             MirInst::EnumUnit {
                 dest,
                 enum_name,
+                variant_name,
                 discriminant,
-                ..
             } => {
                 // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = *discriminant;
-                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                let ctor = crate::codegen::shared::enum_constructor_symbol(enum_name, variant_name);
+                let rt_fn = module.get_function(ctor).unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
-                    module.add_function("rt_enum_new", fn_type, None)
+                    module.add_function(ctor, fn_type, None)
                 });
                 let enum_id_val = i32_t.const_int(
                     u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
@@ -1838,16 +1839,17 @@ impl LlvmBackend {
             MirInst::EnumWith {
                 dest,
                 enum_name,
+                variant_name,
                 discriminant,
                 payload,
-                ..
             } => {
                 let i64_t = self.runtime_int_type();
                 let i32_t = self.context_ref().i32_type();
                 let disc = *discriminant;
-                let rt_fn = module.get_function("rt_enum_new").unwrap_or_else(|| {
+                let ctor = crate::codegen::shared::enum_constructor_symbol(enum_name, variant_name);
+                let rt_fn = module.get_function(ctor).unwrap_or_else(|| {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
-                    module.add_function("rt_enum_new", fn_type, None)
+                    module.add_function(ctor, fn_type, None)
                 });
                 let enum_id_val = i32_t.const_int(
                     u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
@@ -3318,6 +3320,7 @@ impl LlvmBackend {
                             | "rt_contains"
                             | "rt_dict_contains"
                             | "rt_is_none"
+                            | "rt_is_none_variant"
                             | "rt_is_some"
                             | "rt_array_any"
                             | "rt_array_all"

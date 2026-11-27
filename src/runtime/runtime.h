@@ -906,6 +906,7 @@ void     rt_http_client_destroy(int64_t client);
 int64_t  rt_gui_get_glyph_8x16(int32_t codepoint);
 int64_t  rt_jit_cleanup(int64_t handle);
 int64_t  rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload);
+int64_t  rt_enum_new_none(int32_t enum_id, int32_t discriminant, int64_t payload);
 int64_t  rt_enum_id(int64_t value);
 int64_t  rt_enum_discriminant(int64_t value);
 int64_t  rt_enum_payload(int64_t value);
@@ -1014,6 +1015,7 @@ int64_t  rt_gpu_atomic_exchange(int64_t a, int64_t b);  /* NAMED TRAP */
 int64_t  rt_gpu_atomic_xchg_i64(int64_t a, int64_t b);  /* NAMED TRAP */
 int64_t  rt_gpu_atomic_cmpxchg_i64(int64_t a, int64_t b, int64_t c);  /* NAMED TRAP */
 int8_t   rt_is_none(int64_t value);
+int8_t   rt_is_none_variant(int64_t value);
 int8_t   rt_is_some(int64_t value);
 /* `.?` presence: nil/None or an EMPTY array/dict/string is absent. */
 int8_t   rt_is_present(int64_t value);

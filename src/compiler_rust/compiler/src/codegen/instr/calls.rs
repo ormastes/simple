@@ -3349,7 +3349,8 @@ fn compile_known_enum_constructor_call<M: Module>(
             array
         }
     };
-    let result = call_runtime_3(ctx, builder, "rt_enum_new", enum_id_val, disc_val, payload_val);
+    let ctor = crate::codegen::shared::enum_constructor_symbol(enum_name, variant_name);
+    let result = call_runtime_3(ctx, builder, ctor, enum_id_val, disc_val, payload_val);
     ctx.vreg_values.insert(*dest, result);
     true
 }
