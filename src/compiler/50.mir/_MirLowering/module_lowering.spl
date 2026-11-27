@@ -855,6 +855,8 @@ impl MirLowering:
             result_err_layout_types: {},
             struct_method_syms: {},
             struct_method_ambiguous: {},
+            struct_inherent_method_syms: {},
+            struct_trait_method_ambiguous: {},
             struct_method_return_names: {},
             struct_method_return_is_array: {},
             struct_method_return_is_optional: {},
@@ -3000,6 +3002,8 @@ impl MirLowering:
         # these obsolete lookup roots before their allocations are promoted.
         self.struct_method_syms = {}
         self.struct_method_ambiguous = {}
+        self.struct_inherent_method_syms = {}
+        self.struct_trait_method_ambiguous = {}
         self.struct_method_return_names = {}
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
@@ -3452,6 +3456,8 @@ impl MirLowering:
         # module-local state and must not survive that boundary.
         self.struct_method_syms = {}
         self.struct_method_ambiguous = {}
+        self.struct_inherent_method_syms = {}
+        self.struct_trait_method_ambiguous = {}
         self.struct_method_return_names = {}
         self.struct_method_return_is_array = {}
         self.struct_method_return_is_optional = {}
@@ -3572,11 +3578,19 @@ impl MirLowering:
                     else:
                         for provider_enum in provider_module.enums.values():
                             self.register_enum_variants(provider_enum)
-                    var provider_func_i = 0
-                    while not lazy_provider_methods and provider_func_i < provider_funcs.len():
-                        val provider_method_func: HirFunction = provider_funcs[provider_func_i]
-                        self.register_provider_method(provider_method_func, provider_module.symbols, provider_links)
-                        provider_func_i = provider_func_i + 1
+                    if not lazy_provider_methods:
+                        val prov_provenance = hir_impl_method_provenance_v1(provider_module.impls, provider_module.symbols)
+                        if provider_funcs.len() > 0:
+                            var provider_func_i = 0
+                            while provider_func_i < provider_funcs.len():
+                                val provider_method_func: HirFunction = provider_funcs[provider_func_i]
+                                val pf_id = provider_method_func.symbol.id
+                                self.register_provider_method_with_kind_v1(
+                                    provider_method_func, provider_module.symbols, provider_links,
+                                    prov_provenance.trait_fn_ids.has(pf_id),
+                                    prov_provenance.inherent_fn_ids.has(pf_id), false)
+                                provider_func_i = provider_func_i + 1
+                        self.apply_impl_trait_ambiguities_v1(prov_provenance)
                 provider_links_by_index.push(provider_links)
                 provider_links_ready.push(provider_links_built)
         mir_section_profile_mark("p5a_provider_loop", module.name)
@@ -3953,9 +3967,14 @@ impl MirLowering:
                     case _: ()
             module_fn_i = module_fn_i + 1
 
+        var local_trait_impl_fn_ids: Dict<i64, bool> = {}
+        var local_inherent_impl_fn_ids: Dict<i64, bool> = {}
+        var local_trait_method_first_trait: Dict<text, i64> = {}
         var impl_mi = 0
         while impl_mi < module.impls.len():
             val impl_def: HirImpl = module.impls[impl_mi]
+            val impl_trait_sym_id = hir_impl_trait_symbol_id_v1(impl_def, module.symbols)
+            val impl_is_trait = impl_trait_sym_id >= 0
             var impl_type_name = ""
             var impl_type_key = ""
             var canonical_impl_type_key = ""
@@ -3977,21 +3996,57 @@ impl MirLowering:
                 while mni < impl_method_names.len():
                     val impl_method_name = impl_method_names[mni]
                     val impl_method_id = impl_def.methods[impl_method_name]
+                    if impl_is_trait:
+                        local_trait_impl_fn_ids[impl_method_id.id] = true
+                    else:
+                        local_inherent_impl_fn_ids[impl_method_id.id] = true
                     val impl_method_key = "{impl_type_name}::{impl_method_name}"
-                    self.struct_method_syms[impl_method_key] = impl_method_id
+                    val impl_layout_method_key = "{impl_type_key}::{impl_method_name}"
+                    val impl_canonical_method_key = "{canonical_impl_type_key}::{impl_method_name}"
+                    self.register_struct_impl_method_v1(impl_method_key, impl_method_id, impl_is_trait)
                     if impl_type_key != impl_type_name:
-                        self.struct_method_syms["{impl_type_key}::{impl_method_name}"] = impl_method_id
-                    if canonical_impl_type_key != "" and canonical_impl_type_key != impl_type_name:
+                        self.register_struct_impl_method_v1(impl_layout_method_key, impl_method_id, impl_is_trait)
+                    if impl_is_trait:
+                        var tk_list: [text] = [impl_method_key]
+                        if impl_type_key != impl_type_name:
+                            tk_list = tk_list.push(impl_layout_method_key)
+                        if canonical_impl_type_key != "" and canonical_impl_type_key != impl_type_name:
+                            self.register_struct_impl_method_v1(impl_canonical_method_key, impl_method_id, true)
+                            tk_list = tk_list.push(impl_canonical_method_key)
+                        for tk in tk_list:
+                            if not (self.struct_inherent_method_syms.has(tk) and self.struct_inherent_method_syms[tk]):
+                                if local_trait_method_first_trait.has(tk):
+                                    if local_trait_method_first_trait[tk] != impl_trait_sym_id:
+                                        self.struct_trait_method_ambiguous[tk] = true
+                                else:
+                                    local_trait_method_first_trait[tk] = impl_trait_sym_id
+                    elif canonical_impl_type_key != "" and canonical_impl_type_key != impl_type_name:
                         # Owner-identity row: a local extension colliding with
                         # an imported owner's method is reported as ambiguous.
-                        self.register_owner_method("{canonical_impl_type_key}::{impl_method_name}", impl_method_id, module.name)
+                        self.struct_inherent_method_syms[impl_canonical_method_key] = true
+                        if self.struct_trait_method_ambiguous.has(impl_canonical_method_key):
+                            self.struct_trait_method_ambiguous[impl_canonical_method_key] = false
+                        self.register_owner_method(impl_canonical_method_key, impl_method_id, module.name)
                     val impl_method_is_static = static_method_symbol_ids.has(self.symbol_id_value(impl_method_id))
                     if impl_method_is_static:
-                        self.struct_method_syms["static::{impl_method_key}"] = impl_method_id
+                        self.register_struct_impl_method_v1("static::{impl_method_key}", impl_method_id, impl_is_trait)
                         if impl_type_key != impl_type_name:
-                            self.struct_method_syms["static::{impl_type_key}::{impl_method_name}"] = impl_method_id
+                            self.register_struct_impl_method_v1("static::{impl_layout_method_key}", impl_method_id, impl_is_trait)
                         if canonical_impl_type_key != "" and canonical_impl_type_key != impl_type_name:
-                            self.struct_method_syms["static::{canonical_impl_type_key}::{impl_method_name}"] = impl_method_id
+                            self.register_struct_impl_method_v1("static::{impl_canonical_method_key}", impl_method_id, impl_is_trait)
+                        if impl_is_trait:
+                            var stk_list: [text] = ["static::{impl_method_key}"]
+                            if impl_type_key != impl_type_name:
+                                stk_list = stk_list.push("static::{impl_layout_method_key}")
+                            if canonical_impl_type_key != "" and canonical_impl_type_key != impl_type_name:
+                                stk_list = stk_list.push("static::{impl_canonical_method_key}")
+                            for stk in stk_list:
+                                if not (self.struct_inherent_method_syms.has(stk) and self.struct_inherent_method_syms[stk]):
+                                    if local_trait_method_first_trait.has(stk):
+                                        if local_trait_method_first_trait[stk] != impl_trait_sym_id:
+                                            self.struct_trait_method_ambiguous[stk] = true
+                                    else:
+                                        local_trait_method_first_trait[stk] = impl_trait_sym_id
                     # Methchain lane: thread the method's declared return-type
                     # struct name (resolved during HIR lowering -- see
                     # HirImpl.method_return_struct_names doc comment) so a
@@ -4084,7 +4139,11 @@ impl MirLowering:
         val function_keys_30_values: [HirFunction] = module.functions.values()
         for raw_local_func in function_keys_30_values:
             val local_func: HirFunction = raw_local_func
-            self.register_provider_method(local_func, module.symbols, local_callable_links)
+            val lf_id = local_func.symbol.id
+            val local_is_trait = local_trait_impl_fn_ids.has(lf_id)
+            val local_is_inherent = local_inherent_impl_fn_ids.has(lf_id)
+            self.register_provider_method_with_kind_v1(local_func, module.symbols, local_callable_links,
+                local_is_trait, local_is_inherent, local_is_trait or local_is_inherent)
 
         val bitfield_values = module.bitfields.values()
         var bi = 0

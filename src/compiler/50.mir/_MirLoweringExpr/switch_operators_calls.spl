@@ -11,7 +11,7 @@ use compiler.mir.mir_instruction_support.{MirBinOp}
 use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
 use compiler.mir.mir_instruction_graph.{MirInst}
 use compiler.mir.mir_types.{LocalId, MirType, MirConstValue}
-use compiler.mir.mir_lowering_stmts.{hir_type_is_declared_float_slot, hir_unsuffixed_int_literal_value, mir_merge_arm_types}
+use compiler.mir.mir_lowering_stmts.{hir_type_is_declared_float_slot, hir_unsuffixed_int_literal_value, mir_join_slot_is_payloadless, mir_join_slot_is_unit, mir_merge_arm_types}
 use compiler.mir._MirLowering.declaration_enum_metadata_v1.*
 use compiler.mir._MirLoweringExpr.optional_record_owner.*
 use compiler.mir._MirLowering.declaration_providers_v1.*
@@ -1919,7 +1919,10 @@ impl MirLowering:
         and jumps to a merge block. Mirrors lower_if's
         temp-then-merge pattern."""
         var b = self.builder
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        val result_slot_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_slot_type)
+        val result_slot_payloadless = mir_join_slot_is_payloadless(result_slot_type)
+        val result_slot_unit = mir_join_slot_is_unit(result_slot_type)
         var oj_arm_locals: [LocalId] = []
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
         # (expected_type nil), leaving the temp i64 — print then decimal-
@@ -1927,6 +1930,7 @@ impl MirLowering:
         # retype the temp at the merge.
         var inferred_known = false
         var inferred_ty = MirType.i64()
+        var merge_has_incoming = false
         val merge_block = b.new_block(Some("match_merge"))
         val default_block = b.new_block(Some("match_default"))
 
@@ -1969,7 +1973,7 @@ impl MirLowering:
                 # `.?` + `??` extraction: if-val on this optional evaluates
                 # FALSE on the stage4 lane (pairing class), silently skipping
                 # the arm-result copy — every value-position match printed 0.
-                if arm_result.? and not self.local_is_unit(arm_result ?? LocalId(id: 0)):
+                if arm_result.? and not result_slot_unit and not self.merge_result_is_payloadless(arm_result ?? LocalId(id: 0)):
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
@@ -1997,6 +2001,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.builder = b_arm2
             ci = ci + 1
 
@@ -2015,7 +2020,7 @@ impl MirLowering:
         var b_d2 = self.builder
         # Same post-terminator guard as the arm loop above.
         if not b_d2.current_block_has_explicit_terminator():
-            if def_result.? and not self.local_is_unit(def_result ?? LocalId(id: 0)):
+            if def_result.? and not result_slot_unit and not self.merge_result_is_payloadless(def_result ?? LocalId(id: 0)):
                 val def_result_fb = LocalId(id: 0)
                 val def_result_local = def_result ?? def_result_fb
                 b_d2.emit_copy(result, def_result_local)
@@ -2028,18 +2033,21 @@ impl MirLowering:
                         inferred_known = true
                         inferred_ty = def_ty_found
             b_d2.terminate_goto(merge_block)
+            merge_has_incoming = true
         self.builder = b_d2
 
         # Merge block.
+        if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
+            return result
         self.builder.switch_to_block(merge_block)
         # Mirrors lower_if's merge-placeholder fix: every arm/default that
         # falls through to merge without producing a value (e.g. a void
         # statement as the arm's last expression) leaves `result` undefined
         # on that path -- a NULL llvm::Value* read downstream (ICmp/binop
         # SIGSEGV in llvm-lib). Define it here if no arm ever did.
-        if not result_defined and not self.merge_result_is_payloadless(result):
+        if not result_defined and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known:
+        if inferred_known and not result_slot_unit and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
 
         if val found_expected = expected_type:
@@ -2060,7 +2068,10 @@ impl MirLowering:
         Cheaper than a jump table when arms < 4 or key span > 1024."""
         val compared_scrut = self.widen_unsigned_word_operand(scrut_local, MirType.i64())
         var b = self.builder
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        val result_slot_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_slot_type)
+        val result_slot_payloadless = mir_join_slot_is_payloadless(result_slot_type)
+        val result_slot_unit = mir_join_slot_is_unit(result_slot_type)
         var oj_arm_locals: [LocalId] = []
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
         # (expected_type nil), leaving the temp i64 — print then decimal-
@@ -2068,6 +2079,7 @@ impl MirLowering:
         # retype the temp at the merge.
         var inferred_known = false
         var inferred_ty = MirType.i64()
+        var merge_has_incoming = false
         val merge_block = b.new_block(Some("match_merge"))
         self.builder = b
 
@@ -2109,7 +2121,7 @@ impl MirLowering:
                 # `.?` + `??` extraction: if-val on this optional evaluates
                 # FALSE on the stage4 lane (pairing class), silently skipping
                 # the arm-result copy — every value-position match printed 0.
-                if arm_result.? and not self.local_is_unit(arm_result ?? LocalId(id: 0)):
+                if arm_result.? and not result_slot_unit and not self.merge_result_is_payloadless(arm_result ?? LocalId(id: 0)):
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
@@ -2137,6 +2149,7 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = arm_ty_found
                 b_arm2.terminate_goto(merge_block)
+                merge_has_incoming = true
             self.builder = b_arm2
 
             # Continue cascading into next_block.
@@ -2158,7 +2171,7 @@ impl MirLowering:
         var b_def = self.builder
         # Same post-terminator guard as the arm loop above.
         if not b_def.current_block_has_explicit_terminator():
-            if def_result.? and not self.local_is_unit(def_result ?? LocalId(id: 0)):
+            if def_result.? and not result_slot_unit and not self.merge_result_is_payloadless(def_result ?? LocalId(id: 0)):
                 val def_result_fb2 = LocalId(id: 0)
                 val def_result_local = def_result ?? def_result_fb2
                 b_def.emit_copy(result, def_result_local)
@@ -2171,17 +2184,20 @@ impl MirLowering:
                         inferred_known = true
                         inferred_ty = def_ty_found2
             b_def.terminate_goto(merge_block)
+            merge_has_incoming = true
         self.builder = b_def
 
         # Merge block.
+        if not merge_has_incoming and self.builder.current_block_has_explicit_terminator():
+            return result
         self.builder.switch_to_block(merge_block)
         # Mirrors lower_if's merge-placeholder fix: every arm/default that
         # falls through to merge without producing a value leaves `result`
         # undefined on that path -- a NULL llvm::Value* read downstream
         # (ICmp/binop SIGSEGV in llvm-lib). Define it here if no arm ever did.
-        if not result_defined and not self.merge_result_is_payloadless(result):
+        if not result_defined and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known:
+        if inferred_known and not result_slot_unit and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
 
         if val found_expected = expected_type:
@@ -4261,13 +4277,17 @@ impl MirLowering:
 
         val scrut_local = self.lower_expr(scrutinee)
         var b = self.builder
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        val result_slot_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_slot_type)
+        val result_slot_payloadless = mir_join_slot_is_payloadless(result_slot_type)
+        val result_slot_unit = mir_join_slot_is_unit(result_slot_type)
         var oj_arm_locals: [LocalId] = []
         val merge_block = b.new_block(Some("match_merge"))
         self.builder = b
         var inferred_known = false
         var inferred_ty = MirType.i64()
         var result_defined = false
+        var merge_has_incoming = false
         # True once an unguarded Wildcard/Binding arm was lowered: it accepts
         # every value, so the arms after it are unreachable (first match wins).
         var closed = false
@@ -4313,21 +4333,23 @@ impl MirLowering:
                             case _: ()
                 case _: ()
             var b_t = self.builder
-            val next_block = b_t.new_block(Some("match_next"))
-            if not irrefutable:
-                val arm_block = b_t.new_block(Some("match_arm"))
-                var ki = 0
-                while ki < key_locals.len():
-                    val key_local = key_locals[ki]
-                    val cmp_local = b_t.emit_binop(MirBinOp.Eq, mir_operand_copy(scrut_local), mir_operand_copy(key_local), MirType.bool())
-                    if ki == key_locals.len() - 1:
-                        b_t.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
-                    else:
-                        val more_block = b_t.new_block(Some("match_alt"))
-                        b_t.terminate_if(mir_operand_copy(cmp_local), arm_block, more_block)
-                        b_t.switch_to_block(more_block)
-                    ki = ki + 1
-                b_t.switch_to_block(arm_block)
+            var next_block = BlockId(id: -1)
+            if not irrefutable or arm.has_guard:
+                next_block = b_t.new_block(Some("match_next"))
+                if not irrefutable:
+                    val arm_block = b_t.new_block(Some("match_arm"))
+                    var ki = 0
+                    while ki < key_locals.len():
+                        val key_local = key_locals[ki]
+                        val cmp_local = b_t.emit_binop(MirBinOp.Eq, mir_operand_copy(scrut_local), mir_operand_copy(key_local), MirType.bool())
+                        if ki == key_locals.len() - 1:
+                            b_t.terminate_if(mir_operand_copy(cmp_local), arm_block, next_block)
+                        else:
+                            val more_block = b_t.new_block(Some("match_alt"))
+                            b_t.terminate_if(mir_operand_copy(cmp_local), arm_block, more_block)
+                            b_t.switch_to_block(more_block)
+                        ki = ki + 1
+                    b_t.switch_to_block(arm_block)
             self.builder = b_t
             if arm.has_guard:
                 val guard_local = self.lower_cond_operand(arm.guard)
@@ -4344,7 +4366,7 @@ impl MirLowering:
             # Same post-terminator rule as emit_if_chain_dispatch: an arm body
             # that already terminated (`return`) gets nothing appended.
             if not b_arm.current_block_has_explicit_terminator():
-                if arm_result.? and not self.local_is_unit(arm_result ?? LocalId(id: 0)):
+                if arm_result.? and not result_slot_unit and not self.merge_result_is_payloadless(arm_result ?? LocalId(id: 0)):
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm.emit_copy(result, arm_result_local)
@@ -4359,26 +4381,32 @@ impl MirLowering:
                             inferred_known = true
                             inferred_ty = arm_ty_found
                 b_arm.terminate_goto(merge_block)
-            b_arm.switch_to_block(next_block)
+                merge_has_incoming = true
+            if next_block.id >= 0:
+                b_arm.switch_to_block(next_block)
             self.builder = b_arm
             i = i + 1
 
         # Cascade tail: reached only when no arm accepted the value.
-        var b_tail = self.builder
-        if not closed and result_defined:
-            # No arm accepted the value. A statement match falls through, as
-            # in the seed and in the if-chain lowering of tuple/text matches.
-            # A value match has nothing to yield (the seed raises "match
-            # expression exhausted"); it gets the same placeholder the other
-            # match lowerings use so the merge never reads an undefined local
-            # (bug if_chain_match_no_arm_matched_is_silent_2026-10-10).
-            b_tail.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        b_tail.terminate_goto(merge_block)
-        b_tail.switch_to_block(merge_block)
-        self.builder = b_tail
-        if not result_defined and not self.merge_result_is_payloadless(result):
+        if not closed:
+            var b_tail = self.builder
+            if result_defined and not result_slot_payloadless:
+                # No arm accepted the value. A statement match falls through, as
+                # in the seed and in the if-chain lowering of tuple/text matches.
+                # A value match has nothing to yield (the seed raises "match
+                # expression exhausted"); it gets the same placeholder the other
+                # match lowerings use so the merge never reads an undefined local
+                # (bug if_chain_match_no_arm_matched_is_silent_2026-10-10).
+                b_tail.emit_const(result, MirConstValue.Int(0), MirType.i64())
+            b_tail.terminate_goto(merge_block)
+            merge_has_incoming = true
+            self.builder = b_tail
+        if not merge_has_incoming and (closed or self.builder.current_block_has_explicit_terminator()):
+            return result
+        self.builder.switch_to_block(merge_block)
+        if not result_defined and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known:
+        if inferred_known and not result_slot_unit and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
@@ -5190,7 +5218,10 @@ impl MirLowering:
             expected_enum_id = self.enum_runtime_id(enum_runtime_key)
 
         var b = self.builder
-        val result = b.new_temp(self.match_result_mir_type(expected_type))
+        val result_slot_type = self.match_result_mir_type(expected_type)
+        val result = b.new_temp(result_slot_type)
+        val result_slot_payloadless = mir_join_slot_is_payloadless(result_slot_type)
+        val result_slot_unit = mir_join_slot_is_unit(result_slot_type)
         # Arm-type inference fallback: HIR match exprs usually carry NO type_
         # (expected_type nil), leaving the temp i64 — print then decimal-
         # renders text results. Capture the first arm result's MIR type and
@@ -5772,7 +5803,7 @@ impl MirLowering:
                 # `.?` + `??` extraction: if-val on this optional evaluates
                 # FALSE on the stage4 lane (pairing class), silently skipping
                 # the arm-result copy — every value-position match printed 0.
-                if arm_result.? and not self.local_is_unit(arm_result ?? LocalId(id: 0)):
+                if arm_result.? and not result_slot_unit and not self.merge_result_is_payloadless(arm_result ?? LocalId(id: 0)):
                     val arm_result_fb = LocalId(id: 0)
                     val arm_result_local = arm_result ?? arm_result_fb
                     b_arm2.emit_copy(result, arm_result_local)
@@ -5849,15 +5880,17 @@ impl MirLowering:
             val gd_result = self.lower_block_expected(gd_arm.body, expected_type)
             var b_gd2 = self.builder
             if not b_gd2.current_block_has_explicit_terminator():
-                if gd_result.? and not self.local_is_unit(gd_result ?? LocalId(id: 0)):
+                if gd_result.? and not result_slot_unit and not self.merge_result_is_payloadless(gd_result ?? LocalId(id: 0)):
                     val gd_fb = LocalId(id: 0)
                     val gd_local = gd_result ?? gd_fb
                     b_gd2.emit_copy(result, gd_local)
                     self.preserve_native_trait_match_result(result, gd_local, expected_type, result_defined)
                     merged_arm_locals.push(gd_local)
                     result_defined = true
-                    if not inferred_known:
-                        if val gd_ty = self.local_mir_type_of(gd_local):
+                    if val gd_ty = self.local_mir_type_of(gd_local):
+                        if inferred_known:
+                            inferred_ty = mir_merge_arm_types(inferred_ty, gd_ty)
+                        else:
                             inferred_known = true
                             inferred_ty = gd_ty
                 b_gd2.terminate_goto(merge_block)
@@ -6120,15 +6153,17 @@ impl MirLowering:
             var b_d2 = self.builder
             # Same post-terminator guard as the arm loop above.
             if not b_d2.current_block_has_explicit_terminator():
-                if dres.? and not self.local_is_unit(dres ?? LocalId(id: 0)):
+                if dres.? and not result_slot_unit and not self.merge_result_is_payloadless(dres ?? LocalId(id: 0)):
                     val drl_fb = LocalId(id: 0)
                     val drl = dres ?? drl_fb
                     b_d2.emit_copy(result, drl)
                     self.preserve_native_trait_match_result(result, drl, expected_type, result_defined)
                     merged_arm_locals.push(drl)
                     result_defined = true
-                    if not inferred_known:
-                        if val drl_ty_found = self.local_mir_type_of(drl):
+                    if val drl_ty_found = self.local_mir_type_of(drl):
+                        if inferred_known:
+                            inferred_ty = mir_merge_arm_types(inferred_ty, drl_ty_found)
+                        else:
                             inferred_known = true
                             inferred_ty = drl_ty_found
             self.builder = b_d2
@@ -6151,9 +6186,9 @@ impl MirLowering:
             self.builder.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
                 scrut_local, result, result_ok_arm, result_err_arm,
                 merge_block, result_ok_payload, result_err_payload), span: None))
-        if not result_defined and not self.merge_result_is_payloadless(result):
+        if not result_defined and not result_slot_payloadless:
             self.builder.emit_const(result, MirConstValue.Int(0), MirType.i64())
-        if inferred_known:
+        if inferred_known and not result_slot_unit and not mir_join_slot_is_payloadless(inferred_ty):
             self.builder.set_local_type(result, inferred_ty)
         # Only live value-producing edges participate: a returning arm has no
         # value at this merge. Reuse the if/elif all-arm identity join before
@@ -9830,6 +9865,7 @@ impl MirLowering:
                 lw.provider_session_links = self.provider_session_links
                 lw.provider_session_links_ready = self.provider_session_links_ready
                 lw.provider_method_row_keys = self.provider_method_row_keys
+                lw.provider_session_trait_ambiguous_keys = self.provider_session_trait_ambiguous_keys
                 lw.provider_method_row_provider = self.provider_method_row_provider
                 lw.provider_method_row_kind = self.provider_method_row_kind
                 lw.provider_method_row_symbol = self.provider_method_row_symbol
@@ -9924,6 +9960,8 @@ impl MirLowering:
                     lw.module_fn_params = self.module_fn_params
                     lw.struct_field_over_type_param = self.struct_field_over_type_param
                     lw.struct_method_ambiguous = self.struct_method_ambiguous
+                    lw.struct_inherent_method_syms = self.struct_inherent_method_syms
+                    lw.struct_trait_method_ambiguous = self.struct_trait_method_ambiguous
                     lw.enum_variant_owners = self.enum_variant_owners
                     lw.enum_runtime_id_index = self.enum_runtime_id_index
                     lw.enum_runtime_id_names = self.enum_runtime_id_names

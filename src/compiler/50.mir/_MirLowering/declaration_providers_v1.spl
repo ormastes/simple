@@ -182,12 +182,17 @@ impl MirLowering:
                     consumer_names.has(declaration.name), name)
             if provider.classes.len() > 0 or provider.enums.len() > 0 or provider.structs.len() > 0 or provider.impls.len() > 0:
                 val links = self.declaration_links_v1(provider)
+                val prov_provenance = hir_impl_method_provenance_v1(provider.impls, provider.symbols)
                 for raw_class in provider.classes:
                     val declaration: MirHirNominalDeclarationV1 = raw_class
                     self.register_provider_class_from_declarations_v1(declaration, provider.symbols, links, name)
                 for raw_function in provider.functions:
                     val function: MirHirFunctionDeclarationV1 = raw_function
-                    self.register_declaration_method_v1(function, provider.symbols, links)
+                    val fn_id = function.symbol.id
+                    self.register_declaration_method_v1(function, provider.symbols, links,
+                        prov_provenance.trait_fn_ids.has(fn_id),
+                        prov_provenance.inherent_fn_ids.has(fn_id))
+                self.apply_impl_trait_ambiguities_v1(prov_provenance)
         if (mir_lower_env_get("SIMPLE_ENUM_REG_TRACE") ?? "") == "1":
             # One line per consumer module: how many provider rows carried
             # enums and whether the consumer's own archived rows did. An
@@ -457,9 +462,11 @@ impl MirLowering:
             self.callable_text_value_abi[mir_provider_callable_key(actual_owner, function.name)] = not function.is_extern
 
     me register_declaration_method_v1(function: MirHirFunctionDeclarationV1,
-            symbols: SymbolTable, links: Dict<i64, text>):
+            symbols: SymbolTable, links: Dict<i64, text>,
+            is_trait_impl: bool = false, is_inherent_impl: bool = false):
         self.register_provider_method_fields_v1(function.symbol, function.is_method,
-            function.is_static, function.return_type, symbols, links)
+            function.is_static, function.return_type, symbols, links,
+            is_trait_impl, is_inherent_impl, false)
 
     me register_declaration_fields_v1(name: text, fields: [MirHirFieldDeclarationV1],
             symbols: SymbolTable, overwrite: bool):
@@ -1111,4 +1118,7 @@ impl MirLowering:
                 val method_id: SymbolId = class_def.methods[method_name]
                 val method = self.relocate_provider_callable(method_id, provider, links)
                 if method.id >= 0:
+                    self.struct_inherent_method_syms["{canonical}::{method_name}"] = true
                     self.struct_method_syms["{canonical}::{method_name}"] = method
+                    if self.struct_trait_method_ambiguous.has("{canonical}::{method_name}"):
+                        self.struct_trait_method_ambiguous["{canonical}::{method_name}"] = false

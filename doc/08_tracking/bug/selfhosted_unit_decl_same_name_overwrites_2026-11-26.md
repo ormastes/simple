@@ -1,7 +1,8 @@
 # Self-hosted compiler: same-named `unit` declarations overwrite each other
 
-Status: open. Found by code read, 2026-11-26; **not reproduced by a run** (no
-self-hosted full-CLI binary is deployed on the finding host).
+Status: fix-implemented-verification-pending (updated 2026-11-27). Found by code read,
+2026-11-26; interpreter unit specs pass, while full self-hosted CLI verification
+remains pending (no self-hosted full-CLI binary is deployed on this host).
 
 ## What the code does
 
@@ -44,10 +45,17 @@ module before the unit check (`20.hir/hir_lowering/type_aliases.spl`).
   with a unit name distinct from the unit.
 - A module that declares the plain alias while also importing the unit.
 
-## Proposed fix
+## Fix Implemented (2026-11-27)
 
-Key the pool by (declaring module, name), resolve a use through the
-declaration visible in the using module, and report a diagnostic when two
-visible declarations of one unit name disagree. Red spec first: two modules
-declaring `unit X` with different underlying types, each checked against its
-own.
+- `src/compiler/10.frontend/core/types.spl`:
+  - Added module ownership tracking (`unit_decl_modules`, `unit_decl_current_module`, `unit_decl_last_conflict_msg`, `unit_decl_set_current_module`, `unit_decl_get_current_module`, `unit_decl_last_conflict_error`, `unit_decl_module_at`, synced with `named_type_set_current_module` and preserved across `UnitDeclPoolSnapshot`, `type_pools_promote_hir_owners`, `flat_type_pools_restore`, and `FlatPoolState`).
+  - Keyed `unit_decl_register_origin` and added `unit_decl_find_in_module` / `unit_decl_find_by_suffix_in_module` by `(declaring_module, name)`, retaining unqualified current-module-first fallback in `unit_decl_find` and `unit_decl_find_by_suffix`.
+  - Refuses conflicting same-module `unit` redeclarations (`unit_decl_last_conflict_msg`) while preserving legitimate in-place `derived` refinement and legacy `newunit` re-registration.
+- `src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl`: `_parser_lower_unit_decl_checked`, `parser_lower_unit_decl`, and `parser_lower_derived_unit_decl` surface same-module declaration conflicts with a single `parser_error` and skip duplicate struct emission.
+- `src/compiler/10.frontend/core/unit_scope.spl` & `src/compiler/10.frontend/core/interpreter/eval_units.spl`: `unit_suffix_declared` and `eval_suffixed_lit` respect active module ownership when checking/looking up suffixed units.
+
+## Verification
+
+- `test/01_unit/compiler/10.frontend/unit_decl_module_isolation_spec.spl`: `5 examples, 0 failures` (`--mode=interpreter`).
+- Frontend unit regression suite (`--mode=interpreter`): `unit_decl_canonical_spec.spl` (10/10), `unit_decl_e2e_spec.spl` (9/9), `unit_scope_per_file_spec.spl` (4/4), `unit_name_conflict_warning_spec.spl` (7/7).
+- Self-hosted full-CLI binary execution remains pending (`fix-implemented-verification-pending`).

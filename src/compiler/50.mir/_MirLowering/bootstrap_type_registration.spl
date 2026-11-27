@@ -71,6 +71,26 @@ fn bootstrap_register_flat_type_defs(lowering: MirLowering, module_index: i64) -
         enum_index = enum_index + 1
     bootstrap_type_registration_finish(lw, "bootstrap flat MIR type registration failed")
 
+fn bootstrap_register_flat_methods_v1(lowering: MirLowering, module_index: i64,
+        provider: SymbolTable, links: Dict<i64, text>) -> MirLowering:
+    """Register flat-bootstrap methods with inherent class provenance so class
+    methods keep inherent precedence over non-inherent methods."""
+    var lw = lowering
+    var inherent_fn_ids: Dict<i64, bool> = {}
+    var class_index = 0
+    while class_index < bootstrap_hir_module_class_count(module_index):
+        val class_def = bootstrap_hir_module_class_at(module_index, class_index)
+        for cm_id in class_def.methods.values():
+            inherent_fn_ids[cm_id.id] = true
+        class_index = class_index + 1
+    var function_index = 0
+    while function_index < bootstrap_hir_module_function_count(module_index):
+        val func = bootstrap_hir_module_function_at(module_index, function_index)
+        lw.register_provider_method_with_kind_v1(func, provider, links,
+            false, inherent_fn_ids.has(func.symbol.id), false)
+        function_index = function_index + 1
+    lw
+
 fn bootstrap_register_flat_class_providers(lowering: MirLowering, active_module: i64) -> MirLowering:
     var lw = lowering
     var provider_index = 0
@@ -88,10 +108,7 @@ fn bootstrap_register_flat_class_providers(lowering: MirLowering, active_module:
             while class_index < bootstrap_hir_module_class_count(provider_index):
                 lw.register_provider_class(bootstrap_hir_module_class_at(provider_index, class_index), provider, links, false)
                 class_index = class_index + 1
-            function_index = 0
-            while function_index < bootstrap_hir_module_function_count(provider_index):
-                lw.register_provider_method(bootstrap_hir_module_function_at(provider_index, function_index), provider, links)
-                function_index = function_index + 1
+            lw = bootstrap_register_flat_methods_v1(lw, provider_index, provider, links)
         provider_index = provider_index + 1
     lw
 
@@ -142,11 +159,7 @@ fn bootstrap_register_flat_class_defs(lowering: MirLowering, module_index: i64) 
         class_names[class_key] = true
         lw.class_type_names = class_names
         class_index = class_index + 1
-    function_index = 0
-    while function_index < bootstrap_hir_module_function_count(module_index):
-        lw.register_provider_method(bootstrap_hir_module_function_at(module_index, function_index), provider, links)
-        function_index = function_index + 1
-    lw
+    bootstrap_register_flat_methods_v1(lw, module_index, provider, links)
 
 fn bootstrap_register_hir_type_defs(lowering: MirLowering, hir_module: HirModule) -> MirLowering:
     var lw = lowering

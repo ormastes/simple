@@ -1,0 +1,633 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Struct implementing two traits with the same method name diagnoses ambiguity
+
+Bug: struct_two_traits_same_method_resolve_silently_native_2026-11-26
+When a struct `P` implements two in-scope traits `MarkerA` and `MarkerB` that both
+declare `mark`, an unqualified call `p.mark()` must report a fatal ambiguity
+diagnostic (`ambiguous trait method: ...`) instead of silently picking whichever
+impl block came last or first. Single-trait impls and inherent struct overrides
+must continue to resolve cleanly.
+"""
+
+# @tag: unit, compiler, mir, traits
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering, mir_error_is_fatal}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.hir.hir_codec.{hir_module_encode}
+use compiler.mir.hir_declaration_summary_v1.{MirHirDeclarationRepositoryV1, mir_hir_project_module_in_owned_scope_v1, mir_hir_declaration_repository_digest_v1, mir_hir_declaration_repository_valid_v1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+
+fn project_prov_decl_repo(prov_hir: HirModule) -> MirHirDeclarationRepositoryV1:
+    val context = hir_owned_artifact_context_v1()
+    val body = hir_module_encode(prov_hir)
+    val body_digest = sha256_text(body)
+    val diagnostic_identity = sha256_text("MIR-ambiguity-decl-probe-v1\n" + body)
+    expect(transient_scope_begin()).to_equal(true)
+    val projected = mir_hir_project_module_in_owned_scope_v1(context, prov_hir,
+        diagnostic_identity, body_digest, body_digest)
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(projected) else: false
+    val ended = transient_scope_end()
+    expect(paused and owned and ended).to_equal(true)
+    expect(projected.is_ok()).to_equal(true)
+    var repository = MirHirDeclarationRepositoryV1(artifact_context: context,
+        final_repository_authority: diagnostic_identity, ordered_modules: [prov_hir.name],
+        modules: {prov_hir.name: projected.unwrap()}, authority: "")
+    repository.authority = mir_hir_declaration_repository_digest_v1(repository)
+    expect(mir_hir_declaration_repository_valid_v1(repository)).to_equal(true)
+    repository
+
+fn lower_two_modules_configured(provider_source: text, consumer_source: text, eager: bool, use_decl_repo: bool) -> (MirModule, [text], [bool]):
+    val log = Logger(level: 0)
+    val prov_ast = parse_full_frontend(provider_source, "lib/prov.spl", "lib.prov", log)
+    val cons_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.prov"] = prov_ast
+    modules["app.main"] = cons_ast
+    val sources = [
+        SourceFile(path: "lib/prov.spl", content: provider_source, module_name: "lib.prov"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var prov_lowering = hirlowering_for_module("lib.prov", surfaces)
+    var cons_lowering = hirlowering_for_module("app.main", surfaces)
+    val prov_hir = prov_lowering.lower_module(prov_ast)
+    val cons_hir = cons_lowering.lower_module(cons_ast)
+    var mir_lowering = MirLowering.new(cons_hir.symbols)
+    mir_lowering.provider_methods_eager = eager
+    var providers: [HirModule] = [prov_hir, cons_hir]
+    if use_decl_repo:
+        mir_lowering.declaration_repository = Some(project_prov_decl_repo(prov_hir))
+        providers = [cons_hir]
+    val mir = mir_lowering.lower_module(cons_hir, providers)
+    var msgs: [text] = []
+    var fatals: [bool] = []
+    for e in mir_lowering.errors:
+        msgs.push(e.message)
+        fatals.push(mir_error_is_fatal(e))
+    (mir, msgs, fatals)
+
+fn lower_single_module(source: text) -> (MirModule, [text], [bool]):
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: source, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hir_lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var msgs: [text] = []
+    var fatals: [bool] = []
+    for e in mir_lowering.errors:
+        msgs.push(e.message)
+        fatals.push(mir_error_is_fatal(e))
+    (mir, msgs, fatals)
+
+fn lower_two_modules(provider_source: text, consumer_source: text) -> (MirModule, [text], [bool]):
+    val log = Logger(level: 0)
+    val prov_ast = parse_full_frontend(provider_source, "lib/prov.spl", "lib.prov", log)
+    val cons_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.prov"] = prov_ast
+    modules["app.main"] = cons_ast
+    val sources = [
+        SourceFile(path: "lib/prov.spl", content: provider_source, module_name: "lib.prov"),
+        SourceFile(path: "app/main.spl", content: consumer_source, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var prov_lowering = hirlowering_for_module("lib.prov", surfaces)
+    var cons_lowering = hirlowering_for_module("app.main", surfaces)
+    val prov_hir = prov_lowering.lower_module(prov_ast)
+    val cons_hir = cons_lowering.lower_module(cons_ast)
+    var mir_lowering = MirLowering.new(cons_hir.symbols)
+    val mir = mir_lowering.lower_module(cons_hir, [prov_hir, cons_hir])
+    var msgs: [text] = []
+    var fatals: [bool] = []
+    for e in mir_lowering.errors:
+        msgs.push(e.message)
+        fatals.push(mir_error_is_fatal(e))
+    (mir, msgs, fatals)
+
+fn has_call_in_fn(mir: MirModule, fn_name: text) -> bool:
+    for f in mir.functions.values():
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            for block in f.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case Call(_, _, _):
+                            return true
+                        case _: ()
+    false
+
+describe "struct implementing two traits with the same method name":
+    it "emits fatal ambiguity error on unqualified call when two traits define mark on P":
+        val src = """
+trait MarkerA:
+    fn mark() -> i64
+
+trait MarkerB:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+fn use_p(p: P) -> i64:
+    p.mark()
+
+fn main() -> i64:
+    val p = P(x: 10)
+    use_p(p)
+"""
+        val res = lower_single_module(src)
+        val mir = res.0
+        val msgs = res.1
+        val fatals = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(msgs.len() > 0).to_equal(true)
+        var saw_ambig = false
+        var saw_fatal = false
+        var i = 0
+        while i < msgs.len():
+            if msgs[i].contains("ambiguous trait method:") and msgs[i].contains("mark"):
+                saw_ambig = true
+                if fatals[i]:
+                    saw_fatal = true
+            i = i + 1
+        expect(saw_ambig).to_equal(true)
+        expect(saw_fatal).to_equal(true)
+
+    it "emits fatal ambiguity error across provider and consumer trait impls":
+        val prov_src = """
+pub trait MarkerA:
+    fn mark() -> i64
+
+pub trait MarkerB:
+    fn mark() -> i64
+
+pub struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+"""
+        val cons_src = """
+use lib.prov.{MarkerB, P}
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+fn main() -> i64:
+    val p = P(x: 10)
+    p.mark()
+"""
+        val res = lower_two_modules(prov_src, cons_src)
+        val mir = res.0
+        val msgs = res.1
+        val fatals = res.2
+        expect(mir.functions.len() > 0).to_equal(true)
+        var saw_ambig = false
+        var saw_fatal = false
+        var i = 0
+        while i < msgs.len():
+            if msgs[i].contains("ambiguous trait method:") and msgs[i].contains("mark"):
+                saw_ambig = true
+                if fatals[i]:
+                    saw_fatal = true
+            i = i + 1
+        expect(saw_ambig).to_equal(true)
+        expect(saw_fatal).to_equal(true)
+
+    it "resolves cleanly when struct implements a single trait":
+        val src = """
+trait MarkerA:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+fn use_p(p: P) -> i64:
+    p.mark()
+
+fn main() -> i64:
+    val p = P(x: 10)
+    use_p(p)
+"""
+        val res = lower_single_module(src)
+        val mir = res.0
+        val msgs = res.1
+        expect(mir.functions.len() > 0).to_equal(true)
+        expect(msgs.len()).to_equal(0)
+        expect(has_call_in_fn(mir, "use_p")).to_equal(true)
+
+    it "preserves inherent method precedence over trait impls without false ambiguity":
+        val src_inherent_first = """
+trait MarkerA:
+    fn mark() -> i64
+
+trait MarkerB:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl P:
+    fn mark() -> i64:
+        self.x + 100
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+fn use_p(p: P) -> i64:
+    p.mark()
+
+fn main() -> i64:
+    val p = P(x: 10)
+    use_p(p)
+"""
+        val src_inherent_last = """
+trait MarkerA:
+    fn mark() -> i64
+
+trait MarkerB:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+impl P:
+    fn mark() -> i64:
+        self.x + 100
+
+fn use_p(p: P) -> i64:
+    p.mark()
+
+fn main() -> i64:
+    val p = P(x: 10)
+    use_p(p)
+"""
+        val res1 = lower_single_module(src_inherent_first)
+        expect(res1.0.functions.len() > 0).to_equal(true)
+        expect(res1.1.len()).to_equal(0)
+        expect(has_call_in_fn(res1.0, "use_p")).to_equal(true)
+
+        val res2 = lower_single_module(src_inherent_last)
+        expect(res2.0.functions.len() > 0).to_equal(true)
+        expect(res2.1.len()).to_equal(0)
+        expect(has_call_in_fn(res2.0, "use_p")).to_equal(true)
+
+    it "keeps trait-typed receiver calls working when struct implements multiple traits":
+        val src = """
+trait MarkerA:
+    fn mark() -> i64
+
+trait MarkerB:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+fn call_trait(m: MarkerA) -> i64:
+    m.mark()
+
+fn main() -> i64:
+    val p = P(x: 10)
+    call_trait(p)
+"""
+        val res = lower_single_module(src)
+        expect(res.0.functions.len() > 0).to_equal(true)
+        expect(res.1.len()).to_equal(0)
+
+    it "isolates bare struct leaf names across modules when local inherent coexists with ambiguous provider":
+        val prov_src = """
+pub trait ProvA:
+    fn mark() -> i64
+
+pub trait ProvB:
+    fn mark() -> i64
+
+pub struct P:
+    v: i64
+
+impl ProvA for P:
+    fn mark() -> i64:
+        self.v + 1
+
+impl ProvB for P:
+    fn mark() -> i64:
+        self.v + 2
+
+pub fn make_prov_p() -> P:
+    P(v: 10)
+"""
+        val cons_local_src = """
+use lib.prov.{make_prov_p}
+
+struct P:
+    x: i64
+
+impl P:
+    fn mark() -> i64:
+        self.x + 100
+
+fn use_local() -> i64:
+    val p = P(x: 5)
+    p.mark()
+
+fn main() -> i64:
+    val _q = make_prov_p()
+    use_local()
+"""
+        val res_local = lower_two_modules(prov_src, cons_local_src)
+        expect(res_local.0.functions.len() > 0).to_equal(true)
+        expect(res_local.1.len()).to_equal(0)
+        expect(has_call_in_fn(res_local.0, "use_local")).to_equal(true)
+
+        val cons_prov_src = """
+use lib.prov.{make_prov_p}
+
+struct P:
+    x: i64
+
+impl P:
+    fn mark() -> i64:
+        self.x + 100
+
+fn use_prov() -> i64:
+    val q = make_prov_p()
+    q.mark()
+
+fn main() -> i64:
+    val _p = P(x: 5)
+    use_prov()
+"""
+        val res_prov = lower_two_modules(prov_src, cons_prov_src)
+        expect(res_prov.1.len() > 0).to_equal(true)
+        var saw_ambig = false
+        var saw_fatal = false
+        var i = 0
+        while i < res_prov.1.len():
+            if res_prov.1[i].contains("ambiguous trait method") and res_prov.1[i].contains("mark"):
+                saw_ambig = true
+                if res_prov.2[i]:
+                    saw_fatal = true
+            i = i + 1
+        expect(saw_ambig).to_equal(true)
+        expect(saw_fatal).to_equal(true)
+
+    it "isolates bare struct leaf names across modules when ambiguous local coexists with single-trait provider":
+        val prov_src = """
+pub trait ProvSingle:
+    fn mark() -> i64
+
+pub struct P:
+    v: i64
+
+impl ProvSingle for P:
+    fn mark() -> i64:
+        self.v + 7
+
+pub fn make_prov_p() -> P:
+    P(v: 10)
+"""
+        val cons_ok_src = """
+use lib.prov.{make_prov_p}
+
+trait LocalA:
+    fn mark() -> i64
+
+trait LocalB:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl LocalA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl LocalB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+fn use_prov() -> i64:
+    val q = make_prov_p()
+    q.mark()
+
+fn main() -> i64:
+    use_prov()
+"""
+        val res_ok = lower_two_modules(prov_src, cons_ok_src)
+        expect(res_ok.0.functions.len() > 0).to_equal(true)
+        expect(res_ok.1.len()).to_equal(0)
+        expect(has_call_in_fn(res_ok.0, "use_prov")).to_equal(true)
+
+        val cons_err_src = """
+use lib.prov.{make_prov_p}
+
+trait LocalA:
+    fn mark() -> i64
+
+trait LocalB:
+    fn mark() -> i64
+
+struct P:
+    x: i64
+
+impl LocalA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl LocalB for P:
+    fn mark() -> i64:
+        self.x + 2
+
+fn use_local() -> i64:
+    val p = P(x: 5)
+    p.mark()
+
+fn main() -> i64:
+    val _q = make_prov_p()
+    use_local()
+"""
+        val res_err = lower_two_modules(prov_src, cons_err_src)
+        expect(res_err.1.len() > 0).to_equal(true)
+        var saw_ambig = false
+        var i = 0
+        while i < res_err.1.len():
+            if res_err.1[i].contains("ambiguous trait method") and res_err.1[i].contains("mark"):
+                saw_ambig = true
+            i = i + 1
+        expect(saw_ambig).to_equal(true)
+
+    it "detects two-trait ambiguity and inherent precedence on eager provider methods path":
+        val prov_ambig = """
+pub trait MarkerA:
+    fn mark() -> i64
+
+pub trait MarkerB:
+    fn mark() -> i64
+
+pub struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+"""
+        val cons_src = """
+use lib.prov.{P}
+
+fn use_p(p: P) -> i64:
+    p.mark()
+
+fn main() -> i64:
+    use_p(P(x: 10))
+"""
+        val res_ambig = lower_two_modules_configured(prov_ambig, cons_src, true, false)
+        expect(res_ambig.1.len() > 0).to_equal(true)
+        var saw_ambig = false
+        var saw_fatal = false
+        var i = 0
+        while i < res_ambig.1.len():
+            if res_ambig.1[i].contains("ambiguous trait method") and res_ambig.1[i].contains("mark"):
+                saw_ambig = true
+                if res_ambig.2[i]:
+                    saw_fatal = true
+            i = i + 1
+        expect(saw_ambig).to_equal(true)
+        expect(saw_fatal).to_equal(true)
+
+        val prov_inherent = """
+pub trait MarkerA:
+    fn mark() -> i64
+
+pub struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl P:
+    fn mark() -> i64:
+        self.x + 9
+"""
+        val res_ok = lower_two_modules_configured(prov_inherent, cons_src, true, false)
+        expect(res_ok.0.functions.len() > 0).to_equal(true)
+        expect(res_ok.1.len()).to_equal(0)
+        expect(has_call_in_fn(res_ok.0, "use_p")).to_equal(true)
+
+    it "detects two-trait ambiguity and inherent precedence via declaration_repository provider path":
+        val prov_ambig = """
+pub trait MarkerA:
+    fn mark() -> i64
+
+pub trait MarkerB:
+    fn mark() -> i64
+
+pub struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl MarkerB for P:
+    fn mark() -> i64:
+        self.x + 2
+"""
+        val cons_src = """
+use lib.prov.{P}
+
+fn use_p(p: P) -> i64:
+    p.mark()
+
+fn main() -> i64:
+    use_p(P(x: 10))
+"""
+        val res_ambig = lower_two_modules_configured(prov_ambig, cons_src, false, true)
+        expect(res_ambig.1.len() > 0).to_equal(true)
+        var saw_ambig = false
+        var saw_fatal = false
+        var i = 0
+        while i < res_ambig.1.len():
+            if res_ambig.1[i].contains("ambiguous trait method") and res_ambig.1[i].contains("mark"):
+                saw_ambig = true
+                if res_ambig.2[i]:
+                    saw_fatal = true
+            i = i + 1
+        expect(saw_ambig).to_equal(true)
+        expect(saw_fatal).to_equal(true)
+
+        val prov_inherent = """
+pub trait MarkerA:
+    fn mark() -> i64
+
+pub struct P:
+    x: i64
+
+impl MarkerA for P:
+    fn mark() -> i64:
+        self.x + 1
+
+impl P:
+    fn mark() -> i64:
+        self.x + 9
+"""
+        val res_ok = lower_two_modules_configured(prov_inherent, cons_src, false, true)
+        expect(res_ok.0.functions.len() > 0).to_equal(true)
+        expect(res_ok.1.len()).to_equal(0)
+        expect(has_call_in_fn(res_ok.0, "use_p")).to_equal(true)

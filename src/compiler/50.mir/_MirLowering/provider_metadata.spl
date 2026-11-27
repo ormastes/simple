@@ -23,6 +23,97 @@ fn mir_class_identity_raw(symbols: SymbolTable, raw: i64) -> text:
     val owner = _hir_symbol_owner_module(symbols.symbol_defining_module_scalar_raw(raw))
     if owner == "": name else: "{owner}.{name}"
 
+fn hir_impl_trait_symbol_id_v1(impl_def: HirImpl, symbols: SymbolTable) -> i64:
+    """Return the implemented Trait SymbolId when `impl_def` is a trait impl
+    (`impl Trait for Type`), or -1 for inherent `impl Type:` blocks.
+    `trait_impl_lowering.spl` initializes inherent impls with
+    `HirTypeKind.Error` rather than `nil`, so non-nilness alone is not
+    sufficient."""
+    if impl_def.trait_ == None:
+        return -1
+    val impl_trait: HirType = impl_def.trait_
+    val trait_kind: HirTypeKind = impl_trait.kind
+    match trait_kind:
+        case Error: -1
+        case Named(trait_sym, _):
+            if val trait_symbol = symbols.get_symbol_raw(trait_sym.id):
+                if trait_symbol.kind == SymbolKind.Trait:
+                    return trait_sym.id
+                return -1
+            if impl_def.has_trait_:
+                return trait_sym.id
+            -1
+        case _: -1
+
+struct MirImplMethodProvenanceV1:
+    """Inherent vs trait method provenance and per-provider trait ambiguities."""
+    inherent_fn_ids: Dict<i64, bool>
+    trait_fn_ids: Dict<i64, bool>
+    inherent_keys: Dict<text, bool>
+    trait_ambiguous_keys: Dict<text, bool>
+
+fn _hir_impl_owner_keys_v1(impl_def: HirImpl, symbols: SymbolTable) -> [text]:
+    var owner_keys: [text] = []
+    match impl_def.type_.kind:
+        case Named(type_sym, _):
+            val owner_name = mir_class_identity_raw(symbols, type_sym.id)
+            if owner_name != "":
+                owner_keys.push(owner_name)
+        case _: ()
+    owner_keys
+
+fn hir_impl_method_provenance_v1(impls: [HirImpl], symbols: SymbolTable) -> MirImplMethodProvenanceV1:
+    """Classify method symbol IDs and intra-provider trait ambiguities in `impls`."""
+    var inherent_fn_ids: Dict<i64, bool> = {}
+    var trait_fn_ids: Dict<i64, bool> = {}
+    var inherent_keys: Dict<text, bool> = {}
+    var first_trait_by_key: Dict<text, i64> = {}
+    var raw_trait_ambiguous: Dict<text, bool> = {}
+    var impl_i = 0
+    while impl_i < impls.len():
+        val impl_def: HirImpl = impls[impl_i]
+        impl_i = impl_i + 1
+        val trait_sym_id = hir_impl_trait_symbol_id_v1(impl_def, symbols)
+        val is_trait = trait_sym_id >= 0
+        val owner_keys = _hir_impl_owner_keys_v1(impl_def, symbols)
+        val method_names: [text] = impl_def.methods.keys()
+        var mi = 0
+        while mi < method_names.len():
+            val method_name: text = method_names[mi]
+            mi = mi + 1
+            val method_id: SymbolId = impl_def.methods[method_name]
+            var is_static = false
+            if val method_sym = symbols.get_symbol_raw(method_id.id):
+                is_static = method_sym.kind == SymbolKind.Function
+            if is_trait:
+                trait_fn_ids[method_id.id] = true
+            else:
+                inherent_fn_ids[method_id.id] = true
+            for owner_key in owner_keys:
+                var keys_for_owner: [text] = ["{owner_key}::{method_name}"]
+                if is_static:
+                    keys_for_owner.push("static::{owner_key}::{method_name}")
+                for key in keys_for_owner:
+                    if not is_trait:
+                        inherent_keys[key] = true
+                    elif not inherent_keys.has(key):
+                        if first_trait_by_key.has(key):
+                            if first_trait_by_key[key] != trait_sym_id:
+                                raw_trait_ambiguous[key] = true
+                        else:
+                            first_trait_by_key[key] = trait_sym_id
+    var trait_ambiguous_keys: Dict<text, bool> = {}
+    for raw_k in raw_trait_ambiguous.keys():
+        val k: text = raw_k
+        if not inherent_keys.has(k):
+            trait_ambiguous_keys[k] = true
+    MirImplMethodProvenanceV1(
+        inherent_fn_ids: inherent_fn_ids,
+        trait_fn_ids: trait_fn_ids,
+        inherent_keys: inherent_keys,
+        trait_ambiguous_keys: trait_ambiguous_keys
+    )
+
 fn mir_nominal_owner_matches(name: text, defining_module: text, ownership_key: text) -> bool:
     """Compare one full declaration owner across path and logical spellings.
     The layout registration retains its raw key; only the owner comparison
@@ -434,6 +525,26 @@ impl MirLowering:
         val owner_module = mir_layout_canonical_module_name(owner_key.substring(0, type_sep))
         self.composite_layout_digests.has("{owner_module}::{owner_key.substring(type_sep + 1)}")
 
+    me register_struct_impl_method_v1(key: text, method: SymbolId, is_trait_impl: bool):
+        """Record one `{owner}::{method}` impl entry while enforcing inherent
+        precedence over trait impls and detecting ambiguous multiple trait
+        impls for the same method name on one owner."""
+        if not is_trait_impl:
+            self.struct_inherent_method_syms[key] = true
+            self.struct_method_syms[key] = method
+            if self.struct_trait_method_ambiguous.has(key):
+                self.struct_trait_method_ambiguous[key] = false
+            return
+        if self.struct_inherent_method_syms.has(key) and self.struct_inherent_method_syms[key]:
+            return
+        if self.struct_method_syms.has(key):
+            val prior: SymbolId = self.struct_method_syms[key]
+            if prior.id != method.id:
+                self.struct_trait_method_ambiguous[key] = true
+            return
+        self.struct_inherent_method_syms[key] = false
+        self.struct_method_syms[key] = method
+
     me register_owner_method(key: text, method: SymbolId, owner_module: text):
         """Publish one `{owner}::{method}` dispatch row. A second module's impl
         block declaring the same method on the same owner (two extension
@@ -458,12 +569,26 @@ impl MirLowering:
                         self.struct_method_ambiguous[key] = true
         self.struct_method_syms[key] = method
 
+    me apply_impl_trait_ambiguities_v1(provenance: MirImplMethodProvenanceV1):
+        """Record intra-provider multi-trait method ambiguities unless suppressed by an inherent impl."""
+        for raw_key in provenance.trait_ambiguous_keys.keys():
+            val key: text = raw_key
+            if not provenance.trait_ambiguous_keys[key]:
+                continue
+            if not (self.struct_inherent_method_syms.has(key) and self.struct_inherent_method_syms[key]):
+                self.struct_trait_method_ambiguous[key] = true
+
     me register_provider_method(func: HirFunction, provider: SymbolTable, links: Dict<i64, text>):
+        self.register_provider_method_with_kind_v1(func, provider, links, false, false, false)
+
+    me register_provider_method_with_kind_v1(func: HirFunction, provider: SymbolTable, links: Dict<i64, text>,
+            is_trait_impl: bool, is_inherent_impl: bool, metadata_only: bool = false):
         self.register_provider_method_fields_v1(func.symbol, func.is_method, func.is_static,
-            func.return_type, provider, links)
+            func.return_type, provider, links, is_trait_impl, is_inherent_impl, metadata_only)
 
     me register_provider_method_fields_v1(function_symbol: SymbolId, is_method: bool,
-            is_static: bool, return_type: HirType, provider: SymbolTable, links: Dict<i64, text>):
+            is_static: bool, return_type: HirType, provider: SymbolTable, links: Dict<i64, text>,
+            is_trait_impl: bool = false, is_inherent_impl: bool = false, metadata_only: bool = false):
         if not is_method and not is_static:
             return
         if not links.has(function_symbol.id):
@@ -471,13 +596,32 @@ impl MirLowering:
         val key = self.provider_method_dispatch_key_v1(function_symbol, provider)
         if key == "":
             return
-        val owner_module = provider.symbol_defining_module_scalar_raw(function_symbol.id)
-        val method = self.relocate_provider_callable(function_symbol, provider, links)
-        if method.id < 0:
-            return
-        self.register_owner_method(key, method, owner_module)
-        if is_static:
-            self.register_owner_method("static::{key}", method, owner_module)
+        if not metadata_only:
+            val owner_module = provider.symbol_defining_module_scalar_raw(function_symbol.id)
+            val method = self.relocate_provider_callable(function_symbol, provider, links)
+            if method.id < 0:
+                return
+            var keys: [text] = [key]
+            if is_static:
+                keys.push("static::{key}")
+            for target_key in keys:
+                if is_trait_impl:
+                    self.register_struct_impl_method_v1(target_key, method, true)
+                elif is_inherent_impl:
+                    self.provider_method_materialize_v1(target_key)
+                    val had_trait_only = (self.struct_method_syms.has(target_key) and
+                        self.struct_inherent_method_syms.has(target_key) and
+                        not self.struct_inherent_method_syms[target_key])
+                    if had_trait_only:
+                        self.register_struct_impl_method_v1(target_key, method, false)
+                    else:
+                        self.struct_inherent_method_syms[target_key] = true
+                        if self.struct_trait_method_ambiguous.has(target_key):
+                            self.struct_trait_method_ambiguous[target_key] = false
+                        self.register_owner_method(target_key, method, owner_module)
+                else:
+                    if not (self.struct_inherent_method_syms.has(target_key) and self.struct_inherent_method_syms[target_key]):
+                        self.register_owner_method(target_key, method, owner_module)
         val ret = self.relocate_provider_type(return_type, provider)
         val ret_name = self.provider_method_return_name_v1(ret)
         if ret_name != "":
@@ -1068,7 +1212,10 @@ impl MirLowering:
                 val method_id: SymbolId = class_def.methods[method_name]
                 val method = self.relocate_provider_callable(method_id, provider, links)
                 if method.id >= 0:
+                    self.struct_inherent_method_syms["{canonical}::{method_name}"] = true
                     self.struct_method_syms["{canonical}::{method_name}"] = method
+                    if self.struct_trait_method_ambiguous.has("{canonical}::{method_name}"):
+                        self.struct_trait_method_ambiguous["{canonical}::{method_name}"] = false
 
     me register_provider_struct(struct_def: HirStruct, provider: SymbolTable, consumer_owns_name: bool,
             links: Dict<i64, text> = {}):
@@ -1772,6 +1919,8 @@ impl MirLowering:
         var row_symbol: [i64] = []
         var row_class_symbol: [i64] = []
         self.provider_method_row_keys = {}
+        self.provider_session_trait_ambiguous_keys = {}
+        var session_inherent_keys: Dict<text, bool> = {}
         self.provider_method_row_return_type = {}
         var provider_i = 0
         while provider_i < providers.len():
@@ -1818,7 +1967,19 @@ impl MirLowering:
                             row_symbol.push(class_method_id.id)
                             row_class_symbol.push(provider_class.symbol.id)
                             self.provider_method_file_row_v1("{canonical}::{class_method_name}", class_row)
-                # Owner rows, in function order. The owner decision itself is
+                # Owner rows, in function order. Track impl provenance (inherent=2,
+                # trait=3, general=1) so demand materialization enforces inherent
+                # precedence and detects multiple trait impls on the same struct.
+                val prov_provenance = hir_impl_method_provenance_v1(provider_module.impls, provider_module.symbols)
+                val provider_inherent_fn_ids = prov_provenance.inherent_fn_ids
+                val provider_trait_fn_ids = prov_provenance.trait_fn_ids
+                for raw_ik in prov_provenance.inherent_keys.keys():
+                    val ik: text = raw_ik
+                    session_inherent_keys[ik] = true
+                for raw_ak in prov_provenance.trait_ambiguous_keys.keys():
+                    val ak: text = raw_ak
+                    self.provider_session_trait_ambiguous_keys[ak] = true
+                # The owner decision itself is
                 # re-made at materialization (provider_method_dispatch_key_v1);
                 # a row is filed under every key that decision can produce.
                 var func_i = 0
@@ -1838,8 +1999,14 @@ impl MirLowering:
                             val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
                             val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
                             val owner_row = row_provider.len()
+                            val owner_row_kind = if provider_inherent_fn_ids.has(method_func.symbol.id):
+                                2
+                            elif provider_trait_fn_ids.has(method_func.symbol.id):
+                                3
+                            else:
+                                1
                             row_provider.push(provider_i)
-                            row_kind.push(1)
+                            row_kind.push(owner_row_kind)
                             row_symbol.push(method_func.symbol.id)
                             row_class_symbol.push(-1)
                             self.provider_method_row_return_type[owner_row] = method_func.return_type
@@ -1853,6 +2020,10 @@ impl MirLowering:
             links_by_index.push(links)
             links_ready.push(built)
             provider_i = provider_i + 1
+        for raw_ik in session_inherent_keys.keys():
+            val ik: text = raw_ik
+            if self.provider_session_trait_ambiguous_keys.has(ik):
+                self.provider_session_trait_ambiguous_keys[ik] = false
         self.provider_session_names = names
         self.provider_session_content_key = requested_key
         self.provider_session_links = links_by_index
@@ -2400,13 +2571,21 @@ impl MirLowering:
         if self.provider_method_materialized.has(key):
             return
         self.provider_method_materialized[key] = true
+        val session_trait_ambig = self.provider_session_trait_ambiguous_keys.has(key) and self.provider_session_trait_ambiguous_keys[key]
         if not self.provider_method_row_keys.has(key):
+            if session_trait_ambig and not (self.struct_inherent_method_syms.has(key) and self.struct_inherent_method_syms[key]):
+                self.struct_trait_method_ambiguous[key] = true
             return
         val rows: [i64] = self.provider_method_row_keys[key]
         val static_key = key.starts_with("static::")
         var have = false
         var current = SymbolId(id: -1)
         var ambiguous = false
+        var has_inherent_row = false
+        var has_non_trait_row = false
+        var has_trait_row = false
+        var first_trait_method = SymbolId(id: -1)
+        var trait_ambiguous = session_trait_ambig
         var has_return_name = false
         var return_name = ""
         var returns_array = false
@@ -2426,7 +2605,8 @@ impl MirLowering:
                 continue
             val links: Dict<i64, text> = self.provider_session_links[provider_index]
             val method_symbol = SymbolId(id: self.provider_method_row_symbol[row])
-            if self.provider_method_row_kind[row] == 0:
+            val row_kind = self.provider_method_row_kind[row]
+            if row_kind == 0:
                 if static_key:
                     continue
                 # register_provider_class already relocated the class symbol
@@ -2438,6 +2618,9 @@ impl MirLowering:
                 if class_method.id >= 0:
                     current = class_method
                     have = true
+                    has_inherent_row = true
+                    has_non_trait_row = true
+                    trait_ambiguous = false
                 continue
             val dispatch_key = self.provider_method_dispatch_key_v1(method_symbol, provider_module.symbols)
             if dispatch_key == "":
@@ -2448,16 +2631,32 @@ impl MirLowering:
             val method = self.relocate_provider_callable(method_symbol, provider_module.symbols, links)
             if method.id < 0:
                 continue
-            if have and current.id != method.id:
-                # register_owner_method's rule: an unknown owner on either
-                # side is never evidence of a second declaring module.
-                val prior_owner = self.symbols.symbol_defining_module_scalar_raw(current.id)
-                val owner_module = provider_module.symbols.symbol_defining_module_scalar_raw(method_symbol.id)
-                if prior_owner != "" and owner_module != "":
-                    if _hir_symbol_owner_module(prior_owner) != _hir_symbol_owner_module(owner_module):
-                        ambiguous = true
-            current = method
-            have = true
+            if row_kind == 3:
+                if not has_inherent_row:
+                    if has_trait_row and first_trait_method.id != method.id:
+                        trait_ambiguous = true
+                    elif not has_trait_row:
+                        has_trait_row = true
+                        first_trait_method = method
+                    if not has_non_trait_row:
+                        current = method
+                        have = true
+            else:
+                if row_kind == 2:
+                    has_inherent_row = true
+                    trait_ambiguous = false
+                if row_kind == 2 or not has_inherent_row:
+                    if have and has_non_trait_row and current.id != method.id:
+                        # register_owner_method's rule: an unknown owner on either
+                        # side is never evidence of a second declaring module.
+                        val prior_owner = self.symbols.symbol_defining_module_scalar_raw(current.id)
+                        val owner_module = provider_module.symbols.symbol_defining_module_scalar_raw(method_symbol.id)
+                        if prior_owner != "" and owner_module != "":
+                            if _hir_symbol_owner_module(prior_owner) != _hir_symbol_owner_module(owner_module):
+                                ambiguous = true
+                    current = method
+                    have = true
+                    has_non_trait_row = true
             if not static_key and self.provider_method_row_return_type.has(row):
                 val return_type: HirType = self.provider_method_row_return_type[row]
                 val ret = self.relocate_provider_type(return_type, provider_module.symbols)
@@ -2470,13 +2669,32 @@ impl MirLowering:
                     case Array(_, _) | Slice(_): returns_array = true
                     case Optional(_): returns_optional = true
                     case _: ()
-        if have and not self.struct_method_syms.has(key):
-            self.struct_method_syms[key] = current
+        val local_inherent = self.struct_inherent_method_syms.has(key) and self.struct_inherent_method_syms[key]
+        if have:
+            if not self.struct_method_syms.has(key):
+                self.struct_method_syms[key] = current
+                if has_inherent_row:
+                    self.struct_inherent_method_syms[key] = true
+                elif has_trait_row:
+                    self.struct_inherent_method_syms[key] = false
+            elif has_inherent_row and not local_inherent:
+                self.struct_inherent_method_syms[key] = true
+                self.struct_method_syms[key] = current
+                if self.struct_trait_method_ambiguous.has(key):
+                    self.struct_trait_method_ambiguous[key] = false
+            elif has_trait_row and not local_inherent:
+                val local_existing: SymbolId = self.struct_method_syms[key]
+                if local_existing.id != first_trait_method.id:
+                    trait_ambiguous = true
         if ambiguous and self.provider_method_record_ambiguity:
             self.struct_method_ambiguous[key] = true
+        if trait_ambiguous and not local_inherent and not has_inherent_row:
+            self.struct_trait_method_ambiguous[key] = true
         if has_return_name and not self.struct_method_return_names.has(key):
             self.struct_method_return_names[key] = return_name
         if returns_array:
             self.struct_method_return_is_array[key] = true
         if returns_optional:
             self.struct_method_return_is_optional[key] = true
+
+export hir_impl_trait_symbol_id_v1, MirImplMethodProvenanceV1, hir_impl_method_provenance_v1
