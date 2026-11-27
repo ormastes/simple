@@ -8,9 +8,10 @@
 # SIMPLE_ORCH_FIXTURE_HOST_ID (simple-orch-host), SIMPLE_ORCH_FIXTURE_SCOPE (fixture-scope),
 # SIMPLE_ORCH_FIXTURE_MACHINE_ID_FILE (/etc/machine-id), SIMPLE_ORCH_FIXTURE_CARET_CONTROLLER (ctrl-qual).
 # Each produced class prints `FIXTURE OK <class> <path>`; a class whose inputs are absent prints
-# `FIXTURE BLOCKED <class>: <reason>`; a refusal prints `FIXTURE ERROR <class>: <reason>`.
-# Keys are fresh OS-entropy seeds on every run. Existing dispatch files with different bytes are refused,
-# never replaced, so re-running over a used guest overlay reports ERROR instead of rotating keys silently.
+# `FIXTURE BLOCKED <class>: <reason>`; a refusal or an unset required variable prints
+# `FIXTURE ERROR <class>: <reason>`; the last line is always `FIXTURE DONE`.
+# Keys are fresh OS-entropy seeds on every run. The dispatch root is installed before any key is written and
+# keys are created exclusively, so re-running over a used guest overlay reports ERROR instead of rotating keys.
 use std.nogc_sync_mut.io_runtime.{env_get, file_write_exact}
 use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
 use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
@@ -47,14 +48,16 @@ fn gen_inputs_v1() -> Result<EnrolledFixtureInputsV1, text>:
 
 fn gen_authority_v1(inputs: EnrolledFixtureInputsV1) -> Result<EnrolledFixtureAuthorityV1, text>:
     val authority = enrolled_fixture_authority_v1(inputs)?
+    # Install first: a dispatch root already holding another policy refuses here, before any key is written,
+    # and keys are created exclusively, so a re-run can never leave keys that the installed policy does not pin.
+    val context = enrolled_fixture_dispatch_install_v1(env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT"), inputs,
+        authority.policy_bytes)?
+    print "FIXTURE OK dispatch " + env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT")
     val store = env_get("SIMPLE_ORCH_FIXTURE_KEY_STORE")
     val issuer_path = enrolled_fixture_write_key_v1(store, authority.issuer_key, authority.issuer.file)?
     val approver_path = enrolled_fixture_write_key_v1(store, authority.approver_key, authority.approver.file)?
     print "FIXTURE OK key " + issuer_path
     print "FIXTURE OK key " + approver_path
-    val context = enrolled_fixture_dispatch_install_v1(env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT"), inputs,
-        authority.policy_bytes)?
-    print "FIXTURE OK dispatch " + env_get("SIMPLE_ORCH_FIXTURE_DISPATCH_ROOT")
     val parent_policy = inputs.machine_parent + "/authority-policy.sdn"
     if not file_atomic_write_mode(parent_policy, authority.policy_bytes, 0o600): return Err("cannot write " + parent_policy)
     print "FIXTURE OK authority " + parent_policy
@@ -64,7 +67,7 @@ fn gen_binding_v1(inputs: EnrolledFixtureInputsV1, authority: EnrolledFixtureAut
     val dir = env_get("SIMPLE_ORCH_FIXTURE_INPUT_DIR")
     val pins = enrolled_fixture_pins_v1(dir)
     if pins.is_err():
-        print "FIXTURE BLOCKED binding: " + pins.unwrap_err() + " (the five pinned inputs have no in-repo producer yet)"
+        print "FIXTURE BLOCKED binding: " + pins.unwrap_err() + " (pinned-input generators not written, todo 484)"
         return
     match enrolled_fixture_binding_v1(inputs, authority.policy_bytes, pins.unwrap()):
         case Ok(binding):
@@ -94,9 +97,11 @@ fn gen_main_v1():
             match gen_authority_v1(inputs):
                 case Ok(authority): gen_binding_v1(inputs, authority)
                 case Err(reason): print "FIXTURE ERROR authority: " + reason
-        case Err(reason): print "FIXTURE BLOCKED authority: " + reason
-    print "FIXTURE BLOCKED v6-requests: attach/invoke/detach need the live Host association, plan and pane binding"
-    print "FIXTURE BLOCKED installer-parent: needs the live native machine identity owners"
-    print "FIXTURE BLOCKED profiles: digests pin the installed machine policy, provider policy and broker executable"
+        case Err(reason): print "FIXTURE ERROR authority: " + reason
+    print "FIXTURE BLOCKED v6-requests: attach/invoke/detach need the live Host association, plan and pane binding (todo 485)"
+    print "FIXTURE BLOCKED installer-parent: needs binding + credential plus the four pinned inputs of todo 484 (todo 486)"
+    print "FIXTURE BLOCKED profiles: profile generator not written; the codecs exist (todo 481)"
+    # Completion sentinel: the wrapper treats its absence (crash, timeout) as FAIL.
+    print "FIXTURE DONE"
 
 gen_main_v1()
