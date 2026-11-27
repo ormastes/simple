@@ -168,7 +168,7 @@ class HttpRequestParser:
                         # AC-2: bound buffer growth while waiting for CRLF — a
                         # client streaming an endless request line is cut off.
                         val unread_bytes = (self.buffer.byte_len() - self.buf_pos) + self.rx_pending_bytes
-                        if unread_bytes > self.max_request_line + 2:
+                        if self.request_line_overflows_without_crlf(unread_bytes):
                             return Err(self.fail("431 Request line too long: {unread_bytes} bytes"))
                         return Ok(consumed)
 
@@ -347,6 +347,21 @@ class HttpRequestParser:
     # ========================================================================
     # Internal Buffer & Chunk Management
     # ========================================================================
+
+    fn request_line_overflows_without_crlf(unread_bytes: i64) -> bool:
+        """True when `unread_bytes` of request line with no CRLF yet already
+        exceed the limit. max+1 bytes may still be a full line whose CR has
+        arrived and whose LF is pending, so that one case is judged by the last
+        received byte."""
+        if unread_bytes <= self.max_request_line:
+            return false
+        if unread_bytes > self.max_request_line + 1:
+            return true
+        var tail = self.buffer
+        if self.rx_chunks.len() > 0:
+            tail = self.rx_chunks[self.rx_chunks.len() - 1]
+        val tail_len = tail.byte_len()
+        tail_len == 0 or tail.slice(tail_len - 1, tail_len) != "\r"
 
     me rx_has_newline() -> bool:
         """Scan only newly arrived rx_chunks for '\\n' so partial lines stay queued."""
@@ -558,18 +573,9 @@ class HttpRequestParser:
         # Validate the wire spelling before trimming: whitespace before the
         # colon and controls at either edge must not disappear during parsing.
         val name = line.slice(0, colon)
-        for code in string_bytes(name):
-            val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
-            val digit = code >= 48 and code <= 57
-            val symbol = (
-                code == 33 or code == 35 or code == 36 or code == 37 or
-                code == 38 or code == 39 or code == 42 or code == 43 or
-                code == 45 or code == 46 or code == 94 or code == 95 or
-                code == 96 or code == 124 or code == 126
-            )
-            if not alpha and not digit and not symbol:
-                self.error_message = "400 Invalid header name"
-                return false
+        if not http1_header_name_is_token(name):
+            self.error_message = "400 Invalid header name"
+            return false
         val raw_value = line.slice(colon + 1, line.byte_len())
         for code in string_bytes(raw_value):
             # RFC field values allow HTAB, SP, visible ASCII and obs-text.
@@ -631,6 +637,23 @@ class HttpRequestParser:
 # Returns (true, lower_authority) for an absolute-form target ("http://Host:1/a"
 # -> (true, "host:1")), or (false, "") when the target is origin-form. `target`
 # is the path component (the query was already split off by parse_request_line).
+fn http1_header_name_is_token(name: text) -> bool:
+    """True when `name` is a non-empty RFC 9110 token (ASCII tchar only)."""
+    if name.byte_len() == 0:
+        return false
+    for code in string_bytes(name):
+        val alpha = (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        val symbol = (
+            code == 33 or code == 35 or code == 36 or code == 37 or
+            code == 38 or code == 39 or code == 42 or code == 43 or
+            code == 45 or code == 46 or code == 94 or code == 95 or
+            code == 96 or code == 124 or code == 126
+        )
+        if not alpha and not digit and not symbol:
+            return false
+    true
+
 fn _async_absolute_form_authority(target: text) -> (bool, text):
     val lower = target.lower()
     var rest = ""

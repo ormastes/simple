@@ -31,6 +31,7 @@ actual numbers this run produced.
 
 use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{
     engine2d_simd_fill_row_u32,
+    engine2d_simd_copy_row_u32,
     engine2d_simd_blend_row_u32,
     engine2d_simd_blend_span_u32,
     engine2d_simd_blend_const_span_u32,
@@ -75,6 +76,26 @@ fn simd_isa_fill_const(mut dst: [u32], offset: i64, count: i64, colour: i64):
     # One bulk write_span, not a per-pixel store loop: the interpreter ran
     # this loop once per pixel, which at device scale 4 (3600 px rows) was
     # ~16 s per full-frame fill. Same values, same positions.
+    dst.write_span(row, offset, 0, count)
+
+# --- copy_span ---------------------------------------------------------------
+
+# @allow(primitive_api) reason: pixel-span kernel in the scalar-oracle ABI (u32 pixels, i64 offsets and counts), same shape as its sibling span kernels
+pub fn simd_isa_copy_span(mut dst: [u32], offset: i64, src: [u32], src_offset: i64, count: i64):
+    """copy_span via the native copy-row kernel. Same contract as
+    oracle_copy_span: a verbatim store with memmove semantics, so the source
+    window is gathered into its own row before anything is written."""
+    if count <= 0:
+        return
+    val n = count.to_i32()
+    var src_row: [u32] = [0; n]
+    var i: i64 = 0
+    while i < count:
+        src_row[i.to_i32()] = src[(src_offset + i).to_i32()]
+        i = i + 1
+    val copied = engine2d_simd_copy_row_u32(src_row)
+    # A native under-production falls back to the gathered row, never a partial write.
+    val row = if copied.len() == n: copied else: src_row
     dst.write_span(row, offset, 0, count)
 
 # --- src_over_const ------------------------------------------------------
@@ -220,7 +241,10 @@ fn simd_span_batch_execute(mut batch: SpanOpBatch, mut dst: [u32], src: [u32],
                     oracle_fill_const(dst, dst_off, count, batch.colours[idx])
                 executed = executed + 1
             elif op == KERNEL_OP_COPY_SPAN:
-                oracle_copy_span(dst, dst_off, src, src_off, count)
+                if use_simd:
+                    simd_isa_copy_span(dst, dst_off, src, src_off, count)
+                else:
+                    oracle_copy_span(dst, dst_off, src, src_off, count)
                 executed = executed + 1
             elif op == KERNEL_OP_SRC_OVER_CONST:
                 if use_simd:
