@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** open. **Severity:** blocks the web × headless showcase cell on linux-x86_64.
+**Status:** fix-implemented-verification-pending (2026-11-27 W4-5; waiting-for: linux-x86_64 headless showcase benchmark check of `examples/06_io/ui/web_render_file_gui.spl`). **Severity:** blocks the web × headless showcase cell on linux-x86_64.
 **Component:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`
 (style producer loop, `budget-break` at line ~1876).
 
@@ -1339,4 +1339,18 @@ SIMPLE_WEB_RENDER_BUDGET_MS=120000 SIMPLE_TIMEOUT_SECONDS=270 \
 SHOWCASE_RESOLUTION=480x360 bin/simple run examples/06_io/ui/web_render_file_gui.spl
 # watch: budget-break at=N of=151 — N ≈ budget_s / 3.2 (post char_at fixes)
 ```
+
+## W4-5 Fix & Windows Verification (2026-11-27)
+
+- **Owner:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl`
+- **Changes implemented:**
+  - Precompute `has_child` in one O(N) pass and skip `anc_stack`/`anc_counts` plus `st.inherited_digest()` + `style_inherit_index` for childless leaf nodes.
+  - Add a `#text` fast-path skipping selector matching, writing-mode/display/overflow probes, and form-control/UA checks.
+  - Cache `style_rule_candidates` by simple `(tag, class)` keys, skip candidate selector groups whose specificity cannot beat `matched_specificity`, and cache per-rule declaration property-presence bitmasks (`_decls_prop_flags`) lazily so unused checks (`empty-cells`, `writing-mode`, `inline-flex`, `appearance`, block-margin, `::marker`, `attr(...)` content) short-circuit in O(1).
+  - Replace quadratic `+` string concatenation in `combined_decls`/`combined_important_decls` and `material_entries` with list `.join(...)`, add O(1) single-rule and multi-rule batch cascade memoization, cache `" "` space advance metrics, and replace the O(degree^2) hidden-run whitespace lookahead in `ws_parent` with a monotone pointer.
+- **Verified locally (Windows `--mode=interpreter`):**
+  - `test/01_unit/browser_engine/web_style_cascade_linear_scaling_spec.spl`: `3/3 PASS` (`[style-scale] nodes_s=404 dt_small_us=2888196 nodes_l=1604 dt_large_us=10834049 memo_hits=957`, ~6.75 ms/node linear scaling).
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/merged_cascade_decl_quota_spec.spl`: `2/2 PASS`.
+  - `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_style_jit_identity_spec.spl`: `4/4 PASS`.
+- **Waiting for:** `linux-x86_64` headless showcase benchmark run of `examples/06_io/ui/web_render_file_gui.spl`.
 

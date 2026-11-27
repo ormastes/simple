@@ -27,6 +27,7 @@ class SimpleWebEngine2DStaticPixelCache:
     width: i32
     height: i32
     backend_name: text
+    resolved_backend: text
     last_html: text
     last_render_mode: text
     last_content_revision: i64
@@ -52,10 +53,17 @@ class SimpleWebEngine2DStaticPixelCache:
 
 impl SimpleWebEngine2DStaticPixelCache:
     static fn create(width: i32, height: i32, backend_name: text) -> SimpleWebEngine2DStaticPixelCache:
+        # Resolve once at cache creation so subsequent renders reuse the same
+        # resolved backend without a second probe-vs-use race.
+        val resolved = if width > 0 and height > 0:
+            simple_web_engine2d_resolved_backend_name(width, height, backend_name)
+        else:
+            ""
         SimpleWebEngine2DStaticPixelCache(
             width: width,
             height: height,
             backend_name: backend_name,
+            resolved_backend: resolved,
             last_html: "",
             last_render_mode: "",
             last_content_revision: -1,
@@ -168,7 +176,10 @@ impl SimpleWebEngine2DStaticPixelCache:
             html, render_mode, content_revision
         ):
             return cached
-        val resolved_backend = simple_web_engine2d_resolved_backend_name(self.width, self.height, self.backend_name)
+        val resolved_backend = if self.resolved_backend != "":
+            self.resolved_backend
+        else:
+            simple_web_engine2d_resolved_backend_name(self.width, self.height, self.backend_name)
         val result = simple_web_layout_render_html_readback_engine2d_result(html, self.width, self.height, resolved_backend)
         self.retain_result_for_html(
             html, render_mode, content_revision, result
@@ -1045,16 +1056,9 @@ fn _simple_web_engine2d_text_document(lower: text) -> bool:
 # lane discards a frame because some Draw IR commands were skipped does this
 # present the rendered pixels and report the skips (see
 # simple_web_layout_render_html_presentable_engine2d).
-pub fn simple_web_engine2d_render_html_presentable(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DPresentableFrame:
-    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, backend_name)
-    if pixels.len() > 0 or width <= 0 or height <= 0 or not _simple_web_engine2d_text_document(html.lower()):
-        return SimpleWebLayoutEngine2DPresentableFrame(pixels: pixels, skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
-    simple_web_layout_render_html_presentable_engine2d(html, width, height, _resolved_render_backend(width, height, backend_name))
-
-pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+fn _simple_web_engine2d_render_html_pixels_resolved(html: text, width: i32, height: i32, resolved_backend: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
-    val resolved_backend = _resolved_render_backend(width, height, backend_name)
     val lower = html.lower()
     if _simple_web_engine2d_text_tag_document(lower):
         return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
@@ -1065,6 +1069,21 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
         if text_pixels.len() > 0:
             return text_pixels
     simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
+
+pub fn simple_web_engine2d_render_html_presentable(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DPresentableFrame:
+    if width <= 0 or height <= 0:
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: [], skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
+    val pixels = _simple_web_engine2d_render_html_pixels_resolved(html, width, height, resolved_backend)
+    if pixels.len() > 0 or not _simple_web_engine2d_text_document(html.lower()):
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: pixels, skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
+    simple_web_layout_render_html_presentable_engine2d(html, width, height, resolved_backend)
+
+pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
+    _simple_web_engine2d_render_html_pixels_resolved(html, width, height, resolved_backend)
 
 pub fn simple_web_engine2d_render_html_pixels_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> [u32]:
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
@@ -1089,7 +1108,7 @@ pub fn simple_web_engine2d_render_html_readback(html: text, width: i32, height: 
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
     if (html.contains("display:contents") or html.contains("display: contents")) and resolved_backend != "software" and resolved_backend != "cpu" and resolved_backend != "cpu_simd":
         return simple_web_layout_render_html_readback(html, width, height, resolved_backend)
-    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, resolved_backend)
+    val pixels = _simple_web_engine2d_render_html_pixels_resolved(html, width, height, resolved_backend)
     if resolved_backend != "software" and resolved_backend != "cpu" and resolved_backend != "cpu_simd":
         val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
         return present_layout_pixels_with_engine2d_readback(pixels, width, height, resolved_backend, base)

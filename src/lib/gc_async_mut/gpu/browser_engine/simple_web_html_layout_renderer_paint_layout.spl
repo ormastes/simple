@@ -1121,7 +1121,7 @@ fn _html_draw_ir_commands(
             # ... and any other box its snapped device bottom: a block or flex box
             # ending at a sub-px cursor (19.5 px lines at k=4) paints round(k x
             # bottom) - round(k x top) rows, so stacked backgrounds meet.
-            val block_extra_h = if layout_device_scale() > 1 and not _html_draw_ir_is_form_control_box(nodes[i]) and nodes[i].tag != "#text": box_device_extra_h_at(i) else: 0
+            val block_extra_h = if layout_device_scale() > 1 and not _html_draw_ir_is_form_control_box(nodes[i]) and nodes[i].tag != "#text": _html_box_device_extra_h(nodes, styles, boxes, i) else: 0
             if block_extra_h != 0:
                 node_command.computed_style.push(draw_ir_style_prop("device-extra-height", block_extra_h.to_text()))
             if control_extra_h != 0:
@@ -1471,7 +1471,7 @@ fn _html_draw_ir_commands(
             owner_nodes.push(-1)
     val device_commands = _html_draw_ir_device_clip(
         _html_draw_ir_device_dx(_html_draw_ir_device_top(commands, owner_nodes, nodes, boxes), owner_nodes, nodes),
-        owner_nodes, nodes, boxes, clip_cache)
+        owner_nodes, nodes, styles, boxes, clip_cache)
     (device_commands, owner_nodes)
 
 # Legacy widget mode box suppression on a node's Draw IR box command, as the
@@ -1996,22 +1996,81 @@ fn _html_draw_ir_edge_device_dy(nodes: [HNode], boxes: LayoutResult, owner: i32)
 # below the textarea). Textareas only: no Chrome oracle pins other overflow
 # boxes, whose fractional size layout drops anyway
 # (`overflow_hidden_fractional_clip_4x_chrome159_spec`).
-fn _html_draw_ir_far_edge_delta(nodes: [HNode], boxes: LayoutResult, clip_cache: PaintClipCache, edge_owner: [i32], own: i32, o: i32, edge_css: i32, x_axis: bool) -> i32:
+fn _html_root_font_px(nodes: [HNode], styles: [Style]) -> i32:
+    if nodes.len() > 0 and styles.len() > 0 and nodes[0].tag == "html" and styles[0].font_size > 0:
+        return styles[0].font_size
+    if nodes.len() > 1 and styles.len() > 1 and nodes[1].tag == "html" and styles[1].font_size > 0:
+        return styles[1].font_size
+    16
+
+fn _html_authored_height_frac_milli(st: Style, root_font_px: i32) -> i32:
+    if st.height_auto or st.height_px < 0 or st.box_geometry_raw_tokens.len() == 0:
+        return 0
+    var raw = ""
+    for entry in st.box_geometry_raw_tokens:
+        if entry.starts_with("height="):
+            raw = entry.substring(7, entry.byte_len())
+    val v = raw.trim().lower()
+    if v.byte_len() == 0 or v.starts_with("-") or v.ends_with("%") or v.ends_with("vh") or v.ends_with("vw"):
+        return 0
+    val first = v.substring(0, 1)
+    if not ((first >= "0" and first <= "9") or first == "."):
+        return 0
+    var unit_px: i64 = 1
+    if v.ends_with("rem"):
+        unit_px = root_font_px.to_i64()
+    elif v.ends_with("em"):
+        unit_px = st.font_size.to_i64()
+    elif not v.ends_with("px"):
+        return 0
+    val exact = svg_number_milli(v) * unit_px
+    val lu_milli = (exact * 64 / 1000) * 1000 / 64
+    val frac = lu_milli - st.height_px.to_i64() * 1000
+    if frac > 0 and frac < 1000: frac as i32 else: 0
+
+fn _html_box_device_extra_h(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32) -> i32:
+    val k = layout_device_scale()
+    if k <= 1 or i < 0 or i >= nodes.len() or i >= styles.len() or i >= boxes.bh.len():
+        return 0
+    val recorded = box_device_extra_h_at(i)
+    if recorded != 0:
+        return recorded
+    if _html_draw_ir_is_form_control_box(nodes[i]) or nodes[i].tag == "#text":
+        return 0
+    val st = styles[i]
+    if (st.min_height_px > 0 and st.min_height_px > st.height_px) or (st.max_height_px > 0 and st.max_height_px < st.height_px):
+        return 0
+    val frac_milli = _html_authored_height_frac_milli(st, _html_root_font_px(nodes, styles))
+    if frac_milli <= 0:
+        return 0
+    if boxes.bh[i] != css_outer_height(nodes[i], st, st.height_px):
+        return 0
+    val origin_dev_milli = if boxes.device_top.len() == nodes.len() and boxes.device_top[i] != DEVICE_TOP_UNSET and not box_device_top_is_inline_dy(boxes.device_top[i]): boxes.device_top[i] else: 0
+    box_device_top_px(origin_dev_milli + frac_milli * k) - box_device_top_px(origin_dev_milli)
+
+fn _html_draw_ir_far_edge_delta_depth(nodes: [HNode], styles: [Style], boxes: LayoutResult, clip_cache: PaintClipCache, edge_owner: [i32], own: i32, o: i32, edge_css: i32, x_axis: bool, depth: i32) -> i32:
     val moved = if x_axis: _html_draw_ir_edge_device_dx(nodes, own) else: _html_draw_ir_edge_device_dy(nodes, boxes, own)
-    if own < 0 or own == o or nodes[own].tag != "textarea":
+    if own < 0 or own == o or depth >= 16:
         return moved
-    val grown = moved + (if x_axis: box_device_extra_w_at(own) else: box_device_extra_h_at(own))
+    val is_overflow_owner = nodes[own].tag == "textarea" or (own < styles.len() and (styles[own].overflow_hidden or styles[own].overflow_auto_y or styles[own].overflow_scroll_y))
+    if not is_overflow_owner:
+        return moved
+    val extra = if x_axis: box_device_extra_w_at(own) else: _html_box_device_extra_h(nodes, styles, boxes, own)
+    val grown = moved + extra
     val anc = paint_clip_at(clip_cache, own)
     val a = edge_owner[own * 4 + (if x_axis: 2 else: 3)]
-    val a_moved = if x_axis: _html_draw_ir_edge_device_dx(nodes, a) else: _html_draw_ir_edge_device_dy(nodes, boxes, a)
     val k = layout_device_scale()
     val a_edge = if x_axis: anc.x1 else: anc.y1
+    val a_moved = if a >= 0: _html_draw_ir_far_edge_delta_depth(nodes, styles, boxes, clip_cache, edge_owner, a, own, a_edge, x_axis, depth + 1) else: 0
     val limit = k * a_edge + a_moved - k * edge_css
     if grown > limit: limit else: grown
 
-fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [HNode], boxes: LayoutResult, clip_cache: PaintClipCache) -> [DrawIrCommand]:
+fn _html_draw_ir_far_edge_delta(nodes: [HNode], styles: [Style], boxes: LayoutResult, clip_cache: PaintClipCache, edge_owner: [i32], own: i32, o: i32, edge_css: i32, x_axis: bool) -> i32:
+    _html_draw_ir_far_edge_delta_depth(nodes, styles, boxes, clip_cache, edge_owner, own, o, edge_css, x_axis, 0)
+
+fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [HNode], styles: [Style], boxes: LayoutResult, clip_cache: PaintClipCache) -> [DrawIrCommand]:
     val n = nodes.len() as i32
-    if layout_device_scale() <= 1 or (not box_device_dx_any() and boxes.device_top.len() != nodes.len()):
+    if layout_device_scale() <= 1 or not clip_cache.has_node_clips:
         return commands
     val edge_owner = _html_draw_ir_clip_edge_owners(nodes, clip_cache)
     var out: [DrawIrCommand] = []
@@ -2030,8 +2089,8 @@ fn _html_draw_ir_device_clip(commands: [DrawIrCommand], owners: [i32], nodes: [H
             if ox0 >= 0 or oy0 >= 0 or ox1 >= 0 or oy1 >= 0:
                 val dl = _html_draw_ir_edge_device_dx(nodes, ox0)
                 val dt = _html_draw_ir_edge_device_dy(nodes, boxes, oy0)
-                val dr = _html_draw_ir_far_edge_delta(nodes, boxes, clip_cache, edge_owner, ox1, o, r.x + r.width, true)
-                val db = _html_draw_ir_far_edge_delta(nodes, boxes, clip_cache, edge_owner, oy1, o, r.y + r.height, false)
+                val dr = _html_draw_ir_far_edge_delta(nodes, styles, boxes, clip_cache, edge_owner, ox1, o, r.x + r.width, true)
+                val db = _html_draw_ir_far_edge_delta(nodes, styles, boxes, clip_cache, edge_owner, oy1, o, r.y + r.height, false)
                 if dl != 0 or dt != 0 or dr != 0 or db != 0:
                     var style = command.computed_style
                     style.push(draw_ir_style_prop("device-clip", "{dl},{dt},{dr},{db}"))

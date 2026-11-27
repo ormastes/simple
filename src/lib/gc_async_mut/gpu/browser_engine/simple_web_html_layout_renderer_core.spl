@@ -743,6 +743,113 @@ fn _decls_block_margin_authored(decls: text) -> [bool]:
 # The UA em margin of the element's OWN font-size, floored to Chrome's 1/64 px.
 # ponytail: horizontal-tb only; in a vertical writing mode `margin-block` maps
 # to left/right and this still writes top/bottom. Upgrade: map by writing mode.
+val _STYLE_FLAG_EMPTY_CELLS: i32 = 1
+val _STYLE_FLAG_DISPLAY: i32 = 2
+val _STYLE_FLAG_INLINE_FLEX: i32 = 4
+val _STYLE_FLAG_WRITING_MODE: i32 = 8
+val _STYLE_FLAG_OVERFLOW: i32 = 16
+val _STYLE_FLAG_MARGIN: i32 = 32
+val _STYLE_FLAG_CONTENT: i32 = 64
+val _STYLE_FLAG_CONTROL_BOX: i32 = 128
+val _STYLE_FLAG_APPEARANCE: i32 = 256
+
+fn _decls_prop_flags(decls: text) -> i32:
+    if decls == "":
+        return 0
+    val lo = decls.lower()
+    var flags: i32 = 0
+    if lo.contains("display"):
+        flags = flags | _STYLE_FLAG_DISPLAY
+        if lo.contains("inline-flex"):
+            flags = flags | _STYLE_FLAG_INLINE_FLEX
+    if lo.contains("writing-mode"):
+        flags = flags | _STYLE_FLAG_WRITING_MODE
+    if lo.contains("overflow") or lo.contains("scrollbar-width"):
+        flags = flags | _STYLE_FLAG_OVERFLOW
+    if lo.contains("margin"):
+        flags = flags | _STYLE_FLAG_MARGIN
+    if lo.contains("empty-cells"):
+        flags = flags | _STYLE_FLAG_EMPTY_CELLS
+    if lo.contains("content"):
+        flags = flags | _STYLE_FLAG_CONTENT
+    if lo.contains("appearance"):
+        flags = flags | _STYLE_FLAG_APPEARANCE | _STYLE_FLAG_CONTROL_BOX
+    elif lo.contains("background") or lo.contains("box-shadow") or lo.contains("border"):
+        flags = flags | _STYLE_FLAG_CONTROL_BOX
+    flags
+
+fn _ua_em_block_margin_with_flags(
+    style: Style, ratio: i32,
+    normal: text, norm_flags: i32,
+    inline_normal: text, inl_norm_flags: i32,
+    important: text, imp_flags: i32,
+    inline_important: text, inl_imp_flags: i32
+) -> Style:
+    var st = style
+    var top = false
+    var bottom = false
+    if (norm_flags & _STYLE_FLAG_MARGIN) != 0:
+        val a = _decls_block_margin_authored(normal)
+        top = top or a[0]
+        bottom = bottom or a[1]
+    if (inl_norm_flags & _STYLE_FLAG_MARGIN) != 0 and (not top or not bottom):
+        val a = _decls_block_margin_authored(inline_normal)
+        top = top or a[0]
+        bottom = bottom or a[1]
+    if (imp_flags & _STYLE_FLAG_MARGIN) != 0 and (not top or not bottom):
+        val a = _decls_block_margin_authored(important)
+        top = top or a[0]
+        bottom = bottom or a[1]
+    if (inl_imp_flags & _STYLE_FLAG_MARGIN) != 0 and (not top or not bottom):
+        val a = _decls_block_margin_authored(inline_important)
+        top = top or a[0]
+        bottom = bottom or a[1]
+    val exact = font_milli_of(st.font_size, st.font_size_milli).to_i64() * ratio.to_i64() / 1000
+    val milli = ((exact * 64 / 1000) * 1000 / 64) as i32
+    val px = (milli + 500) / 1000
+    val stored = if milli % 1000 == 0: 0 else: milli
+    if not top:
+        st.margin_t = px
+        st.margin_t_milli = stored
+    if not bottom:
+        st.margin_b = px
+        st.margin_b_milli = stored
+    st
+
+fn _final_authored_display_with_flags(
+    ua_display: text, inherited_display: text,
+    normal: text, norm_flags: i32,
+    inline_normal: text, inl_norm_flags: i32,
+    important: text, imp_flags: i32,
+    inline_important: text, inl_imp_flags: i32
+) -> text:
+    var value = ""
+    if (norm_flags & _STYLE_FLAG_DISPLAY) != 0:
+        val normal_value = _display_value_in_decls(normal)
+        if normal_value != "":
+            value = normal_value
+    if (inl_norm_flags & _STYLE_FLAG_DISPLAY) != 0:
+        val inline_value = _display_value_in_decls(inline_normal)
+        if inline_value != "":
+            value = inline_value
+    if (imp_flags & _STYLE_FLAG_DISPLAY) != 0:
+        val important_value = _display_value_in_decls(important)
+        if important_value != "":
+            value = important_value
+    if (inl_imp_flags & _STYLE_FLAG_DISPLAY) != 0:
+        val inline_important_value = _display_value_in_decls(inline_important)
+        if inline_important_value != "":
+            value = inline_important_value
+    if value == "":
+        return ""
+    if value == "initial" or value == "unset":
+        return "inline"
+    if value == "inherit":
+        return inherited_display
+    if value == "revert":
+        return ua_display
+    value
+
 fn _ua_em_block_margin(style: Style, ratio: i32, normal: text, inline_normal: text, important: text, inline_important: text) -> Style:
     var st = style
     var top = false
@@ -879,6 +986,37 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     # of the chain's feature keys. Per-rule group keys are derived lazily, once
     # per rule per pass, from the same pre-parsed groups the matcher walks.
     val rule_count = rules.group_parts.len()
+    var has_child: [bool] = [false; node_count]
+    var hci = 0
+    while hci < node_count:  # cpu-lane-loop-ok: precomputes which nodes have children so leaf nodes skip ancestor-feature and inherited-digest work; bound is node count
+        val hcp = nodes[hci].parent as i32
+        if hcp >= 0 and hcp < node_count:
+            has_child[hcp] = true
+        hci = hci + 1
+    val attr_bucket_count = rule_buckets.attr_keys.len()
+    var cand_cache_idx: Dict<text, i32> = {}
+    var cand_cache_lists: [[i32]] = []
+    var rule_flags_ready: [bool] = [false; rule_count]
+    var rule_norm_flags: [i32] = [0; rule_count]
+    var rule_imp_flags: [i32] = [0; rule_count]
+    var single_ready: [bool] = [false; rule_count]
+    var single_norm_decls: [text] = [""; rule_count]
+    var single_norm_flags: [i32] = [0; rule_count]
+    var single_imp_decls: [text] = [""; rule_count]
+    var single_imp_flags: [i32] = [0; rule_count]
+    var single_ec_set: [bool] = [false; rule_count]
+    var single_ec_hide: [bool] = [false; rule_count]
+    var batch_memo_idx: Dict<text, i32> = {}
+    var batch_norm_decls: [text] = []
+    var batch_norm_flags: [i32] = []
+    var batch_imp_decls: [text] = []
+    var batch_imp_flags: [i32] = []
+    var batch_ec_set: [bool] = []
+    var batch_ec_hide: [bool] = []
+    var space_width_memo: Dict<text, i64> = {}
+    var cpu_material_parts: [text] = []
+    var solid_material_parts: [text] = []
+    var has_any_marker = false
     var anc_counts: Dict<text, i32> = {}
     var anc_stack: [i32] = []
     var anc_stack_keys: [[text]] = []
@@ -956,539 +1094,478 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val inherited_fg = st.fg
         val inherited_underline = st.text_decoration_underline
         st = tag_defaults(st, nd.tag)
-        # Chrome's UA link style (`a:-webkit-any-link`: blue + underline) needs an
-        # href; tag_defaults() sees only the tag, so an anchor without one gets
-        # its inherited color / decoration back here (`<a>`, `<a name>`).
-        if nd.tag == "a" and (nd.attr_mask & HNODE_ATTR_HREF_BIT) == 0u32:
-            st.fg = inherited_fg
-            st.text_decoration_underline = inherited_underline
-        # Chrome's UA sheet for form controls, the part `tag_defaults` cannot
-        # express because it needs the `type` attribute or a border: text
-        # `<input>` and `<button>` carry a 2 px border, `<select>` and
-        # `<textarea>` 1 px (textarea also `padding: 2px`), and checkbox/radio
-        # carry margins instead of a border. Applied here, ahead of every
-        # author declaration, so `border`/`margin`/`padding` in a stylesheet
-        # still win. Chrome 159: `<input>` 185x21, `<select>` 19 tall,
-        # `<textarea>` 181x36, checkbox `margin: 3px 3px 3px 4px`, radio
-        # `margin: 3px 3px 0 5px`.
-        val ua_control_decls = form_control_ua_box_decls(nd, standards_document)
-        if ua_control_decls != "":
-            st = apply_decls(st, ua_control_decls, em_base)
-        # HTML UA stylesheet, the `dir dir, dir dl, ... ul ul` descendant block
-        # in Chrome's html.css: a list CONTAINER with a list-container ANCESTOR
-        # has zero block margins. tag_defaults() sees only the tag, so the rule
-        # is applied here, where the ancestor chain is known -- still ahead of
-        # every author declaration, which is where a UA rule belongs.
-        # Without it each nested list inside an <li> carries the UA 16 px that
-        # Chrome does not, and the block flow below drifts 16 px per occurrence
-        # (doc/08_tracking/bug/web_layout_vertical_drift_accumulates_16px_per_
-        # construct_2026-09-14.md). It hid while the nested list was the li's
-        # FIRST child, because the margin then collapsed through the li anyway;
-        # an inline run before it removes that cover.
-        val nested_list_ua = (
-            list_container_tag(nd.tag) and has_list_container_ancestor(nodes, i)
-        )
-        if nested_list_ua:
-            st.margin_t = 0
-            st.margin_b = 0
-        val ua_display = st.display
-        if trace_stages:
-            print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
-            print "[layout-trace] style_stage=attrs-ready index={i} attrs_len={nd.attrs_raw.len()}"
-        val pres_decls = presentational_attr_decls(nd)
-        if trace_stages:
-            print "[layout-trace] style_stage=presentational-ready index={i} decls_len={pres_decls.len()}"
-        if pres_decls.len() > 0:
-            st = apply_decls(st, pres_decls, em_base)
+        # Fast path for `#text` nodes: text never carries attributes, inline styles,
+        # author rules, or non-leaf descendants; skip selector matching, 4x writing-mode/
+        # display/overflow probing, WM material scanning, and 75-field inherit digests.
+        val is_text_node = nd.tag == "#text"
         var empty_cells_hide = false
-        if trace_stages:
-            print "[layout-trace] style_stage=selector-inputs index={i} class_attr={nd.class_attr} classes={nd.class_words.len()} id_len={nd.id_attr.len()}"
-        # A text node is NOT an element: no author selector matches it, not
-        # even the universal `*`. Its computed values are exactly the parent
-        # element's inherited values (CSS 2.1 6.2 / css-cascade-4 6.4).
-        # Matching author rules against the `#text` pseudo-node let a rule
-        # like `*{font-size:16px}` clobber the font-size the text had just
-        # inherited from its parent's inline `style="font-size:24px"`, which
-        # made every text advance font-size-INVARIANT: the metrics resolved
-        # (correctly, from real hmtx advances) at the wrong size, so a 16px
-        # and a 24px box broke at the same character
-        # (tools/layout_diff fixture 14_font_size_wrap).
-        if _wsc_armed():
-            _wsc_add_section(0, _wsc_now_us() - _wsc_t)
-            _wsc_t = _wsc_now_us()
-        # Bring the ancestor multiset to exactly this node's `.parent` chain.
-        # In document order the parent is on the stack, so popping to it is
-        # enough; any other order empties the stack and the chain is rebuilt
-        # from `.parent` links, so the multiset never depends on node order.
-        val anc_parent: i32 = nd.parent as i32
-        while anc_stack.len() > 0 and anc_stack[anc_stack.len() - 1] != anc_parent:  # cpu-lane-loop-ok: pops the ancestor stack back to this node's parent; amortised O(1) per node over the pass since every node is pushed once
-            val popped_keys = anc_stack_keys[anc_stack_keys.len() - 1]
-            var pk = 0
-            while pk < popped_keys.len():  # cpu-lane-loop-ok: ONE popped node's feature keys; bound is its class count + 2
-                anc_counts[popped_keys[pk]] = anc_counts[popped_keys[pk]] - 1
-                pk = pk + 1
-            anc_stack.pop()
-            anc_stack_keys.pop()
-        if anc_filter_on and anc_parent >= 0 and anc_stack.len() == 0:
-            var anc_chain: [i32] = []
-            var anc_c = anc_parent
-            while anc_c >= 0 and anc_chain.len() <= node_count:  # cpu-lane-loop-ok: rebuild of one node's parent chain, only when the input is not in document order; bound is the tree depth (capped at node_count)
-                anc_chain.push(anc_c)
-                anc_c = nodes[anc_c].parent as i32
-            if anc_c >= 0:
-                # A parent cycle: the multiset cannot describe the chain, so
-                # the prefilter stays off for the rest of this pass.
-                anc_filter_on = false
+        var combined_decls = ""
+        var combined_important_decls = ""
+        var wm_fallback = ""
+        var wm_material_mode = ""
+        var wm_fallback_is_solid = false
+        var wm_mode_is_cpu = false
+        var wm_mode_is_empty = true
+        if nd.tag == "::marker":
+            has_any_marker = true
+        if not is_text_node:
+            # Chrome's UA link style (`a:-webkit-any-link`: blue + underline) needs an
+            # href; tag_defaults() sees only the tag, so an anchor without one gets
+            # its inherited color / decoration back here (`<a>`, `<a name>`).
+            if nd.tag == "a" and (nd.attr_mask & HNODE_ATTR_HREF_BIT) == 0u32:
+                st.fg = inherited_fg
+                st.text_decoration_underline = inherited_underline
+            val ua_control_decls = form_control_ua_box_decls(nd, standards_document)
+            if ua_control_decls != "":
+                st = apply_decls(st, ua_control_decls, em_base)
+            val nested_list_ua = (
+                list_container_tag(nd.tag) and has_list_container_ancestor(nodes, i)
+            )
+            if nested_list_ua:
+                st.margin_t = 0
+                st.margin_b = 0
+            val ua_display = st.display
+            if trace_stages:
+                print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
+                print "[layout-trace] style_stage=attrs-ready index={i} attrs_len={nd.attrs_raw.len()}"
+            val pres_decls = presentational_attr_decls(nd)
+            if trace_stages:
+                print "[layout-trace] style_stage=presentational-ready index={i} decls_len={pres_decls.len()}"
+            if pres_decls.len() > 0:
+                st = apply_decls(st, pres_decls, em_base)
+            if trace_stages:
+                print "[layout-trace] style_stage=selector-inputs index={i} class_attr={nd.class_attr} classes={nd.class_words.len()} id_len={nd.id_attr.len()}"
+            if _wsc_armed():
+                _wsc_add_section(0, _wsc_now_us() - _wsc_t)
+                _wsc_t = _wsc_now_us()
+            val anc_parent: i32 = nd.parent as i32
+            while anc_stack.len() > 0 and anc_stack[anc_stack.len() - 1] != anc_parent:  # cpu-lane-loop-ok: pops the ancestor stack back to this node's parent; amortised O(1) per node over the pass since every node is pushed once
+                val popped_keys = anc_stack_keys[anc_stack_keys.len() - 1]
+                var pk = 0
+                while pk < popped_keys.len():  # cpu-lane-loop-ok: ONE popped node's feature keys; bound is its class count + 2
+                    anc_counts[popped_keys[pk]] = anc_counts[popped_keys[pk]] - 1
+                    pk = pk + 1
+                anc_stack.pop()
+                anc_stack_keys.pop()
+            if anc_filter_on and anc_parent >= 0 and anc_stack.len() == 0:
+                var anc_chain: [i32] = []
+                var anc_c = anc_parent
+                while anc_c >= 0 and anc_chain.len() <= node_count:  # cpu-lane-loop-ok: rebuild of one node's parent chain, only when the input is not in document order; bound is the tree depth (capped at node_count)
+                    anc_chain.push(anc_c)
+                    anc_c = nodes[anc_c].parent as i32
+                if anc_c >= 0:
+                    anc_filter_on = false
+                else:
+                    var anc_r = anc_chain.len() - 1
+                    while anc_r >= 0:  # cpu-lane-loop-ok: pushes the rebuilt chain root-first; bound is the tree depth
+                        val chain_keys = selector_node_feature_keys(nodes[anc_chain[anc_r]])
+                        var ck = 0
+                        while ck < chain_keys.len():  # cpu-lane-loop-ok: ONE chain node's feature keys; bound is its class count + 2
+                            val ckey = chain_keys[ck]
+                            anc_counts[ckey] = (if anc_counts.has(ckey): anc_counts[ckey] else: 0) + 1
+                            ck = ck + 1
+                        anc_stack.push(anc_chain[anc_r])
+                        anc_stack_keys.push(chain_keys)
+                        anc_r = anc_r - 1
+            var candidates_raw: [i32] = []
+            if nd.id_attr.len() == 0 and (nd.attr_mask == 0u32 or attr_bucket_count == 0) and nd.class_words.len() <= 1:
+                val cand_cache_key = if nd.class_words.len() == 0: "t:" + nd.tag else: "tc:" + nd.tag + "\n" + nd.class_words[0]
+                if cand_cache_idx.has(cand_cache_key):
+                    candidates_raw = cand_cache_lists[cand_cache_idx[cand_cache_key]]
+                else:
+                    candidates_raw = style_rule_candidates(nd, rule_buckets)
+                    if (cand_cache_lists.len() as i32) < WEB_STYLE_CASCADE_MEMO_LIMIT:
+                        cand_cache_idx[cand_cache_key] = cand_cache_lists.len() as i32
+                        cand_cache_lists.push(candidates_raw)
             else:
-                var anc_r = anc_chain.len() - 1
-                while anc_r >= 0:  # cpu-lane-loop-ok: pushes the rebuilt chain root-first; bound is the tree depth
-                    val chain_keys = selector_node_feature_keys(nodes[anc_chain[anc_r]])
-                    var ck = 0
-                    while ck < chain_keys.len():  # cpu-lane-loop-ok: ONE chain node's feature keys; bound is its class count + 2
-                        val ckey = chain_keys[ck]
-                        anc_counts[ckey] = (if anc_counts.has(ckey): anc_counts[ckey] else: 0) + 1
-                        ck = ck + 1
-                    anc_stack.push(anc_chain[anc_r])
-                    anc_stack_keys.push(chain_keys)
-                    anc_r = anc_r - 1
-        val candidates_raw: [i32] = if nd.tag == "#text":
-            []
-        else:
-            style_rule_candidates(nd, rule_buckets)
-        if trace_stages:
-            print "[layout-trace] style_stage=candidates-ready index={i} count={candidates_raw.len()}"
-        if _wsc_armed():
-            _wsc_add_candidates(candidates_raw.len() as i64)
-        var specificity_i = 0
-        var selector_group_budget_count = 0
-        val _sb_t0 = if _wsc_armed(): _wsc_now_us() else: 0
-        while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: walks the bucketed candidate rules of ONE node computing each rule's matched specificity; bound is that node's candidate count, not the full rule set
-            val specificity_rule = candidates_raw[specificity_i]
-            val specificity_groups = rule_buckets.parsed_groups[specificity_rule]
-            val precomputed_specificities = rules.group_specificities[specificity_rule]
-            if not group_anc_ready[specificity_rule]:
-                var rule_anc_keys: [[text]] = []
-                var rk = 0
-                while rk < specificity_groups.len():  # cpu-lane-loop-ok: derives each comma-group's ancestor keys ONCE per rule per pass; bound is that rule's group count
-                    rule_anc_keys.push(selector_group_ancestor_keys(specificity_groups[rk]))
-                    rk = rk + 1
-                group_anc_keys[specificity_rule] = rule_anc_keys
-                group_anc_ready[specificity_rule] = true
-            val rule_anc_groups = group_anc_keys[specificity_rule]
-            var matched_specificity = -1
-            var group_i = 0
-            var specificity_expired = false
-            while group_i < specificity_groups.len():  # cpu-lane-loop-ok: walks the selector comma-groups of one candidate rule (<=CSS_SELECTOR_GROUP_CAP) running the actual selector match; budget-sampled every 256 groups
-                if (selector_group_budget_count & 255) == 0 and _web_budget_expired_in("style-selector-groups"):
-                    specificity_expired = true
-                    break
-                val anc_possible = not anc_filter_on or selector_ancestor_keys_present(
-                    anc_counts, rule_anc_groups[group_i]
-                )
-                if anc_possible and selector_group_matches_node_parsed(
-                    nodes, selector_ctx, i, specificity_groups[group_i]
-                ):
+                candidates_raw = style_rule_candidates(nd, rule_buckets)
+            if trace_stages:
+                print "[layout-trace] style_stage=candidates-ready index={i} count={candidates_raw.len()}"
+            if _wsc_armed():
+                _wsc_add_candidates(candidates_raw.len() as i64)
+            var specificity_i = 0
+            var selector_group_budget_count = 0
+            val _sb_t0 = if _wsc_armed(): _wsc_now_us() else: 0
+            while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: walks the bucketed candidate rules of ONE node computing each rule's matched specificity; bound is that node's candidate count, not the full rule set
+                val specificity_rule = candidates_raw[specificity_i]
+                val specificity_groups = rule_buckets.parsed_groups[specificity_rule]
+                val precomputed_specificities = rules.group_specificities[specificity_rule]
+                if not group_anc_ready[specificity_rule]:
+                    var rule_anc_keys: [[text]] = []
+                    var rk = 0
+                    while rk < specificity_groups.len():  # cpu-lane-loop-ok: derives each comma-group's ancestor keys ONCE per rule per pass; bound is that rule's group count
+                        rule_anc_keys.push(selector_group_ancestor_keys(specificity_groups[rk]))
+                        rk = rk + 1
+                    group_anc_keys[specificity_rule] = rule_anc_keys
+                    group_anc_ready[specificity_rule] = true
+                val rule_anc_groups = group_anc_keys[specificity_rule]
+                var matched_specificity = -1
+                var group_i = 0
+                var specificity_expired = false
+                while group_i < specificity_groups.len():  # cpu-lane-loop-ok: walks the selector comma-groups of one candidate rule (<=CSS_SELECTOR_GROUP_CAP) running the actual selector match; budget-sampled every 256 groups
+                    if (selector_group_budget_count & 255) == 0 and _web_budget_expired_in("style-selector-groups"):
+                        specificity_expired = true
+                        break
                     val group_specificity = precomputed_specificities[group_i]
                     if group_specificity > matched_specificity:
-                        matched_specificity = group_specificity
-                selector_group_budget_count = selector_group_budget_count + 1
-                group_i = group_i + 1
-            if specificity_expired:
-                while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: budget-expiry drain arm: marks the not-yet-scored remainder of THIS node's candidate list unmatched (-1) so the cascade below skips them
-                    rule_specificities[candidates_raw[specificity_i]] = -1
-                    specificity_i = specificity_i + 1
-                break
-            rule_specificities[specificity_rule] = matched_specificity
-            specificity_i = specificity_i + 1
-        # This node is now an ancestor for everything until the walk leaves
-        # its subtree.
-        val own_anc_keys = selector_node_feature_keys(nd)
-        var ok_i = 0
-        while ok_i < own_anc_keys.len():  # cpu-lane-loop-ok: this node's feature keys; bound is its class count + 2
-            val okey = own_anc_keys[ok_i]
-            anc_counts[okey] = (if anc_counts.has(okey): anc_counts[okey] else: 0) + 1
-            ok_i = ok_i + 1
-        anc_stack.push(i as i32)
-        anc_stack_keys.push(own_anc_keys)
-        if _wsc_armed():
-            _wsc_add_sub(0, _wsc_now_us() - _sb_t0)
-        val _sb_t1 = if _wsc_armed(): _wsc_now_us() else: 0
-        # Only rules that matched take part in the cascade below (every reader
-        # tests `rule_specificities[r] >= 0`). `_candidate_sort_before` is a
-        # total order on (specificity, rule id) and rule ids are unique, so
-        # sorting the matched subset yields exactly the matched elements of
-        # the full sort, in the same order -- without paying the merge sort on
-        # the unmatched majority (7.6 s on a google-shaped page).
-        var matched_raw: [i32] = []
-        var mr_i = 0
-        while mr_i < candidates_raw.len():  # cpu-lane-loop-ok: one pass over ONE node's candidate rule ids keeping the matched ones; bound is that node's candidate count
-            if rule_specificities[candidates_raw[mr_i]] >= 0:
-                matched_raw.push(candidates_raw[mr_i])
-            mr_i = mr_i + 1
-        val candidates = _sort_candidates_by_specificity(matched_raw, rule_specificities)
-        if _wsc_armed():
-            _wsc_add_sub(1, _wsc_now_us() - _sb_t1)
-        if trace_stages:
-            print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
-        if _wsc_armed():
-            _wsc_add_section(1, _wsc_now_us() - _wsc_t)
-            _wsc_t = _wsc_now_us()
-        var candidate_i = 0
-        val candidate_count = candidates.len()
-        var has_important_candidates = false
-        # Perf: apply_decls unpacks/repacks the ~176-field Style struct and
-        # probes ~283 known property names against the rule's small decl
-        # table on EVERY call (see doc/08_tracking/bug/
-        # web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md,
-        # "Cost center attribution" -- apply_decls is 70-90% of per-node
-        # style-resolution wall time). Instead of calling it once per
-        # candidate rule, accumulate every candidate's decls into one
-        # string (in cascade order) and call it ONCE per node.
-        # Behavior-preserving: decl_table_build()/decl_tbl_last_index()
-        # already implement "last occurrence in the table wins" as the
-        # tie-break for shorthand-vs-longhand and duplicate-property
-        # ordering; string concatenation preserves relative source order
-        # across rules exactly the way it already does within one rule's
-        # decls, so the merged table's "last occurrence" is still the
-        # correct cascade winner. The merged string is then trimmed back
-        # under apply_decls' internal WEB_RULE_DECL_QUOTA (256) guard by
-        # _merged_decls_within_quota: that guard is defined PER RULE, and a
-        # node matching several rules that each individually stayed under
-        # the cap can exceed it once merged -- which made the guard drop
-        # this node's ENTIRE author cascade, including the rules that
-        # legitimately passed. Trimming keeps the cascade winners.
-        var combined_decls = ""
-        val _sb_t2 = if _wsc_armed(): _wsc_now_us() else: 0
-        while candidate_i < candidate_count:  # cpu-lane-loop-ok: walks ONE node's specificity-sorted candidate rules accumulating their normal decls into a single string, so apply_decls (the 70-90% per-node cost center) is called once per node instead of once per rule; budget-sampled every 256 candidates
-            # Budget guard (inner): this is the apply_decls call site loop where a
-            # single node can match thousands of rules (the hostile case). Sample
-            # the clock so the legit large-theme path pays no per-rule clock cost.
-            if (candidate_i & 255) == 0 and _web_budget_expired_in("style-candidate-decls"):
-                break
-            val r = candidates[candidate_i]
-            # Rule quota: rules past the cap (CSS source order) are dropped so the
-            # first, load-bearing rules keep winning without unbounded cascade work.
-            if r >= WEB_STYLE_RULE_QUOTA:
-                candidate_i = candidate_i + 1
-                continue
-            if rule_specificities[r] >= 0:
-                val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
-                if empty_cells_decl != "":
-                    empty_cells_hide = (
-                        empty_cells_decl.trim().lower() == "hide"
-                    )
-                if rules.decls[r] != "":
-                    combined_decls = combined_decls + rules.decls[r] + ";"
-                if rules.important_decls[r] != "":
-                    has_important_candidates = true
-            candidate_i = candidate_i + 1
-        if _wsc_armed():
-            _wsc_add_sub(2, _wsc_now_us() - _sb_t2)
-        val _sb_t3 = if _wsc_armed(): _wsc_now_us() else: 0
-        combined_decls = _merged_decls_within_quota(combined_decls)
-        if _wsc_armed():
-            _wsc_add_sub(3, _wsc_now_us() - _sb_t3)
-        val _sb_t4 = if _wsc_armed(): _wsc_now_us() else: 0
-        if trace_stages:
-            print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
-        var inline_normal = ""
-        var inline_important = ""
-        if nd.style_attr != "":
-            val inline_priority = css_declaration_priority_split(_inline_style_closed(nd.style_attr))
-            inline_normal = inline_priority.normal
-            inline_important = inline_priority.important
-        if _font_style_trace_on and nd.style_attr.len() > 0:
-            print "[font-inline-trace] index={i} raw_style_attr_len={nd.style_attr.len()} inline_normal_len={inline_normal.len()}"
-        # Author-important declarations outrank every author-normal declaration,
-        # including inline style. Within the important origin, retain the same
-        # specificity/source order as the normal author cascade.
-        var combined_important_decls = ""
-        if has_important_candidates:
-            candidate_i = 0
-            while candidate_i < candidate_count:  # cpu-lane-loop-ok: second pass over the SAME node's candidate rules collecting author-!important decls; entered only when the first pass set has_important_candidates
-                if (candidate_i & 255) == 0 and _web_budget_expired_in("style-important-decls"):
+                        val anc_possible = not anc_filter_on or selector_ancestor_keys_present(
+                            anc_counts, rule_anc_groups[group_i]
+                        )
+                        if anc_possible and selector_group_matches_node_parsed(
+                            nodes, selector_ctx, i, specificity_groups[group_i]
+                        ):
+                            matched_specificity = group_specificity
+                    selector_group_budget_count = selector_group_budget_count + 1
+                    group_i = group_i + 1
+                if specificity_expired:
+                    while specificity_i < candidates_raw.len():  # cpu-lane-loop-ok: budget-expiry drain arm: marks the not-yet-scored remainder of THIS node's candidate list unmatched (-1) so the cascade below skips them
+                        rule_specificities[candidates_raw[specificity_i]] = -1
+                        specificity_i = specificity_i + 1
                     break
-                val r = candidates[candidate_i]
-                if r >= WEB_STYLE_RULE_QUOTA:
-                    candidate_i = candidate_i + 1
-                    continue
-                if (
-                    rule_specificities[r] >= 0 and
-                    rules.important_decls[r] != ""
-                ):
-                    combined_important_decls = (
-                        combined_important_decls + rules.important_decls[r] + ";"
-                    )
-                candidate_i = candidate_i + 1
-            combined_important_decls = _merged_decls_within_quota(
-                combined_important_decls
-            )
-
-        # Resolve the final inherited/normal/inline/important writing-mode once.
-        # Every logical-size declaration then maps on that final axis even when
-        # its own cascade phase ran before the winning writing-mode declaration.
-        var logical_writing_mode = st.writing_mode
-        logical_writing_mode = resolve_writing_mode_decls(
-            logical_writing_mode, combined_decls
-        )
-        logical_writing_mode = resolve_writing_mode_decls(
-            logical_writing_mode, inline_normal
-        )
-        logical_writing_mode = resolve_writing_mode_decls(
-            logical_writing_mode, combined_important_decls
-        )
-        logical_writing_mode = resolve_writing_mode_decls(
-            logical_writing_mode, inline_important
-        )
-
-        val final_display = _final_authored_display(
-            ua_display, inherited_display, combined_decls, inline_normal,
-            combined_important_decls, inline_important
-        )
-
-        if _wsc_armed():
-            _wsc_add_sub(4, _wsc_now_us() - _sb_t4)
-        if combined_decls != "":
-            # Memo boundary. `st` here is a deterministic function of
-            # (parent inherited identity, tag, presentational decls), and the
-            # call itself additionally reads em_base, the resolved writing mode
-            # and the accumulated author declarations -- so those six inputs are
-            # the whole key -- plus `nested_list_ua`, which is NOT a function of
-            # the other five: it reads the ANCESTOR chain, so two <ul>s with the
-            # same tag and the same inherit-identity parent can legitimately
-            # disagree about it. Leaving it out let a nested <ul> copy an outer
-            # <ul>'s cached 16 px margin straight back over the UA zeroing, which
-            # is why `ul` inside `ul` was the one nesting that stayed broken
-            # while `ol`/`dl` combinations were already fixed.
-            # `ua_control_decls` is the same kind of input: it reads the `type`
-            # ATTRIBUTE, so a checkbox and a text <input> under one parent
-            # share every other key part and the checkbox copied the text
-            # input's cached style back over its UA margins.
-            # A hit is copied field-for-field OUT of the cache and
-            # a miss is copied field-for-field IN (web_style_cascade_memo_store),
-            # because everything below this point mutates `st` in place.
-            val _sb_t5 = if _wsc_armed(): _wsc_now_us() else: 0
-            val memo_parent = if nd.parent >= 0: style_inherit_ids[nd.parent] else: -1
-            # A parent that has not been resolved yet has no identity, and -1
-            # would then mean two different things. Such a node bypasses the
-            # memo entirely rather than sharing an ambiguous key.
-            val memo_usable = nd.parent < 0 or memo_parent >= 0
-            val memo_key = if memo_usable:
-                "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{ua_control_decls}\n{em_base}\n" +
-                    "{logical_writing_mode}\n" +
-                    "{viewport_w}x{viewport_h}\n{css_cascade_root_font_px()}\n" +
-                    "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
+                rule_specificities[specificity_rule] = matched_specificity
+                specificity_i = specificity_i + 1
+            if anc_filter_on and has_child[i]:
+                val own_anc_keys = selector_node_feature_keys(nd)
+                var ok_i = 0
+                while ok_i < own_anc_keys.len():  # cpu-lane-loop-ok: this node's feature keys; bound is its class count + 2
+                    val okey = own_anc_keys[ok_i]
+                    anc_counts[okey] = (if anc_counts.has(okey): anc_counts[okey] else: 0) + 1
+                    ok_i = ok_i + 1
+                anc_stack.push(i as i32)
+                anc_stack_keys.push(own_anc_keys)
+            if _wsc_armed():
+                _wsc_add_sub(0, _wsc_now_us() - _sb_t0)
+            val _sb_t1 = if _wsc_armed(): _wsc_now_us() else: 0
+            var matched_raw: [i32] = []
+            var mr_i = 0
+            while mr_i < candidates_raw.len():  # cpu-lane-loop-ok: one pass over ONE node's candidate rule ids keeping the matched ones; bound is that node's candidate count
+                if rule_specificities[candidates_raw[mr_i]] >= 0:
+                    matched_raw.push(candidates_raw[mr_i])
+                mr_i = mr_i + 1
+            val candidates = _sort_candidates_by_specificity(matched_raw, rule_specificities)
+            if _wsc_armed():
+                _wsc_add_sub(1, _wsc_now_us() - _sb_t1)
+            if trace_stages:
+                print "[layout-trace] style_stage=candidates-sorted index={i} count={candidates.len()}"
+            if _wsc_armed():
+                _wsc_add_section(1, _wsc_now_us() - _wsc_t)
+                _wsc_t = _wsc_now_us()
+            val candidate_count = candidates.len()
+            val is_table_cell = nd.tag == "td" or nd.tag == "th"
+            var norm_flags: i32 = 0
+            var imp_flags: i32 = 0
+            val _sb_t2 = if _wsc_armed(): _wsc_now_us() else: 0
+            if candidate_count == 1:
+                val r0 = candidates[0]
+                if r0 < WEB_STYLE_RULE_QUOTA and rule_specificities[r0] >= 0:
+                    if not single_ready[r0]:
+                        if not rule_flags_ready[r0]:
+                            rule_norm_flags[r0] = _decls_prop_flags(rules.decls[r0])
+                            rule_imp_flags[r0] = _decls_prop_flags(rules.important_decls[r0])
+                            rule_flags_ready[r0] = true
+                        val nf0 = rule_norm_flags[r0]
+                        val imf0 = rule_imp_flags[r0]
+                        single_norm_flags[r0] = nf0
+                        single_imp_flags[r0] = imf0
+                        single_norm_decls[r0] = if rules.decls[r0] != "": _merged_decls_within_quota(rules.decls[r0] + ";") else: ""
+                        single_imp_decls[r0] = if rules.important_decls[r0] != "": _merged_decls_within_quota(rules.important_decls[r0] + ";") else: ""
+                        if (nf0 & _STYLE_FLAG_EMPTY_CELLS) != 0:
+                            val ec0 = decl_get(rules.decls[r0], "empty-cells")
+                            if ec0 != "":
+                                single_ec_set[r0] = true
+                                single_ec_hide[r0] = ec0.trim().lower() == "hide"
+                        single_ready[r0] = true
+                    combined_decls = single_norm_decls[r0]
+                    norm_flags = single_norm_flags[r0]
+                    combined_important_decls = single_imp_decls[r0]
+                    imp_flags = single_imp_flags[r0]
+                    if is_table_cell and single_ec_set[r0]:
+                        empty_cells_hide = single_ec_hide[r0]
+            elif candidate_count > 1:
+                var sig_parts: [text] = []
+                var sig_i = 0
+                while sig_i < candidate_count:  # cpu-lane-loop-ok: builds a compact key over one node's active rule ids; bound is candidate count
+                    val sr = candidates[sig_i]
+                    if sr < WEB_STYLE_RULE_QUOTA and rule_specificities[sr] >= 0:
+                        sig_parts.push(sr.to_text())
+                    sig_i = sig_i + 1
+                val cand_sig = sig_parts.join(",")
+                if cand_sig != "" and batch_memo_idx.has(cand_sig):
+                    val bi = batch_memo_idx[cand_sig]
+                    combined_decls = batch_norm_decls[bi]
+                    norm_flags = batch_norm_flags[bi]
+                    combined_important_decls = batch_imp_decls[bi]
+                    imp_flags = batch_imp_flags[bi]
+                    if is_table_cell and batch_ec_set[bi]:
+                        empty_cells_hide = batch_ec_hide[bi]
+                elif cand_sig != "":
+                    var decl_parts: [text] = []
+                    var imp_parts: [text] = []
+                    var batch_ec_found = false
+                    var batch_ec_val = false
+                    var budget_broke = false
+                    var candidate_i = 0
+                    while candidate_i < candidate_count:  # cpu-lane-loop-ok: accumulates normal and important candidate decls in one pass using array join; budget-sampled every 256 candidates
+                        if (candidate_i & 255) == 0 and _web_budget_expired_in("style-candidate-decls"):
+                            budget_broke = true
+                            break
+                        val r = candidates[candidate_i]
+                        if r >= WEB_STYLE_RULE_QUOTA:
+                            candidate_i = candidate_i + 1
+                            continue
+                        if rule_specificities[r] >= 0:
+                            if not rule_flags_ready[r]:
+                                rule_norm_flags[r] = _decls_prop_flags(rules.decls[r])
+                                rule_imp_flags[r] = _decls_prop_flags(rules.important_decls[r])
+                                rule_flags_ready[r] = true
+                            val rnf = rule_norm_flags[r]
+                            val rimf = rule_imp_flags[r]
+                            norm_flags = norm_flags | rnf
+                            imp_flags = imp_flags | rimf
+                            if (rnf & _STYLE_FLAG_EMPTY_CELLS) != 0:
+                                val empty_cells_decl = decl_get(rules.decls[r], "empty-cells")
+                                if empty_cells_decl != "":
+                                    batch_ec_found = true
+                                    batch_ec_val = empty_cells_decl.trim().lower() == "hide"
+                            if rules.decls[r] != "":
+                                decl_parts.push(rules.decls[r])
+                            if rules.important_decls[r] != "":
+                                imp_parts.push(rules.important_decls[r])
+                        candidate_i = candidate_i + 1
+                    if decl_parts.len() > 0:
+                        combined_decls = _merged_decls_within_quota(decl_parts.join(";") + ";")
+                    if imp_parts.len() > 0:
+                        combined_important_decls = _merged_decls_within_quota(imp_parts.join(";") + ";")
+                    if is_table_cell and batch_ec_found:
+                        empty_cells_hide = batch_ec_val
+                    if not budget_broke and (batch_norm_decls.len() as i32) < WEB_STYLE_CASCADE_MEMO_LIMIT:
+                        batch_memo_idx[cand_sig] = batch_norm_decls.len() as i32
+                        batch_norm_decls.push(combined_decls)
+                        batch_norm_flags.push(norm_flags)
+                        batch_imp_decls.push(combined_important_decls)
+                        batch_imp_flags.push(imp_flags)
+                        batch_ec_set.push(batch_ec_found)
+                        batch_ec_hide.push(batch_ec_val)
+            if _wsc_armed():
+                _wsc_add_sub(2, _wsc_now_us() - _sb_t2)
+            val _sb_t3 = if _wsc_armed(): _wsc_now_us() else: 0
+            if _wsc_armed():
+                _wsc_add_sub(3, _wsc_now_us() - _sb_t3)
+            val _sb_t4 = if _wsc_armed(): _wsc_now_us() else: 0
+            if trace_stages:
+                print "[layout-trace] style_stage=inline-input index={i} len={nd.style_attr.len()}"
+            var inline_normal = ""
+            var inline_important = ""
+            if nd.style_attr != "":
+                val inline_priority = css_declaration_priority_split(_inline_style_closed(nd.style_attr))
+                inline_normal = inline_priority.normal
+                inline_important = inline_priority.important
+            if _font_style_trace_on and nd.style_attr.len() > 0:
+                print "[font-inline-trace] index={i} raw_style_attr_len={nd.style_attr.len()} inline_normal_len={inline_normal.len()}"
+            val inl_norm_flags = _decls_prop_flags(inline_normal)
+            val inl_imp_flags = _decls_prop_flags(inline_important)
+            val all_flags = norm_flags | inl_norm_flags | imp_flags | inl_imp_flags
+            var logical_writing_mode = st.writing_mode
+            if (all_flags & _STYLE_FLAG_WRITING_MODE) != 0:
+                if (norm_flags & _STYLE_FLAG_WRITING_MODE) != 0:
+                    logical_writing_mode = resolve_writing_mode_decls(logical_writing_mode, combined_decls)
+                if (inl_norm_flags & _STYLE_FLAG_WRITING_MODE) != 0:
+                    logical_writing_mode = resolve_writing_mode_decls(logical_writing_mode, inline_normal)
+                if (imp_flags & _STYLE_FLAG_WRITING_MODE) != 0:
+                    logical_writing_mode = resolve_writing_mode_decls(logical_writing_mode, combined_important_decls)
+                if (inl_imp_flags & _STYLE_FLAG_WRITING_MODE) != 0:
+                    logical_writing_mode = resolve_writing_mode_decls(logical_writing_mode, inline_important)
+            val final_display = if (all_flags & _STYLE_FLAG_DISPLAY) != 0:
+                _final_authored_display_with_flags(
+                    ua_display, inherited_display,
+                    combined_decls, norm_flags,
+                    inline_normal, inl_norm_flags,
+                    combined_important_decls, imp_flags,
+                    inline_important, inl_imp_flags
+                )
             else:
                 ""
-            var memo_applied = false
-            if memo_usable:
-                if val memo_hit = web_style_cascade_memo_lookup(memo_key):
-                    st.copy_from(memo_hit)
-                    memo_applied = true
             if _wsc_armed():
-                _wsc_add_sub(5, _wsc_now_us() - _sb_t5)
-            if not memo_applied:
-                val _sb_t6 = if _wsc_armed(): _wsc_now_us() else: 0
-                st = apply_decls_without_display_on_writing_mode(
-                    st, combined_decls, em_base, logical_writing_mode
-                )
+                _wsc_add_sub(4, _wsc_now_us() - _sb_t4)
+            if combined_decls != "":
+                val _sb_t5 = if _wsc_armed(): _wsc_now_us() else: 0
+                val memo_parent = if nd.parent >= 0: style_inherit_ids[nd.parent] else: -1
+                val memo_usable = nd.parent < 0 or memo_parent >= 0
+                val memo_key = if memo_usable:
+                    "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{ua_control_decls}\n{em_base}\n" +
+                        "{logical_writing_mode}\n" +
+                        "{viewport_w}x{viewport_h}\n{css_cascade_root_font_px()}\n" +
+                        "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
+                else:
+                    ""
+                var memo_applied = false
                 if memo_usable:
-                    web_style_cascade_memo_store(memo_key, st)
+                    if val memo_hit = web_style_cascade_memo_lookup(memo_key):
+                        st.copy_from(memo_hit)
+                        memo_applied = true
                 if _wsc_armed():
-                    _wsc_add_sub(6, _wsc_now_us() - _sb_t6)
-        val _sb_t7 = if _wsc_armed(): _wsc_now_us() else: 0
-        var _sb_t8 = if _wsc_tail_sub_armed(): _wsc_now_us() else: 0
-        if inline_normal != "":
-            val inline_empty_cells_decl = decl_get(
-                inline_normal, "empty-cells"
-            )
-            if inline_empty_cells_decl != "":
-                empty_cells_hide = (
-                    inline_empty_cells_decl.trim().lower() == "hide"
+                    _wsc_add_sub(5, _wsc_now_us() - _sb_t5)
+                if not memo_applied:
+                    val _sb_t6 = if _wsc_armed(): _wsc_now_us() else: 0
+                    st = apply_decls_without_display_on_writing_mode(
+                        st, combined_decls, em_base, logical_writing_mode
+                    )
+                    if memo_usable:
+                        web_style_cascade_memo_store(memo_key, st)
+                    if _wsc_armed():
+                        _wsc_add_sub(6, _wsc_now_us() - _sb_t6)
+            val _sb_t7 = if _wsc_armed(): _wsc_now_us() else: 0
+            var _sb_t8 = if _wsc_tail_sub_armed(): _wsc_now_us() else: 0
+            if inline_normal != "":
+                if is_table_cell and (inl_norm_flags & _STYLE_FLAG_EMPTY_CELLS) != 0:
+                    val inline_empty_cells_decl = decl_get(
+                        inline_normal, "empty-cells"
+                    )
+                    if inline_empty_cells_decl != "":
+                        empty_cells_hide = (
+                            inline_empty_cells_decl.trim().lower() == "hide"
+                        )
+                st = apply_decls_without_display_on_writing_mode(
+                    st, inline_normal, em_base, logical_writing_mode
                 )
-            # Round 11 measured a memo here and it is an HONEST NEGATIVE, kept
-            # as a note so the next round does not rebuild it. Round 10 named
-            # this call as the ~247 ms `tail_inline` bucket and proposed
-            # extending the cascade memo over it. That was implemented keyed on
-            # the cascade memo's ENTRY INDEX (a complete identity for the `st`
-            # entering this call, and short, so a hit pays no concat or hash of
-            # the multi-kilobyte merged block) plus `inline_normal`, and
-            # instrumented: over the whole eight-page catalog it measured
-            # **0 hits, 51 misses, 0 nodes skipped**. The catalog carries
-            # exactly 51 nodes with an inline `style` attribute and no two of
-            # them share a (cascade identity, inline block) pair, so there is
-            # nothing for any memo to hit. `tail_inline` was 287 ms before and
-            # 288 ms after.
-            # The cost is therefore ~4.8 ms per CALL, not per repeat: the
-            # applier probes ~283 property names against the Style regardless
-            # of how few declarations the inline block carries. Making that
-            # cheaper is an `apply_decls` change, not a memo.
-            st = apply_decls_without_display_on_writing_mode(
-                st, inline_normal, em_base, logical_writing_mode
-            )
-            if _font_style_trace_on:
-                print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
-        if _wsc_tail_sub_armed():
-            _wsc_add_sub2(8, _wsc_now_us() - _sb_t8)
-            _sb_t8 = _wsc_now_us()
-        if combined_important_decls != "":
-            val important_empty_cells_decl = decl_get(
-                combined_important_decls, "empty-cells"
-            )
-            if important_empty_cells_decl != "":
-                empty_cells_hide = (
-                    important_empty_cells_decl.trim().lower() == "hide"
+                if _font_style_trace_on:
+                    print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
+            if _wsc_tail_sub_armed():
+                _wsc_add_sub2(8, _wsc_now_us() - _sb_t8)
+                _sb_t8 = _wsc_now_us()
+            if combined_important_decls != "":
+                if is_table_cell and (imp_flags & _STYLE_FLAG_EMPTY_CELLS) != 0:
+                    val important_empty_cells_decl = decl_get(
+                        combined_important_decls, "empty-cells"
+                    )
+                    if important_empty_cells_decl != "":
+                        empty_cells_hide = (
+                            important_empty_cells_decl.trim().lower() == "hide"
+                        )
+                st = apply_decls_without_display_on_writing_mode(
+                    st, combined_important_decls, em_base, logical_writing_mode
                 )
-            st = apply_decls_without_display_on_writing_mode(
-                st, combined_important_decls, em_base, logical_writing_mode
-            )
-        if _wsc_tail_sub_armed():
-            _wsc_add_sub2(9, _wsc_now_us() - _sb_t8)
-            _sb_t8 = _wsc_now_us()
-        if inline_important != "":
-            val inline_important_empty_cells_decl = decl_get(
-                inline_important, "empty-cells"
-            )
-            if inline_important_empty_cells_decl != "":
-                empty_cells_hide = (
-                    inline_important_empty_cells_decl.trim().lower() == "hide"
+            if _wsc_tail_sub_armed():
+                _wsc_add_sub2(9, _wsc_now_us() - _sb_t8)
+                _sb_t8 = _wsc_now_us()
+            if inline_important != "":
+                if is_table_cell and (inl_imp_flags & _STYLE_FLAG_EMPTY_CELLS) != 0:
+                    val inline_important_empty_cells_decl = decl_get(
+                        inline_important, "empty-cells"
+                    )
+                    if inline_important_empty_cells_decl != "":
+                        empty_cells_hide = (
+                            inline_important_empty_cells_decl.trim().lower() == "hide"
+                        )
+                st = apply_decls_without_display_on_writing_mode(
+                    st, inline_important, em_base, logical_writing_mode
                 )
-            st = apply_decls_without_display_on_writing_mode(
-                st, inline_important, em_base, logical_writing_mode
-            )
-        # UA `margin-block` (1em on p, pre, lists, blockquote, figure; .67 ..
-        # 2.33em on h1..h6) is em of the element's OWN computed font-size,
-        # known only now; tag_defaults wrote the UA-size value. An authored
-        # block margin keeps its value.
-        val ua_em_ratio = _ua_em_block_margin_ratio(nd.tag)
-        if ua_em_ratio > 0 and not nested_list_ua:
-            st = _ua_em_block_margin(
-                st, ua_em_ratio, combined_decls, inline_normal, combined_important_decls, inline_important
-            )
-        if _wsc_tail_sub_armed():
-            _wsc_add_sub2(10, _wsc_now_us() - _sb_t8)
-            _sb_t8 = _wsc_now_us()
-        if final_display != "":
-            if final_display == "contents":
-                st = apply_decls(st, "display:" + final_display, em_base)
-            else:
-                st.display = final_display
-        st.display_inline_flex_authored = _inline_flex_display_authored(
-            combined_decls, inline_normal, combined_important_decls, inline_important
-        )
-        # HTML UA stylesheet `audio:not([controls]) { display: none
-        # !important }` (Chrome's html.css): an <audio> without the controls
-        # widget generates no box. Applied after the authored display because
-        # the UA rule is !important, and from the node's own attributes because
-        # the cascade memo above is keyed by tag, not by this attribute.
-        if nd.tag == "audio" and not attr_present(nd.attrs_raw, "controls"):
-            st.display = "none"
-        if nd.tag == "input":
-            st.appearance_none = _appearance_none_authored(
-                combined_decls, inline_normal, combined_important_decls, inline_important
-            )
-        if (nd.tag == "select" or nd.tag == "input" or nd.tag == "button" or nd.tag == "textarea") and not _select_author_styled(
-            combined_decls, inline_normal, combined_important_decls, inline_important
-        ):
-            st = _apply_native_control_look(st, nd)
-        if _wsc_tail_sub_armed():
-            _wsc_add_sub2(11, _wsc_now_us() - _sb_t8)
-            _sb_t8 = _wsc_now_us()
-        st = _normalize_final_overflow_axes(
-            st, combined_decls, inline_normal, combined_important_decls,
-            inline_important, _hide_scrollbars_on
-        )
-        if _wsc_tail_sub_armed():
-            _wsc_add_sub2(12, _wsc_now_us() - _sb_t8)
-            _sb_t8 = _wsc_now_us()
-        # Disclosure state is structural and author CSS cannot reveal closed
-        # content. Apply it after the author cascade and before layout/paint.
-        if details_hidden[i]:
-            st = apply_decls(st, "display:none", em_base)
-        # The customizable-select projection is not implemented yet. In its
-        # one valid context, keep selectedcontent inert even when author CSS
-        # tries to display it; invalid-context uses retain generic semantics.
-        if nd.tag == "selectedcontent" and is_valid_selectedcontent_context(nodes, child_index, i):
-            st = apply_decls(st, "display:none", em_base)
-        # A candidate `::before`/`::after` box (parse_html) exists only when its
-        # cascaded `content` is not none/normal (CSS 2.2 12.1).
-        if (nd.tag == "::before" or nd.tag == "::after") and not _generated_content_present(combined_decls, combined_important_decls):
-            st.display = "none"
-        if _wsc_tail_sub_armed():
-            _wsc_add_sub2(13, _wsc_now_us() - _sb_t8)
-        if _wsc_armed():
-            _wsc_add_sub(7, _wsc_now_us() - _sb_t7)
-        # The shared WM supplies the package's named solid material for the
-        # legacy fallback mode. A producer may opt into the CPU-composited
-        # material contract only with the exact mode value, preserving the
-        # authored translucent background and backdrop declaration for W2.
-        # Freestanding lane: method calls chained onto a function-call return
-        # (attr_value(...).trim().lower()) misroute/corrupt on this backend —
-        # the char_code_at().to_i32() defect class. Bind each hop to a typed
-        # local so every dispatch has a held text receiver.
-        if _wsc_armed():
-            _wsc_add_section(2, _wsc_now_us() - _wsc_t)
-            _wsc_t = _wsc_now_us()
-        val wm_fallback_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-fallback")
-        val wm_fallback_trimmed: text = wm_fallback_attr.trim()
-        val wm_fallback: text = wm_fallback_trimmed.lower()
-        if nd.attrs_raw.contains("data-wm-theme-fallback"):
-            # Unconditional per-contract-node receipt (bounded: contract nodes
-            # only): shows exactly which hop kills the value — attr extraction,
-            # trim, lower, or the == comparison itself.
-            val probe_raw_match = wm_fallback_attr == "solid-material"
-            val probe_final_match = wm_fallback == "solid-material"
-            print "[web-style-producer] contract-attr index={i} attrs_len={nd.attrs_raw.len()} raw_len={wm_fallback_attr.len()} trimmed_len={wm_fallback_trimmed.len()} lower_len={wm_fallback.len()} raw_match={probe_raw_match} final_match={probe_final_match}"
-        val wm_material_mode: text = attr_value(
-            nd.attrs_raw, "data-wm-theme-material-mode")
-        # Bind every contract comparison ONCE, immediately after extraction.
-        # Re-comparing these text locals ~120 lines later (after the font
-        # resolver and style cascade calls) has been observed to flip on the
-        # freestanding x86_64 lane: the same iteration printed
-        # `contract-attr ... final_match=1` and then took NEITHER the admitted
-        # nor the rejected branch, so the material witness silently stayed
-        # "none" and the WM degraded every window
-        # (content-provenance-rejected). Same defect class as the chained
-        # attr_value(...).trim().lower() corruption documented above; the fix
-        # idiom is the same — evaluate at extraction depth, carry booleans.
-        val wm_fallback_is_solid: bool = wm_fallback == "solid-material"
-        val wm_mode_is_cpu: bool =
-            wm_material_mode == "engine2d-cpu-composited-material-v1"
-        val wm_mode_is_empty: bool = wm_material_mode == ""
-        if (
-            wm_fallback_is_solid and not wm_mode_is_cpu
-        ):
-            val wm_bg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-bg")
-            val wm_bg: text = wm_bg_attr.trim()
-            val wm_fg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-fg")
-            val wm_fg: text = wm_fg_attr.trim()
-            var wm_fallback_decls = "backdrop-filter:none;-webkit-backdrop-filter:none;background-image:none;"
-            if wm_bg.len() > 0:
-                wm_fallback_decls = wm_fallback_decls + "background-color:" + wm_bg + ";"
-            if wm_fg.len() > 0:
-                wm_fallback_decls = wm_fallback_decls + "color:" + wm_fg + ";"
-            st = apply_decls(st, wm_fallback_decls, em_base)
-            # Producer-side provenance attribution (silent on healthy): the
-            # material witness downstream reads these same fields through the
-            # returned [Style] array. Keep this diagnostic inside the legacy
-            # fallback branch; exact CPU mode is intentionally translucent.
-            val wm_realized_bg: u32 = st.bg
-            val wm_realized_gf: u32 = st.background_gradient_from
-            val wm_realized_gt: u32 = st.background_gradient_to
-            val wm_realized_layers: i64 = st.bg_layers_raw.len()
-            if (
-                ((wm_realized_bg >> 24) & 255u32) != 255u32 or
-                wm_realized_gf != 0u32 or wm_realized_gt != 0u32 or
-                wm_realized_layers != 0
+            val ua_em_ratio = _ua_em_block_margin_ratio(nd.tag)
+            if ua_em_ratio > 0 and not nested_list_ua:
+                st = _ua_em_block_margin_with_flags(
+                    st, ua_em_ratio,
+                    combined_decls, norm_flags,
+                    inline_normal, inl_norm_flags,
+                    combined_important_decls, imp_flags,
+                    inline_important, inl_imp_flags
+                )
+            if _wsc_tail_sub_armed():
+                _wsc_add_sub2(10, _wsc_now_us() - _sb_t8)
+                _sb_t8 = _wsc_now_us()
+            if final_display != "":
+                if final_display == "contents":
+                    st = apply_decls(st, "display:" + final_display, em_base)
+                else:
+                    st.display = final_display
+            if (all_flags & _STYLE_FLAG_INLINE_FLEX) != 0:
+                st.display_inline_flex_authored = _inline_flex_display_authored(
+                    combined_decls, inline_normal, combined_important_decls, inline_important
+                )
+            if nd.tag == "audio" and not attr_present(nd.attrs_raw, "controls"):
+                st.display = "none"
+            if nd.tag == "input" and (all_flags & _STYLE_FLAG_APPEARANCE) != 0:
+                st.appearance_none = _appearance_none_authored(
+                    combined_decls, inline_normal, combined_important_decls, inline_important
+                )
+            if (nd.tag == "select" or nd.tag == "input" or nd.tag == "button" or nd.tag == "textarea") and (
+                (all_flags & _STYLE_FLAG_CONTROL_BOX) == 0 or
+                not _select_author_styled(combined_decls, inline_normal, combined_important_decls, inline_important)
             ):
-                print "[web-style-producer] wm-contract-unrealized index={i} bg={wm_realized_bg} gradient_from={wm_realized_gf} gradient_to={wm_realized_gt} layers_len={wm_realized_layers} wm_bg_len={wm_bg.len()}"
-        if _wsc_armed():
-            _wsc_add_section(3, _wsc_now_us() - _wsc_t)
-            _wsc_t = _wsc_now_us()
-        if trace_stages:
-            print "[layout-trace] style_stage=inline-ready index={i}"
-        if empty_cells_hide and (nd.tag == "td" or nd.tag == "th") and not selector_ctx.has_content_child[i]:
-            st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
+                st = _apply_native_control_look(st, nd)
+            if _wsc_tail_sub_armed():
+                _wsc_add_sub2(11, _wsc_now_us() - _sb_t8)
+                _sb_t8 = _wsc_now_us()
+            if (all_flags & _STYLE_FLAG_OVERFLOW) != 0 or _hide_scrollbars_on:
+                st = _normalize_final_overflow_axes(
+                    st, combined_decls, inline_normal, combined_important_decls,
+                    inline_important, _hide_scrollbars_on
+                )
+            if _wsc_tail_sub_armed():
+                _wsc_add_sub2(12, _wsc_now_us() - _sb_t8)
+                _sb_t8 = _wsc_now_us()
+            if details_hidden[i]:
+                st = apply_decls(st, "display:none", em_base)
+            if nd.tag == "selectedcontent" and is_valid_selectedcontent_context(nodes, child_index, i):
+                st = apply_decls(st, "display:none", em_base)
+            if (nd.tag == "::before" or nd.tag == "::after") and (
+                (all_flags & _STYLE_FLAG_CONTENT) == 0 or
+                not _generated_content_present(combined_decls, combined_important_decls)
+            ):
+                st.display = "none"
+            if _wsc_tail_sub_armed():
+                _wsc_add_sub2(13, _wsc_now_us() - _sb_t8)
+            if _wsc_armed():
+                _wsc_add_sub(7, _wsc_now_us() - _sb_t7)
+            if _wsc_armed():
+                _wsc_add_section(2, _wsc_now_us() - _wsc_t)
+                _wsc_t = _wsc_now_us()
+            if nd.attrs_raw.contains("data-wm-theme-"):
+                val wm_fallback_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-fallback")
+                val wm_fallback_trimmed: text = wm_fallback_attr.trim()
+                wm_fallback = wm_fallback_trimmed.lower()
+                if nd.attrs_raw.contains("data-wm-theme-fallback"):
+                    val probe_raw_match = wm_fallback_attr == "solid-material"
+                    val probe_final_match = wm_fallback == "solid-material"
+                    print "[web-style-producer] contract-attr index={i} attrs_len={nd.attrs_raw.len()} raw_len={wm_fallback_attr.len()} trimmed_len={wm_fallback_trimmed.len()} lower_len={wm_fallback.len()} raw_match={probe_raw_match} final_match={probe_final_match}"
+                wm_material_mode = attr_value(
+                    nd.attrs_raw, "data-wm-theme-material-mode")
+                wm_fallback_is_solid = wm_fallback == "solid-material"
+                wm_mode_is_cpu = wm_material_mode == "engine2d-cpu-composited-material-v1"
+                wm_mode_is_empty = wm_material_mode == ""
+                if wm_fallback_is_solid and not wm_mode_is_cpu:
+                    val wm_bg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-bg")
+                    val wm_bg: text = wm_bg_attr.trim()
+                    val wm_fg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-fg")
+                    val wm_fg: text = wm_fg_attr.trim()
+                    var wm_fallback_decls = "backdrop-filter:none;-webkit-backdrop-filter:none;background-image:none;"
+                    if wm_bg.len() > 0:
+                        wm_fallback_decls = wm_fallback_decls + "background-color:" + wm_bg + ";"
+                    if wm_fg.len() > 0:
+                        wm_fallback_decls = wm_fallback_decls + "color:" + wm_fg + ";"
+                    st = apply_decls(st, wm_fallback_decls, em_base)
+                    val wm_realized_bg: u32 = st.bg
+                    val wm_realized_gf: u32 = st.background_gradient_from
+                    val wm_realized_gt: u32 = st.background_gradient_to
+                    val wm_realized_layers: i64 = st.bg_layers_raw.len()
+                    if (
+                        ((wm_realized_bg >> 24) & 255u32) != 255u32 or
+                        wm_realized_gf != 0u32 or wm_realized_gt != 0u32 or
+                        wm_realized_layers != 0
+                    ):
+                        print "[web-style-producer] wm-contract-unrealized index={i} bg={wm_realized_bg} gradient_from={wm_realized_gf} gradient_to={wm_realized_gt} layers_len={wm_realized_layers} wm_bg_len={wm_bg.len()}"
+            if _wsc_armed():
+                _wsc_add_section(3, _wsc_now_us() - _wsc_t)
+                _wsc_t = _wsc_now_us()
+            if trace_stages:
+                print "[layout-trace] style_stage=inline-ready index={i}"
+            if empty_cells_hide and is_table_cell and not selector_ctx.has_content_child[i]:
+                st = apply_decls(st, "background-color:transparent;background-image:none", em_base)
+        else:
+            if details_hidden[i]:
+                st = apply_decls(st, "display:none", em_base)
+            if _wsc_armed():
+                _wsc_add_section(0, _wsc_now_us() - _wsc_t)
+                _wsc_t = _wsc_now_us()
         # Metadata content (`<style>`, `<script>`, `<title>`, ...) is never
         # painted, so resolving font metrics for its text child measures glyph
         # advances for a string nobody ever draws. On the shared catalog page
@@ -1593,74 +1670,87 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 # bitmap-cell rasterizer, not fixable without real glyph
                 # rasterization or a wrap-parity break.
                 val metric_scale = web_glyph_scale(st.font_size)
-                val metric_cps = text_codepoints(metric_text)
-                if metric_cps.len() == metrics.advances.len():
-                    var adjusted: [i32] = []
-                    var adjusted_width = 0
-                    var clamped_any = false
-                    var ai = 0
-                    while ai < metrics.advances.len():  # cpu-lane-loop-ok: one pass over the resolved per-codepoint advances of THIS node's own metric string, clamping each to its glyph's inked bitmap width (scale 1 only) and folding in letter/word spacing; bound is that string's codepoint count
-                        var a = metrics.advances[ai]
-                        val cp = metric_cps[ai]
-                        # `font_size <= 8`, NOT `metric_scale == 1`:
-                        # `web_glyph_scale` is `fs / 8`, which is 1 for every
-                        # size up to 15, so keying on the scale also clamped
-                        # 9..15 px runs -- sizes at which the resolved face is
-                        # what gets painted. There Liberation Sans's `l`
-                        # (3 px at 13) was widened to the bitmap cell's 4 and a
-                        # 13 px `Alpha` measured 34 for a 33 px run
-                        # (form_control_chrome159_geometry_spec).
-                        if metric_scale == 1 and (st.font_size <= 8 or _web_bitmap_paint_lane):
-                            val inked = _glyph_inked_width_for_paint(cp, metric_scale)
-                            if a < inked:
-                                a = inked
-                                clamped_any = true
-                        if a < 1:
-                            a = 1
-                        adjusted.push(a)
-                        adjusted_width = adjusted_width + a
-                        ai = ai + 1
-                    if st.letter_spacing_milli != 0 or st.word_spacing_milli != 0:
-                        adjusted = spaced_advances_milli(adjusted, metric_cps, st.letter_spacing_milli, st.word_spacing_milli)
-                        adjusted_width = 0
-                        for sa in adjusted:
-                            adjusted_width = adjusted_width + sa
-                    if st.letter_spacing_milli != 0 or st.word_spacing_milli != 0 or clamped_any:
-                        st.resolved_font_advances = adjusted
-                        st.resolved_font_width = adjusted_width
+                val needs_clamp = metric_scale == 1 and (st.font_size <= 8 or _web_bitmap_paint_lane)
+                val has_spacing = st.letter_spacing_milli != 0 or st.word_spacing_milli != 0
+                var can_fast_advances = not needs_clamp and not has_spacing
+                if can_fast_advances:
+                    var fi = 0
+                    val adv_n = metrics.advances.len()
+                    while fi < adv_n:  # cpu-lane-loop-ok: checks whether any advance needs clamping up to 1 before skipping codepoint decoding
+                        if metrics.advances[fi] < 1:
+                            can_fast_advances = false
+                            break
+                        fi = fi + 1
+                var used_fast_advances = false
+                if can_fast_advances:
+                    used_fast_advances = true
+                    st.resolved_font_advances = metrics.advances
+                    st.resolved_font_width = metrics.width
+                if not used_fast_advances:
+                    val metric_cps = text_codepoints(metric_text)
+                    if metric_cps.len() == metrics.advances.len():
+                        var adjusted: [i32] = []
+                        var adjusted_width = 0
+                        var clamped_any = false
+                        var ai = 0
+                        while ai < metrics.advances.len():  # cpu-lane-loop-ok: one pass over the resolved per-codepoint advances of THIS node's own metric string, clamping each to its glyph's inked bitmap width (scale 1 only) and folding in letter/word spacing; bound is that string's codepoint count
+                            var a = metrics.advances[ai]
+                            val cp = metric_cps[ai]
+                            if needs_clamp:
+                                val inked = _glyph_inked_width_for_paint(cp, metric_scale)
+                                if a < inked:
+                                    a = inked
+                                    clamped_any = true
+                            if a < 1:
+                                a = 1
+                            adjusted.push(a)
+                            adjusted_width = adjusted_width + a
+                            ai = ai + 1
+                        if has_spacing:
+                            adjusted = spaced_advances_milli(adjusted, metric_cps, st.letter_spacing_milli, st.word_spacing_milli)
+                            adjusted_width = 0
+                            for sa in adjusted:
+                                adjusted_width = adjusted_width + sa
+                        if has_spacing or clamped_any:
+                            st.resolved_font_advances = adjusted
+                            st.resolved_font_width = adjusted_width
+                        else:
+                            used_fast_advances = true
+                            st.resolved_font_advances = metrics.advances
+                            st.resolved_font_width = metrics.width
                     else:
                         st.resolved_font_advances = metrics.advances
                         st.resolved_font_width = metrics.width
-                        # Exact widths for the mid-line pen origin (layout
-                        # inline loop). Only for an unadjusted run whose integer
-                        # width is exactly the rounding of these; a fractional
-                        # size (13.3333 px) carries its float-size width.
-                        if metrics.width_milli >= 0:
-                            val space_metrics = resolve_font_metrics_with_language_milli(metric_family, " ", font_milli_of(st.font_size, st.font_size_milli), language)
-                            if space_metrics.valid and space_metrics.width_milli > 0:
-                                st.resolved_font_width_milli = metrics.width_milli
-                                st.resolved_space_milli = space_metrics.width_milli
-                                # Chrome shapes a run together with its collapsible
-                                # edge space, so the (letter, space) kern pair
-                                # applies. Measure run+space as one string, but only
-                                # for a run that really has that edge space.
-                                # A direction:rtl run of left-to-right text (bidi visual
-                                # order = logical) is shaped the same way; a run that
-                                # reorders keeps the flat space.
-                                if not st.white_space_nowrap and (not st.direction_rtl or metric_text == metric_text_logical) and metric_text.len() > 0:
-                                    val nd_bytes = nd.text_data.bytes()
-                                    val nd_n = nd_bytes.len()
-                                    if nd_n > 1 and (nd_bytes[0] == 32 or nd_bytes[0] == 9 or nd_bytes[0] == 10 or nd_bytes[0] == 13):
-                                        val lead_m = edge_space_kerned_milli(metric_family, font_milli_of(st.font_size, st.font_size_milli), language, metric_cps[0], true)
+                if used_fast_advances and metrics.width_milli >= 0:
+                    val font_milli = font_milli_of(st.font_size, st.font_size_milli)
+                    val sw_key = "{metric_family}\n{font_milli}\n{language}"
+                    var space_w_milli: i64 = -1
+                    if space_width_memo.has(sw_key):
+                        space_w_milli = space_width_memo[sw_key]
+                    else:
+                        val space_metrics = resolve_font_metrics_with_language_milli(metric_family, " ", font_milli, language)
+                        if space_metrics.valid:
+                            space_w_milli = space_metrics.width_milli
+                        space_width_memo[sw_key] = space_w_milli
+                    if space_w_milli > 0:
+                        st.resolved_font_width_milli = metrics.width_milli
+                        st.resolved_space_milli = space_w_milli
+                        if not st.white_space_nowrap and (not st.direction_rtl or metric_text == metric_text_logical) and metric_text.len() > 0:
+                            val nd_bytes = nd.text_data.bytes()
+                            val nd_n = nd_bytes.len()
+                            val lead_ws = nd_n > 1 and (nd_bytes[0] == 32 or nd_bytes[0] == 9 or nd_bytes[0] == 10 or nd_bytes[0] == 13)
+                            val trail_ws = nd_n > 1 and (nd_bytes[nd_n - 1] == 32 or nd_bytes[nd_n - 1] == 9 or nd_bytes[nd_n - 1] == 10 or nd_bytes[nd_n - 1] == 13)
+                            if lead_ws or trail_ws:
+                                val edge_cps = text_codepoints(metric_text)
+                                if edge_cps.len() > 0:
+                                    if lead_ws:
+                                        val lead_m = edge_space_kerned_milli(metric_family, font_milli, language, edge_cps[0], true)
                                         if lead_m > 0:
                                             st.resolved_lead_space_milli = lead_m
-                                    if nd_n > 1 and (nd_bytes[nd_n - 1] == 32 or nd_bytes[nd_n - 1] == 9 or nd_bytes[nd_n - 1] == 10 or nd_bytes[nd_n - 1] == 13):
-                                        val trail_m = edge_space_kerned_milli(metric_family, font_milli_of(st.font_size, st.font_size_milli), language, metric_cps[metric_cps.len() - 1], false)
+                                    if trail_ws:
+                                        val trail_m = edge_space_kerned_milli(metric_family, font_milli, language, edge_cps[edge_cps.len() - 1], false)
                                         if trail_m > 0:
                                             st.resolved_trail_space_milli = trail_m
-                else:
-                    st.resolved_font_advances = metrics.advances
-                    st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
                 # Only a FALLBACK face widens the line box; the primary face already is the strut.
                 st.used_face_units = if metrics.used_face_units.len() == 4 and metrics.used_face_units != browser_face_line_units(st.font_family, st.bold, st.font_style_italic): metrics.used_face_units else: []
@@ -1669,74 +1759,67 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             _wsc_t = _wsc_now_us()
         # Material receipts are built from loop-local fields before the
         # freestanding-unsafe [Style] store/return boundary.
-        val mat_bg: u32 = st.bg
-        val mat_fg: u32 = st.fg
-        val mat_gf: u32 = st.background_gradient_from
-        val mat_gt: u32 = st.background_gradient_to
-        val mat_layers: text = st.bg_layers_raw
-        val mat_backdrop: text = st.backdrop_filter_raw
-        val declared_bg_attr = attr_value(
-            nd.attrs_raw, "data-wm-theme-bg")
-        val declared_argb = parse_color_any(declared_bg_attr)
-        val declared_opaque = (
-            declared_bg_attr != "" and
-            ((declared_argb >> 24) & 255u32) == 255u32)
-        val surface_alpha = (mat_bg >> 24) & 255u32
-        val translucent_surface = (
-            surface_alpha > 0u32 and surface_alpha < 255u32)
-        val opaque_surface = surface_alpha == 255u32
-        val typed_stops_absent = mat_gf == 0u32 and mat_gt == 0u32
-        val typed_stops_present = mat_gf != 0u32 and mat_gt != 0u32
-        val typed_stops_valid = typed_stops_absent or typed_stops_present
-        val backdrop = simple_web_backdrop_admission(mat_backdrop)
-        # A pre-animation receipt cannot describe the final frame. Animated
-        # material nodes fail closed until the side channel becomes
-        # animation-aware.
-        val static_material = st.animation_name == "none"
-        val cpu_admitted = (
-            material_channel_ready and static_material and
-            wm_mode_is_cpu and
-            wm_fallback_is_solid and declared_opaque and
-            translucent_surface and mat_layers == "" and
-            typed_stops_valid and backdrop.admitted)
-        if cpu_admitted:
-            val realized = "blur({backdrop.realized_blur_px}px) saturate({backdrop.realized_saturation_milli / 10}%)"
-            material_entries[0] = (
-                material_entries[0] +
-                "\n{cpu_material_entry_count}|kind=cpu-composited-material" +
-                "|reason=native-device-backdrop-path-pending" +
-                "|mode={wm_material_mode}|fallback={wm_fallback}" +
-                "|declared={declared_argb}|surface={mat_bg}" +
-                "|surface-alpha-milli={(surface_alpha as i64) * 1000 / 255}" +
-                "|backdrop={mat_backdrop}|realized={realized}" +
-                "|blur={backdrop.realized_blur_px}" +
-                "|saturation={backdrop.realized_saturation_milli}" +
-                "|stops={mat_gf},{mat_gt}")
-            cpu_material_entry_count = cpu_material_entry_count + 1
-            cpu_material_nodes.push(i)
-        val solid_admitted = (
-            material_channel_ready and static_material and
-            wm_mode_is_empty and wm_fallback_is_solid and
-            declared_opaque and opaque_surface and mat_backdrop == "" and
-            mat_layers == "" and typed_stops_absent)
-        if solid_admitted:
-            material_entries[1] = (
-                material_entries[1] +
-                "\n{solid_material_entry_count}|kind=solid-material" +
-                "|reason=cpu-raster-backdrop-sampling-unavailable" +
-                "|bg={mat_bg}|fg={mat_fg}|backdrop=none" +
-                "|background-image=none")
-            solid_material_entry_count = solid_material_entry_count + 1
-            solid_material_nodes.push(i)
-        if (
-            wm_fallback_is_solid and
-            not cpu_admitted and not solid_admitted
-        ):
-            print "[web-style-producer] entry-rejected index={i} mode={wm_material_mode} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} backdrop_len={mat_backdrop.len()} animation={st.animation_name}"
-            # Bounded conjunct receipt (contract nodes only): names the exact
-            # admission clause that failed instead of forcing inference from
-            # the aggregate line above.
-            print "[web-style-producer] entry-rejected-detail index={i} channel={material_channel_ready} static={static_material} mode_ok={wm_mode_is_cpu} declared_opaque={declared_opaque} declared_argb={declared_argb} declared_attr_len={declared_bg_attr.len()} translucent={translucent_surface} opaque={opaque_surface} stops_valid={typed_stops_valid} backdrop_admitted={backdrop.admitted} backdrop={mat_backdrop}"
+        if material_channel_ready and nd.attrs_raw.contains("data-wm-theme-"):
+            val mat_bg: u32 = st.bg
+            val mat_fg: u32 = st.fg
+            val mat_gf: u32 = st.background_gradient_from
+            val mat_gt: u32 = st.background_gradient_to
+            val mat_layers: text = st.bg_layers_raw
+            val mat_backdrop: text = st.backdrop_filter_raw
+            val declared_bg_attr = attr_value(
+                nd.attrs_raw, "data-wm-theme-bg")
+            val declared_argb = parse_color_any(declared_bg_attr)
+            val declared_opaque = (
+                declared_bg_attr != "" and
+                ((declared_argb >> 24) & 255u32) == 255u32)
+            val surface_alpha = (mat_bg >> 24) & 255u32
+            val translucent_surface = (
+                surface_alpha > 0u32 and surface_alpha < 255u32)
+            val opaque_surface = surface_alpha == 255u32
+            val typed_stops_absent = mat_gf == 0u32 and mat_gt == 0u32
+            val typed_stops_present = mat_gf != 0u32 and mat_gt != 0u32
+            val typed_stops_valid = typed_stops_absent or typed_stops_present
+            val backdrop = simple_web_backdrop_admission(mat_backdrop)
+            val static_material = st.animation_name == "none"
+            val cpu_admitted = (
+                static_material and
+                wm_mode_is_cpu and
+                wm_fallback_is_solid and declared_opaque and
+                translucent_surface and mat_layers == "" and
+                typed_stops_valid and backdrop.admitted)
+            if cpu_admitted:
+                val realized = "blur({backdrop.realized_blur_px}px) saturate({backdrop.realized_saturation_milli / 10}%)"
+                cpu_material_parts.push(
+                    "\n{cpu_material_entry_count}|kind=cpu-composited-material" +
+                    "|reason=native-device-backdrop-path-pending" +
+                    "|mode={wm_material_mode}|fallback={wm_fallback}" +
+                    "|declared={declared_argb}|surface={mat_bg}" +
+                    "|surface-alpha-milli={(surface_alpha as i64) * 1000 / 255}" +
+                    "|backdrop={mat_backdrop}|realized={realized}" +
+                    "|blur={backdrop.realized_blur_px}" +
+                    "|saturation={backdrop.realized_saturation_milli}" +
+                    "|stops={mat_gf},{mat_gt}")
+                cpu_material_entry_count = cpu_material_entry_count + 1
+                cpu_material_nodes.push(i)
+            val solid_admitted = (
+                static_material and
+                wm_mode_is_empty and wm_fallback_is_solid and
+                declared_opaque and opaque_surface and mat_backdrop == "" and
+                mat_layers == "" and typed_stops_absent)
+            if solid_admitted:
+                solid_material_parts.push(
+                    "\n{solid_material_entry_count}|kind=solid-material" +
+                    "|reason=cpu-raster-backdrop-sampling-unavailable" +
+                    "|bg={mat_bg}|fg={mat_fg}|backdrop=none" +
+                    "|background-image=none")
+                solid_material_entry_count = solid_material_entry_count + 1
+                solid_material_nodes.push(i)
+            if (
+                wm_fallback_is_solid and
+                not cpu_admitted and not solid_admitted
+            ):
+                print "[web-style-producer] entry-rejected index={i} mode={wm_material_mode} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} backdrop_len={mat_backdrop.len()} animation={st.animation_name}"
+                print "[web-style-producer] entry-rejected-detail index={i} channel={material_channel_ready} static={static_material} mode_ok={wm_mode_is_cpu} declared_opaque={declared_opaque} declared_argb={declared_argb} declared_attr_len={declared_bg_attr.len()} translucent={translucent_surface} opaque={opaque_surface} stops_valid={typed_stops_valid} backdrop_admitted={backdrop.admitted} backdrop={mat_backdrop}"
         if _font_style_trace_on:
             print "[font-inherit-trace] index={i} final_font_family={st.font_family} final_font_size={st.font_size}"
         if _wsc_armed():
@@ -1745,18 +1828,17 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if nd.tag == "html":
             # Every later `rem` resolves against the root computed font-size.
             css_cascade_root_font_set(st.font_size)
-        # Intern this node's inherited identity so its children can key the
-        # cascade memo on it. Interning (rather than carrying the digest text
-        # itself into every child key) keeps the key short and makes the
-        # equality test an integer compare.
+        # Intern this node's inherited identity ONLY if it has children (leaves
+        # have no descendants that read `style_inherit_ids[i]`).
         val _wsc_dt = if _wsc_armed(): _wsc_now_us() else: 0
-        val inherit_digest = st.inherited_digest()
-        if style_inherit_index.has(inherit_digest):
-            style_inherit_ids[i] = style_inherit_index[inherit_digest]
-        else:
-            style_inherit_index[inherit_digest] = style_inherit_next
-            style_inherit_ids[i] = style_inherit_next
-            style_inherit_next = style_inherit_next + 1
+        if has_child[i]:
+            val inherit_digest = st.inherited_digest()
+            if style_inherit_index.has(inherit_digest):
+                style_inherit_ids[i] = style_inherit_index[inherit_digest]
+            else:
+                style_inherit_index[inherit_digest] = style_inherit_next
+                style_inherit_ids[i] = style_inherit_next
+                style_inherit_next = style_inherit_next + 1
         if _wsc_armed():
             _wsc_add_section(8, _wsc_now_us() - _wsc_dt)
         if trace_stages:
@@ -1769,43 +1851,40 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if details_hidden[i]:
             styles[i] = apply_decls(styles[i], "display:none", 16)
         i = i + 1
-    # ::marker visibility (bug browser_engine_no_list_marker_boxes_2026-08-19):
-    # a marker is suppressed when list-style(-type) resolves to none on its
-    # <li> or on the list element itself. Shortcut for full inheritance:
-    # list-style-type inherits, but only the li and its list parent are
-    # consulted here — enough for author sheets that set it on ul/ol or li.
-    var marker_i = 0
-    while marker_i < node_count:  # cpu-lane-loop-ok: one pass over the document per style recompute
-        if nodes[marker_i].tag == "::marker":
-            val marker_li = nodes[marker_i].parent as i32
-            if marker_li >= 0:
-                val marker_list = nodes[marker_li].parent as i32
-                if styles[marker_li].list_style_none or (
-                    marker_list >= 0 and styles[marker_list].list_style_none
-                ):
-                    var marker_st = styles[marker_i]
-                    marker_st.display = "none"
-                    styles[marker_i] = marker_st
-        marker_i = marker_i + 1
-    # Whitespace-only text renders only between inline-level boxes: inside a
-    # flex/grid/table container, or beside a block-level box (computed
-    # display, so `img{display:block}` or `label{display:block}` counts), it
-    # generates nothing (CSS Text 4.1.1, Flexbox 4, Grid 6.2) -- the parser
-    # keeps it only for this pass to judge.
+    if has_any_marker:
+        var marker_i = 0
+        while marker_i < node_count:  # cpu-lane-loop-ok: one pass over the document per style recompute
+            if nodes[marker_i].tag == "::marker":
+                val marker_li = nodes[marker_i].parent as i32
+                if marker_li >= 0:
+                    val marker_list = nodes[marker_li].parent as i32
+                    if styles[marker_li].list_style_none or (
+                        marker_list >= 0 and styles[marker_list].list_style_none
+                    ):
+                        var marker_st = styles[marker_i]
+                        marker_st.display = "none"
+                        styles[marker_i] = marker_st
+            marker_i = marker_i + 1
     var ws_parent = 0
     while ws_parent < node_count:  # cpu-lane-loop-ok: one pass over the document per style recompute; each child is visited once, from its parent
         var ws_c = child_index.first_child[ws_parent]
         if ws_c >= 0:
             val box_parent = _whitespace_free_container(styles[ws_parent].display)
             var prev_block = false
+            var next_vis_after: i32 = -1
+            var next_vis_valid = false
             while ws_c >= 0:
+                if next_vis_valid and ws_c == next_vis_after:
+                    next_vis_valid = false
                 if nodes[ws_c].tag == "#text" and nodes[ws_c].text_trimmed == "":
-                    var next = child_index.next_sibling[ws_c]
-                    while next >= 0 and (styles[next].display == "none" or styles[next].display == "marker"):
-                        next = child_index.next_sibling[next]
+                    if not next_vis_valid:
+                        var nxt = child_index.next_sibling[ws_c]
+                        while nxt >= 0 and (styles[nxt].display == "none" or styles[nxt].display == "marker"):
+                            nxt = child_index.next_sibling[nxt]
+                        next_vis_after = nxt
+                        next_vis_valid = true
+                    val next = next_vis_after
                     val next_block = next >= 0 and nodes[next].tag != "#text" and _block_level_display(styles[next].display)
-                    # A kept newline beside a block is an empty line (Chrome
-                    # `<pre><div>a</div>\n<div>b</div>` puts b 48 below a).
                     val kept_newline = html_kept_newlines(nodes[ws_c], styles[ws_c].white_space_newline) > 0
                     if box_parent or ((prev_block or next_block) and not styles[ws_c].white_space_pre and not kept_newline):
                         var ws_st = styles[ws_c]
@@ -1816,6 +1895,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 ws_c = child_index.next_sibling[ws_c]
         ws_parent = ws_parent + 1
     if material_channel_ready:
+        if cpu_material_parts.len() > 0:
+            material_entries[0] = material_entries[0] + cpu_material_parts.join("")
+        if solid_material_parts.len() > 0:
+            material_entries[1] = material_entries[1] + solid_material_parts.join("")
         material_counts[0] = cpu_material_entry_count
         material_counts[1] = solid_material_entry_count
     if cpu_material_entry_count > 0:
