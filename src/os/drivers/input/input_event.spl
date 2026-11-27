@@ -100,6 +100,33 @@ impl InputEventQueue:
         self.tail = 0
         self.count = 0
 
+    me drop_key_events():
+        """Discard queued key events on focus transitions while keeping pointer and resize events in FIFO order."""
+        if self.count <= 0:
+            return
+        var kept: [HostInputEvent] = []
+        val n = self.count
+        var i = 0
+        # cpu-lane-loop-ok: bounded by ring count <= INPUT_QUEUE_CAP (256)
+        while i < n:
+            val ev = self.buf[(self.head + i) % INPUT_QUEUE_CAP]
+            var keep = true
+            match ev:
+                HostInputEvent.Key(code, ch, down, mods):
+                    keep = false
+                _:
+                    keep = true
+            if keep:
+                kept = kept.push(ev)
+            i = i + 1
+        var k: i64 = 0
+        while k < kept.len():
+            self.buf[k] = kept[k]
+            k = k + 1
+        self.head = 0
+        self.count = kept.len()
+        self.tail = self.count % INPUT_QUEUE_CAP
+
     me drain() -> [HostInputEvent]:
         """Pop everything into a list, oldest first. Allocates: not ISR-safe.
 

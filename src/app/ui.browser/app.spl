@@ -9,10 +9,10 @@ use common.ui.widget.{UIEvent}
 use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.access_store.{ui_access_store_runtime_open_with_override}
-use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiWindowEvent, GUI_EVT_NONE}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GuiWindowEvent, GUI_EVT_NONE, GUI_EVT_RESIZED, GUI_EVT_MOUSE_WHEEL}
 use app.ui.browser.backend.{BrowserBackend}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event}
-use std.io_runtime.{file_exists, get_args, read_file, time_now_unix_micros}
+use std.io_runtime.{file_exists, get_args, read_file, thread_sleep, time_now_unix_micros}
 use std.diag.{dbg_stage}
 use lazy common.window_protocol.geometry.{Size}
 use lazy os.compositor.host_compositor_entry.{HostBackendKind, HostWmConfig, HostWmHandle, init_host_wm}
@@ -209,13 +209,15 @@ class BrowserApp:
                     had_event = true
 
             val now = browser_time_now_unix_micros()
-            if had_event or now >= next_present_at:
+            if had_event:
                 self.render_session_frame()
                 if not self.present_host_window(window):
                     print "Error: failed to present browser frame"
                     presentation_ok = false
                     self.running = false
                 next_present_at = now + 16000
+            else:
+                thread_sleep(8)
 
         browser_winit_window_free(window)
         browser_winit_event_loop_free(event_loop)
@@ -312,6 +314,20 @@ class BrowserApp:
             )
             if translated.is_some():
                 self.handle_ui_event(translated)
+            return
+
+        if event_type == GUI_EVT_MOUSE_WHEEL:
+            val dy_i32 = (0.0 - _host_gui_event.y * 24.0).to_i32()
+            val dy = if dy_i32 == 0 and _host_gui_event.y > 0.0: -24 elif dy_i32 == 0 and _host_gui_event.y < 0.0: 24 else: dy_i32
+            if dy != 0:
+                self.handle_ui_event(UIEvent.ScrollEvent(self.last_mouse_x.to_f64(), self.last_mouse_y.to_f64(), 0.0, dy.to_f64()))
+            return
+
+        if event_type == GUI_EVT_RESIZED:
+            val new_w = _host_gui_event.x.to_i32() / BROWSER_WINDOW_SCALE
+            val new_h = _host_gui_event.y.to_i32() / BROWSER_WINDOW_SCALE
+            if new_w > 0 and new_h > 0:
+                self.handle_ui_event(UIEvent.Resize(new_w, new_h))
 
     me present_host_window(window: i64) -> bool:
         val pixels = self.backend.pixels_rgba_i64()

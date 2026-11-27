@@ -14166,17 +14166,31 @@ class SimpleWindowManager {
       const dir = rs.direction;
       const minW = 200, minH = 120;
       let w = rs.origW, h = rs.origH;
+      let left = rs.origLeft, top = rs.origTop;
       if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
       if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
-      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
-      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      if (dir.includes('w')) {
+        w = Math.max(minW, rs.origW - dx);
+        left = rs.origLeft + (rs.origW - w);
+      }
+      if (dir === 'n' || dir.includes('n')) {
+        h = Math.max(minH, rs.origH - dy);
+        top = rs.origTop + (rs.origH - h);
+      }
       if (rs.isElectronWindow) {
+        if (left !== rs.origLeft || top !== rs.origTop) {
+          this._electronMoveWindow(rs.surfaceId, Math.round(left), Math.round(top));
+        }
         this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
       } else if (rs.ghostEl) {
         if (rs.winEl) {
+          rs.winEl.style.left = left + 'px';
+          rs.winEl.style.top = top + 'px';
           rs.winEl.style.width = w + 'px';
           rs.winEl.style.height = h + 'px';
         }
+        rs.ghostEl.style.left   = left + 'px';
+        rs.ghostEl.style.top    = top + 'px';
         rs.ghostEl.style.width  = w + 'px';
         rs.ghostEl.style.height = h + 'px';
         rs.ghostEl.dataset.resizeDirection = dir;
@@ -14239,15 +14253,36 @@ class SimpleWindowManager {
       const dir = rs.direction;
       const minW = 200, minH = 120;
       let w = rs.origW, h = rs.origH;
+      let left = rs.origLeft, top = rs.origTop;
       if (dir.includes('e')) w = Math.max(minW, rs.origW + dx);
       if (dir.includes('s')) h = Math.max(minH, rs.origH + dy);
-      if (dir.includes('w')) w = Math.max(minW, rs.origW - dx);
-      if (dir === 'n' || dir.includes('n')) h = Math.max(minH, rs.origH - dy);
+      if (dir.includes('w')) {
+        w = Math.max(minW, rs.origW - dx);
+        left = rs.origLeft + (rs.origW - w);
+      }
+      if (dir === 'n' || dir.includes('n')) {
+        h = Math.max(minH, rs.origH - dy);
+        top = rs.origTop + (rs.origH - h);
+      }
+      const moved = left !== rs.origLeft || top !== rs.origTop;
       if (this.transport === 'electron-ipc' && this._electronWindows.has(rs.surfaceId)) {
+        if (moved) this._electronMoveWindow(rs.surfaceId, Math.round(left), Math.round(top));
         this._electronResizeWindow(rs.surfaceId, Math.round(w), Math.round(h));
       } else if (rs.winEl) {
+        if (moved) {
+          rs.winEl.style.left = Math.round(left) + 'px';
+          rs.winEl.style.top = Math.round(top) + 'px';
+        }
         rs.winEl.style.width = Math.round(w) + 'px';
         rs.winEl.style.height = Math.round(h) + 'px';
+      }
+      if (moved) {
+        this._sendWindowCmd('move', {
+          window_id_hint: rs.surfaceId,
+          ...(rs.isElectronWindow ? { source: HOST_NATIVE_EVENT_SOURCE } : {}),
+          x: Math.round(left),
+          y: Math.round(top)
+        });
       }
       this._sendWindowCmd('resize', {
         window_id_hint: rs.surfaceId,

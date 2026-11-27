@@ -15,6 +15,7 @@ Audience: compiler engineers maintaining the per-file driver.
 # @tag: unit, compiler, driver
 
 use std.spec.*
+use std.io_runtime.{file_read}
 use compiler.driver.driver_tldr_import_route_v1.{tldr_route_import_specs_v1}
 use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_relative_module_id_v1}
 
@@ -84,6 +85,33 @@ describe "TLDR route import scan":
         expect(specs[0].1).to_equal(["env_get", "env_set"])
         expect(specs[1].0).to_equal(".paths")
         expect(specs[1].1).to_equal(["split_path"])
+
+    it "follows braced qualified re-exports `export pkg.{a, b}`":
+        # bug file_worker_closure_incomplete_braced_qualified_export_2026-11-27:
+        # src/lib/common/diagnostics/__init__.spl spells its facade this way.
+        val specs = tldr_route_import_specs_v1("export severity.Severity\n" + 'export diagnostic_v1.{DiagnosticV1, LabelV1 as L}' + "\n" + 'export pkg.sub.{x}' + "\n", true)
+        expect(specs.len()).to_equal(4)
+        expect(specs[0].0).to_equal(".severity")
+        expect(specs[1].0).to_equal(".diagnostic_v1")
+        expect(specs[1].1).to_equal(["DiagnosticV1", "LabelV1"])
+        expect(specs[2].0).to_equal(".pkg.sub")
+        expect(specs[3].0).to_equal("pkg.sub")
+
+    it "follows multi-line braced qualified re-exports":
+        val specs = tldr_route_import_specs_v1('export types.{' + "\n    A,  # note\n    B\n" + '}' + "\n" + 'export collector.{C}' + "\nuse std.z\n", true)
+        expect(specs.len()).to_equal(3)
+        expect(specs[0].0).to_equal(".types")
+        expect(specs[0].1).to_equal(["A", "B"])
+        expect(specs[1].0).to_equal(".collector")
+        expect(specs[2].0).to_equal("std.z")
+
+    it "plans every sibling of the real std.common.diagnostics facade":
+        val bases = trse_bases(file_read("src/lib/common/diagnostics/__init__.spl"))
+        for sibling in ["severity", "span", "diagnostic_v1", "diagnostic_batch", "source_position", "fix_ranking", "fix_transaction"]:
+            expect(bases.contains("." + sibling)).to_equal(true)
+
+    it "keeps braced qualified exports out of frozen-route callers":
+        expect(tldr_route_import_specs_v1('export diagnostic_v1.{DiagnosticV1}').len()).to_equal(0)
 
     it "keeps qualified exports out of frozen-route callers":
         expect(tldr_route_import_specs_v1("export variables.env_get\n").len()).to_equal(0)

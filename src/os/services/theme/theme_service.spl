@@ -5,7 +5,12 @@
 # Supports loading tokens from SDN snapshots.
 
 use common.ui.glass.tokens.{GlassDesignTokens}
-use nogc_sync_mut.ui.theme_package.{default_theme_id, load_theme_package, theme_design_tokens}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.generated.fluid_dark_theme_snapshot.{fluid_dark_theme_render_snapshot}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, ThemeRoleColor, theme_role_color}
+use common.ui.wm_chrome_theme.{apply_theme_render_snapshot_to_wm_chrome}
+use nogc_sync_mut.ui.theme_package.{default_theme_id, resolve_theme_alias, theme_design_tokens, theme_package_render_snapshot}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -21,19 +26,26 @@ class ThemeService:
     subscribers: [u64] # List of IPC ports to notify
 
     static fn new() -> ThemeService:
-        val pkg = load_theme_package(default_theme_id())
+        val resolved_id = resolve_theme_alias(default_theme_id())
+        val resolved_tokens = theme_design_tokens(resolved_id)
         ThemeService(
-            active_theme_name: pkg.id,
-            current_tokens: pkg.tokens,
+            active_theme_name: resolved_id,
+            current_tokens: resolved_tokens,
             subscribers: []
         )
 
+    me _apply_theme_id(target_id: text):
+        val canonical = resolve_theme_alias(target_id)
+        self.active_theme_name = if canonical != "": canonical else: resolve_theme_alias(default_theme_id())
+        self.current_tokens = theme_design_tokens(self.active_theme_name)
+        val snap = self.current_snapshot()
+        if snap.id != "":
+            apply_theme_render_snapshot_to_wm_chrome(snap)
+        self._notify_all()
+
     me set_theme(name: text):
         """Update the active theme and notify all subscribers."""
-        self.active_theme_name = name
-        self.current_tokens = theme_design_tokens(name)
-        
-        self._notify_all()
+        self._apply_theme_id(name)
 
     me load_theme_file(path: text):
         """Load the default folder-based theme package.
@@ -41,17 +53,11 @@ class ThemeService:
         The path argument is accepted for compatibility; config/themes/theme.sdn
         is now the source of truth.
         """
-        val pkg = load_theme_package(default_theme_id())
-        self.active_theme_name = pkg.id
-        self.current_tokens = pkg.tokens
-        self._notify_all()
+        self._apply_theme_id(default_theme_id())
 
     me load_theme(name: text):
         """Load a theme id or compatibility alias from config/themes/theme.sdn."""
-        val pkg = load_theme_package(name)
-        self.active_theme_name = pkg.id
-        self.current_tokens = pkg.tokens
-        self._notify_all()
+        self._apply_theme_id(name)
 
     me subscribe(port: u64):
         """Register an IPC port to receive theme change notifications."""
@@ -67,10 +73,27 @@ class ThemeService:
     me get_tokens() -> GlassDesignTokens:
         return self.current_tokens
 
+    fn current_snapshot() -> ThemeRenderSnapshot:
+        """Return the active theme's materialized render snapshot."""
+        val canonical = resolve_theme_alias(self.active_theme_name)
+        if canonical == "fluid_light":
+            return fluid_light_theme_render_snapshot()
+        if canonical == "fluid_dark":
+            return fluid_dark_theme_render_snapshot()
+        if canonical == "aetheric_dark":
+            return aetheric_dark_theme_render_snapshot()
+        theme_package_render_snapshot(self.active_theme_name)
+
+    fn role_color(role: text) -> ThemeRoleColor:
+        """Resolve a semantic theme role color from the active theme snapshot."""
+        theme_role_color(self.current_snapshot(), role)
+
 # Global instance for the kernel/compositor process
 var g_theme_service: ThemeService? = nil
 
 fn get_theme_service() -> ThemeService:
-    if g_theme_service == nil:
-        g_theme_service = ThemeService.new()
-    return g_theme_service
+    if val Some(existing) = g_theme_service:
+        return existing
+    val created = ThemeService.new()
+    g_theme_service = Some(created)
+    created

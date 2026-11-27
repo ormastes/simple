@@ -128,18 +128,56 @@ fn _wm_theme_strip_css_comments(css: text) -> text:
         rest = after.substring(end + 2, after.byte_len())
     out
 
+fn _wm_theme_resolve_var(css: text, raw: text) -> text:
+    var current = raw.trim()
+    var depth = 0
+    while depth < 4:
+        depth = depth + 1
+        if not current.starts_with("var("):
+            return current
+        val tail = current.substring(4, current.byte_len())
+        val close = tail.index_of(")")
+        if close < 0:
+            return current
+        val inner = tail.substring(0, close).trim()
+        val comma = inner.index_of(",")
+        val ref_prop = if comma >= 0: inner.substring(0, comma).trim() else: inner
+        val fallback = if comma >= 0: inner.substring(comma + 1, inner.byte_len()).trim() else: ""
+        if not ref_prop.starts_with("--"):
+            return if fallback != "": fallback else: current
+        val looked = _wm_theme_css_value(css, ref_prop)
+        if looked == "":
+            if fallback != "":
+                current = fallback
+            else:
+                return ""
+        else:
+            current = looked
+    current
+
+fn _wm_theme_first_resolved(css: text, props: [text]) -> text:
+    var i = 0
+    while i < props.len():
+        val raw = _wm_theme_css_value(css, props[i])
+        if raw != "":
+            val resolved = _wm_theme_resolve_var(css, raw)
+            if resolved != "":
+                return resolved
+        i = i + 1
+    ""
+
 fn wm_theme_tokens_from_css(css: text) -> WmThemeCssTokens:
-    """Scan raw CSS text for the 6 --wm-* custom properties. Absent/garbage
-    tokens come back as "" — callers (wm_chrome_colors_from_gui_tokens) fall
-    back to the default color for that slot."""
+    """Scan raw CSS text for --wm-* custom properties, falling back to CSS
+    Liquid / SimpleTheme custom properties (--app-*, --ui-*, --glass-*).
+    Absent/garbage tokens come back as "" so callers keep default slots."""
     val clean = _wm_theme_strip_css_comments(css)
     WmThemeCssTokens(
-        wtc_bg: _wm_theme_css_value(clean, "--wm-bg"),
-        wtc_fg: _wm_theme_css_value(clean, "--wm-fg"),
-        wtc_accent: _wm_theme_css_value(clean, "--wm-accent"),
-        wtc_surface: _wm_theme_css_value(clean, "--wm-surface"),
-        wtc_surface_hover: _wm_theme_css_value(clean, "--wm-surface-hover"),
-        wtc_error: _wm_theme_css_value(clean, "--wm-error")
+        wtc_bg: _wm_theme_first_resolved(clean, ["--wm-bg", "--app-bg", "--ui-bg"]),
+        wtc_fg: _wm_theme_first_resolved(clean, ["--wm-fg", "--ui-fg"]),
+        wtc_accent: _wm_theme_first_resolved(clean, ["--wm-accent", "--ui-accent", "--glass-accent"]),
+        wtc_surface: _wm_theme_first_resolved(clean, ["--wm-surface", "--glass-surface", "--app-surface"]),
+        wtc_surface_hover: _wm_theme_first_resolved(clean, ["--wm-surface-hover", "--app-surface-hover", "--app-surface-elevated"]),
+        wtc_error: _wm_theme_first_resolved(clean, ["--wm-error", "--ui-traffic-close", "--ui-error"])
     )
 
 fn _wm_ascii_lower_byte(b: u8) -> u8:
