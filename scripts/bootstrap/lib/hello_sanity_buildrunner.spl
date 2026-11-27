@@ -1,0 +1,532 @@
+# Pure decisions of the Hello BuildRunner adapter (pure-Simple twin of
+# scripts/bootstrap/hello-sanity-buildrunner.py). Missing providers are never passes.
+#
+# Phase 2 keeps running the Python adapter; phase 3 and later run this twin.
+# Everything here is deterministic over its inputs (no process, no clock) so the
+# parity spec can pin the Python verdicts and reason strings byte for byte:
+#   test/01_unit/scripts/hello_sanity_buildrunner_twin_spec.spl
+# The I/O half (staging, manager dispatch, bundle extraction) is
+# scripts/bootstrap/lib/hello_sanity_buildrunner_lane.spl.
+#
+# Parity contract (identical inputs => identical outputs):
+#   * every verifier verdict and every ValueError reason text below equals the
+#     Python adapter's, and the lane record keeps the Python key order;
+#   * the record key `python_sha256` becomes `producer_sha256`: the trust anchor
+#     is the running verified stage binary, not a Python interpreter;
+#   * SDN evidence values accept the forms the matrix `sdn()` writer emits
+#     (double-quoted string with \\ \" \n escapes, decimal integer, bare
+#     true/false). Python's ast.literal_eval also accepts other literals
+#     (single quotes, floats, lists); the twin rejects them as malformed. No
+#     writer in the tree produces them.
+
+use std.common.char_from_code_pure.{char_from_code}
+use std.common.text_bytes.{text_to_bytes, text_bytes_concat_checked}
+
+# Process observation V4 wall-budget ceiling (3600 s, every host).
+val V4_MAX_WALL_SECONDS = 3600
+val MEMORY_POLICY_ENFORCE = "enforce"
+val MEMORY_POLICY_MONITOR = "monitor"
+# Matrix.run records each command's status at <lane>/<command>.sdn, so the job
+# manifest must not be named after a lane command (see the Python adapter).
+val LANE_COMMAND_MANIFEST = "manifest"
+val LANE_COMMAND_MANAGER_RUN = "manager-run"
+val LANE_COMMAND_MANAGER_VERIFY = "manager-verify"
+val JOB_MANIFEST = "job-manifest.sdn"
+val MONITOR_VERDICT = "functional-only BuildRunner hello (monitor policy; memory qualification deferred)"
+val LANE_IDENTITY_FORMAT = "hello-buildrunner-lane-v1"
+val BUNDLE_MAX_MEMBERS = 128
+val BUNDLE_MAX_BYTES = 134217728
+
+# One SDN value with its literal kind kept: "str", "int" or "bool". Python
+# compares `"2" != 2`, so the kind is part of equality.
+struct SdnField:
+    key: text
+    kind: text
+    value: text
+
+pub fn sdn_str(key: text, value: text) -> SdnField:
+    SdnField(key: key, kind: "str", value: value)
+
+pub fn sdn_int(key: text, value: i64) -> SdnField:
+    SdnField(key: key, kind: "int", value: "{value}")
+
+pub fn sdn_bool(key: text, value: bool) -> SdnField:
+    SdnField(key: key, kind: "bool", value: if value: "true" else: "false")
+
+pub fn hello_forms() -> [text]:
+    ["one-source", "two-objects", "static-library", "shared-library"]
+
+pub fn runtime_external_headers() -> [text]:
+    ["src/compiler/70.backend/backend_plugin/abi/simple_backend_plugin_v1.h",
+     "tools/counterpart/sdk/c/simple_counterpart_abi.h"]
+
+pub fn task_budget_seconds(command_timeout_seconds: i64) -> i64:
+    """Whole-task bound for up to eight sequential commands, within the V4 cap."""
+    val wanted = command_timeout_seconds * 8 + 30
+    if wanted < V4_MAX_WALL_SECONDS: wanted else: V4_MAX_WALL_SECONDS
+
+pub fn lane_status(policy: text) -> Result<text, text>:
+    """Only enforce evidence may carry the qualified PASS marker."""
+    if policy == MEMORY_POLICY_ENFORCE: return Ok("PASS")
+    if policy == MEMORY_POLICY_MONITOR: return Ok("FUNCTIONAL")
+    Err("unknown memory policy")
+
+# ---------------------------------------------------------------------------
+# Character classes (the Python adapter's re.fullmatch patterns)
+# ---------------------------------------------------------------------------
+
+fn is_digit(c: text) -> bool:
+    c >= "0" and c <= "9"
+
+fn is_alnum(c: text) -> bool:
+    is_digit(c) or (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+
+pub fn is_positive_decimal(s: text) -> bool:
+    """[1-9][0-9]*"""
+    if s.len() == 0 or s.char_at(0) == "0": return false
+    for i in 0..s.len():
+        if not is_digit(s.char_at(i)): return false
+    true
+
+pub fn is_nonnegative_decimal(s: text) -> bool:
+    """0|[1-9][0-9]*"""
+    s == "0" or is_positive_decimal(s)
+
+pub fn is_hex64(s: text) -> bool:
+    """[0-9a-f]{64}"""
+    if s.len() != 64: return false
+    for i in 0..s.len():
+        val c = s.char_at(i)
+        if not (is_digit(c) or (c >= "a" and c <= "f")): return false
+    true
+
+pub fn is_host_token(s: text) -> bool:
+    """[A-Za-z0-9_-]+"""
+    if s.len() == 0: return false
+    for i in 0..s.len():
+        val c = s.char_at(i)
+        if not (is_alnum(c) or c == "_" or c == "-"): return false
+    true
+
+pub fn is_bundle_member_name(s: text) -> bool:
+    """[A-Za-z0-9_.-]+ and not . or .."""
+    if s.len() == 0 or s == "." or s == "..": return false
+    for i in 0..s.len():
+        val c = s.char_at(i)
+        if not (is_alnum(c) or c == "_" or c == "." or c == "-"): return false
+    true
+
+fn split_lines(content: text) -> [text]:
+    """Python str.splitlines() for \n and \r\n content."""
+    var lines: [text] = []
+    var current = ""
+    var i = 0
+    while i < content.len():
+        val c = content.char_at(i)
+        if c == "\n":
+            lines.push(current)
+            current = ""
+        elif c == "\r":
+            lines.push(current)
+            current = ""
+            if i + 1 < content.len() and content.char_at(i + 1) == "\n":
+                i = i + 1
+        else:
+            current = current + c
+        i = i + 1
+    if current.len() > 0:
+        lines.push(current)
+    lines
+
+# ---------------------------------------------------------------------------
+# Native-host target admission
+# ---------------------------------------------------------------------------
+
+pub fn normalize_architecture(machine: text) -> text:
+    val m = machine.lower()
+    if m == "arm64" or m == "aarch64": return "aarch64"
+    if m == "amd64" or m == "x86_64": return "x86_64"
+    m
+
+pub fn host_family(os_name: text) -> text:
+    """windows / darwin / linux, like the Python os.name + sys.platform split."""
+    if os_name == "windows": return "windows"
+    if os_name == "macos" or os_name == "darwin": return "darwin"
+    "linux"
+
+pub fn target_matches_host(target: text, machine: text, os_name: text, windows_abi: text) -> bool:
+    """A cross target must not be silently relabeled as native-host evidence."""
+    val architecture = normalize_architecture(machine)
+    val family = host_family(os_name)
+    var suffixes: [text] = ["linux", "linux-gnu", "unknown-linux-gnu"]
+    if family == "darwin":
+        suffixes = ["darwin", "apple-darwin", "macos"]
+    elif family == "windows":
+        suffixes = if windows_abi == "msvc": ["windows", "pc-windows-msvc"] else: ["windows-gnu", "pc-windows-gnu"]
+    for suffix in suffixes:
+        if target == architecture + "-" + suffix: return true
+    false
+
+# ---------------------------------------------------------------------------
+# Manager result receipt + worker memory receipt
+# ---------------------------------------------------------------------------
+
+struct ResultOwner:
+    attempt: text
+    identity: text
+    host: text
+
+pub fn verify_result_receipt(content: text, output: text, artifact_sha256: text) -> Result<ResultOwner, text>:
+    """Bind the manager's 13-line result receipt to the published executable."""
+    val lines = split_lines(content)
+    if lines.len() != 13 or lines[0] != "SIMPLE-BUILD-RESULT-1" or lines[1] != "hello":
+        return Err("invalid BuildRunner result receipt")
+    val attempt = lines[2]
+    val identity = lines[3]
+    val host = lines[4]
+    if not is_positive_decimal(attempt) or not is_hex64(identity):
+        return Err("invalid result identity")
+    if not is_host_token(host) or lines[5] != "OK" or lines[6] != "0":
+        return Err("invalid result owner or status")
+    if lines[10] != "1" or lines[11] != output or lines[12] != artifact_sha256:
+        return Err("result does not bind the published executable")
+    Ok(ResultOwner(attempt: attempt, identity: identity, host: host))
+
+pub fn memory_receipt_relative(owner: ResultOwner) -> text:
+    "attempts/hello/" + owner.attempt + "/" + owner.host + "/compiler.memory"
+
+struct KeyValue:
+    key: text
+    value: text
+
+fn kv_get(fields: [KeyValue], key: text) -> text?:
+    for f in fields:
+        if f.key == key: return Some(f.value)
+    None
+
+fn kv_has(fields: [KeyValue], key: text) -> bool:
+    # Not kv_get(...).?  -- `.?` treats Some("") as absent, and an empty value is a present key.
+    for f in fields:
+        if f.key == key: return true
+    false
+
+fn kv_text(fields: [KeyValue], key: text) -> text:
+    kv_get(fields, key) ?? ""
+
+fn memory_receipt_keys() -> [text]:
+    ["format", "task_identity", "requested_policy", "reserved_bytes",
+     "enforcement", "enforced_bytes", "observed_peak_bytes", "peak_metric"]
+
+pub fn verify_memory_receipt(content: text, identity: text, limit: i64, policy: text) -> Result<(), text>:
+    """policy enforce requires kernel-enforced memory; monitor is functional-only."""
+    if policy != MEMORY_POLICY_ENFORCE and policy != MEMORY_POLICY_MONITOR:
+        return Err("unknown memory policy")
+    var fields: [KeyValue] = []
+    for line in split_lines(content):
+        val at = line.index_of("=") ?? -1
+        if at < 0: return Err("malformed worker memory receipt")
+        val key = line.substring(0, at)
+        if kv_has(fields, key): return Err("duplicate worker memory receipt field")
+        fields.push(KeyValue(key: key, value: line.substring(at + 1, line.len())))
+    var exact = fields.len() == memory_receipt_keys().len()
+    for key in memory_receipt_keys():
+        if not kv_has(fields, key): exact = false
+    if not exact or kv_text(fields, "format") != "simple-build-memory-v1" or kv_text(fields, "task_identity") != identity:
+        return Err("memory receipt identity or format mismatch")
+    val requested = kv_text(fields, "requested_policy")
+    val enforcement = kv_text(fields, "enforcement")
+    val metric = kv_text(fields, "peak_metric")
+    if policy == MEMORY_POLICY_MONITOR:
+        if requested == MEMORY_POLICY_ENFORCE or enforcement != "none" or kv_text(fields, "enforced_bytes") != "0":
+            return Err("monitor receipt claims enforcement it did not request")
+        if requested != MEMORY_POLICY_MONITOR or kv_text(fields, "reserved_bytes") != "{limit}":
+            return Err("worker did not prove the requested memory monitoring")
+        if metric != "process-tree-peak" and metric != "child-rss-peak":
+            return Err("monitor receipt peak metric is not monitor-only")
+        if not is_nonnegative_decimal(kv_text(fields, "observed_peak_bytes")):
+            return Err("invalid worker memory peak")
+        return Ok(())
+    val bound_metric = if enforcement == "job-memory": "job-commit-peak" elif enforcement == "cgroup-memory-max": "cgroup-memory-peak" else: ""
+    if requested != MEMORY_POLICY_ENFORCE or kv_text(fields, "reserved_bytes") != "{limit}" or kv_text(fields, "enforced_bytes") != "{limit}" or bound_metric == "" or bound_metric != metric:
+        return Err("worker did not prove the requested memory enforcement")
+    if not is_nonnegative_decimal(kv_text(fields, "observed_peak_bytes")):
+        return Err("invalid worker memory peak")
+    Ok(())
+
+# ---------------------------------------------------------------------------
+# SDN evidence records (managed-lane.sdn / result.sdn)
+# ---------------------------------------------------------------------------
+
+fn unquote_sdn(raw: text) -> text?:
+    """Decode a double-quoted literal with \\ \" \n escapes; None when malformed."""
+    if raw.len() < 2 or raw.char_at(0) != "\"" or raw.char_at(raw.len() - 1) != "\"": return None
+    var out = ""
+    var i = 1
+    while i < raw.len() - 1:
+        val c = raw.char_at(i)
+        if c == "\"": return None
+        if c == "\\":
+            if i + 1 >= raw.len() - 1: return None
+            val n = raw.char_at(i + 1)
+            if n == "\\": out = out + "\\"
+            elif n == "\"": out = out + "\""
+            elif n == "n": out = out + "\n"
+            else: return None
+            i = i + 2
+        else:
+            out = out + c
+            i = i + 1
+    Some(out)
+
+fn is_sdn_integer(raw: text) -> bool:
+    if raw.len() == 0: return false
+    val body = if raw.char_at(0) == "-": raw.substring(1, raw.len()) else: raw
+    if body.len() == 0: return false
+    if body.len() > 1 and body.char_at(0) == "0": return false
+    for i in 0..body.len():
+        if not is_digit(body.char_at(i)): return false
+    true
+
+pub fn parse_sdn_record(content: text) -> Result<[SdnField], text>:
+    var fields: [SdnField] = []
+    for line in split_lines(content):
+        val at = line.index_of(": ") ?? -1
+        if at < 0: return Err("malformed worker evidence record")
+        val key = line.substring(0, at)
+        for f in fields:
+            if f.key == key: return Err("duplicate worker evidence field")
+        val raw = line.substring(at + 2, line.len())
+        if raw == "true" or raw == "false":
+            # The Python reader keeps bare booleans as their text.
+            fields.push(sdn_str(key, raw))
+        elif is_sdn_integer(raw):
+            fields.push(SdnField(key: key, kind: "int", value: raw))
+        else:
+            val decoded = unquote_sdn(raw)
+            if not decoded.?: return Err("malformed worker evidence record")
+            fields.push(sdn_str(key, decoded ?? ""))
+    Ok(fields)
+
+fn field_get(fields: [SdnField], key: text) -> SdnField?:
+    for f in fields:
+        if f.key == key: return Some(f)
+    None
+
+fn same_value(a: SdnField, b: SdnField) -> bool:
+    a.kind == b.kind and a.value == b.value
+
+pub fn records_equal(a: [SdnField], b: [SdnField]) -> bool:
+    """Dict equality: same key set, same typed values, order ignored."""
+    if a.len() != b.len(): return false
+    for f in a:
+        val other = field_get(b, f.key)
+        if not other.?: return false
+        if not same_value(f, other.unwrap()): return false
+    true
+
+pub fn record_field_is(fields: [SdnField], key: text, expected: SdnField) -> bool:
+    val got = field_get(fields, key)
+    if not got.?: return false
+    same_value(got.unwrap(), expected)
+
+pub fn record_text(fields: [SdnField], key: text) -> text:
+    """result.get(key) compared with a str: only a str value can match."""
+    val got = field_get(fields, key)
+    if not got.?: return ""
+    val f = got.unwrap()
+    if f.kind != "str": return ""
+    f.value
+
+pub fn expected_lane_identity(lane: text, backend: text, phase: i64, compile_route: text, compiler_sha256: text) -> [SdnField]:
+    [sdn_str("format", LANE_IDENTITY_FORMAT), sdn_str("lane", lane), sdn_str("backend", backend),
+     sdn_int("phase", phase), sdn_str("compile_route", compile_route),
+     sdn_str("compiler_sha256", compiler_sha256), sdn_str("status", "PASS"), sdn_str("admitted", "false")]
+
+pub fn verify_lane_records(identity: [SdnField], result: [SdnField], expected: [SdnField]) -> Result<(), text>:
+    if not records_equal(identity, expected):
+        return Err("managed lane identity mismatch")
+    if not record_field_is(result, "status", sdn_str("status", "PASS")):
+        return Err("managed lane did not pass with exact producer")
+    for key in ["phase", "compiler_sha256", "compile_route"]:
+        val want = field_get(expected, key)
+        if not want.? or not record_field_is(result, key, want.unwrap()):
+            return Err("managed lane did not pass with exact producer")
+    Ok(())
+
+fn quote_sdn(value: text) -> text:
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
+
+pub fn sdn_record_text(fields: [SdnField]) -> text:
+    """The matrix `sdn()` writer's exact bytes for one record."""
+    var out = ""
+    for f in fields:
+        val rendered = if f.kind == "str": quote_sdn(f.value) else: f.value
+        out = out + f.key + ": " + rendered + "\n"
+    out
+
+# ---------------------------------------------------------------------------
+# Result bundle (zip) central directory
+# ---------------------------------------------------------------------------
+
+struct BundleMember:
+    name: text
+    method: i64
+    comp_size: i64
+    file_size: i64
+    local_offset: i64
+    mode: i64
+
+fn le16(b: [u8], i: i64) -> i64:
+    b[i].to_i64() | (b[i + 1].to_i64() << 8)
+
+fn le32(b: [u8], i: i64) -> i64:
+    b[i].to_i64() | (b[i + 1].to_i64() << 8) | (b[i + 2].to_i64() << 16) | (b[i + 3].to_i64() << 24)
+
+fn ascii_of(b: [u8], start: i64, len: i64) -> text:
+    var out = ""
+    for i in start..(start + len):
+        out = out + char_from_code(b[i].to_i64())
+    out
+
+pub fn bundle_members(b: [u8]) -> Result<[BundleMember], text>:
+    """Parse the central directory; reason texts follow Python's zipfile."""
+    var eocd: i64 = -1
+    var i = b.len() - 22
+    while i >= 0 and eocd < 0:
+        if b[i].to_i64() == 0x50 and b[i + 1].to_i64() == 0x4b and b[i + 2].to_i64() == 0x05 and b[i + 3].to_i64() == 0x06:
+            eocd = i
+        i = i - 1
+    if eocd < 0: return Err("File is not a zip file")
+    val count = le16(b, eocd + 10)
+    var pos = le32(b, eocd + 16)
+    var members: [BundleMember] = []
+    for _n in 0..count:
+        if pos + 46 > b.len() or le32(b, pos) != 0x02014b50:
+            return Err("Bad magic number for central directory")
+        val name_len = le16(b, pos + 28)
+        if pos + 46 + name_len > b.len():
+            return Err("Bad magic number for central directory")
+        members.push(BundleMember(name: ascii_of(b, pos + 46, name_len), method: le16(b, pos + 10),
+            comp_size: le32(b, pos + 20), file_size: le32(b, pos + 24),
+            local_offset: le32(b, pos + 42), mode: le32(b, pos + 38) >> 16))
+        pos = pos + 46 + name_len + le16(b, pos + 30) + le16(b, pos + 32)
+    Ok(members)
+
+pub fn admit_bundle_members(members: [BundleMember]) -> Result<(), text>:
+    """Flat, bounded, regular-file members only — checked before any extraction."""
+    var total: i64 = 0
+    for m in members:
+        total = total + m.file_size
+    var unique = true
+    for a in 0..members.len():
+        for c in (a + 1)..members.len():
+            if members[a].name == members[c].name: unique = false
+    if not unique or members.len() > BUNDLE_MAX_MEMBERS:
+        return Err("ambiguous or oversized worker bundle")
+    if total > BUNDLE_MAX_BYTES:
+        return Err("worker bundle exceeds extraction budget")
+    for m in members:
+        val kind = m.mode & 0o170000
+        if not is_bundle_member_name(m.name) or m.name.ends_with("/") or (kind != 0 and kind != 0o100000):
+            return Err("unsafe worker bundle member")
+    Ok(())
+
+pub fn executable_name(os_name: text) -> text:
+    if os_name == "windows": "hello.exe" else: "hello"
+
+# ---------------------------------------------------------------------------
+# Result bundle writer (worker side)
+# ---------------------------------------------------------------------------
+
+fn ascii_bytes(s: text) -> [u8]:
+    text_to_bytes(s)
+
+# std.common.crypto.crc32.crc32 is module-private (and so is every std zip
+# writer built on it), so the bundle writer carries the IEEE table itself.
+fn crc32_table() -> [i64]:
+    var table: [i64] = []
+    for n in 0..256:
+        var c = n
+        for _k in 0..8:
+            c = if (c & 1) == 1: 0xEDB88320 ^ (c >> 1) else: c >> 1
+        table.push(c)
+    table
+
+val CRC32_TABLE = crc32_table()
+
+pub fn crc32_of(data: [u8]) -> i64:
+    var crc = 0xFFFFFFFF
+    for b in data:
+        crc = CRC32_TABLE[(crc ^ b.to_i64()) & 0xff] ^ (crc >> 8)
+    crc ^ 0xFFFFFFFF
+
+struct ZipInput:
+    name: text
+    data: [u8]
+    mode: i64
+
+fn push16(out: [u8], v: i64) -> [u8]:
+    var o = out
+    o.push((v & 0xff).to_u8())
+    o.push(((v >> 8) & 0xff).to_u8())
+    o
+
+fn push32(out: [u8], v: i64) -> [u8]:
+    var o = push16(out, v & 0xffff)
+    push16(o, (v >> 16) & 0xffff)
+
+fn push_all(out: [u8], data: [u8]) -> [u8]:
+    text_bytes_concat_checked(out, data) ?? out
+
+pub fn zip_stored(members: [ZipInput]) -> [u8]:
+    """Stored (method 0) zip; `mode` is the Unix mode carried in the external attributes."""
+    var out: [u8] = []
+    var offsets: [i64] = []
+    var crcs: [i64] = []
+    for m in members:
+        offsets.push(out.len())
+        val crc = crc32_of(m.data)
+        crcs.push(crc)
+        out = push32(out, 0x04034b50)
+        out = push16(out, 20)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push32(out, crc)
+        out = push32(out, m.data.len())
+        out = push32(out, m.data.len())
+        out = push16(out, m.name.len())
+        out = push16(out, 0)
+        out = push_all(out, ascii_bytes(m.name))
+        out = push_all(out, m.data)
+    val cd = out.len()
+    for i in 0..members.len():
+        val m = members[i]
+        out = push32(out, 0x02014b50)
+        out = push16(out, 0x031e)
+        out = push16(out, 20)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push32(out, crcs[i])
+        out = push32(out, m.data.len())
+        out = push32(out, m.data.len())
+        out = push16(out, m.name.len())
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push16(out, 0)
+        out = push32(out, m.mode << 16)
+        out = push32(out, offsets[i])
+        out = push_all(out, ascii_bytes(m.name))
+    val cd_size = out.len() - cd
+    out = push32(out, 0x06054b50)
+    out = push16(out, 0)
+    out = push16(out, 0)
+    out = push16(out, members.len())
+    out = push16(out, members.len())
+    out = push32(out, cd_size)
+    out = push32(out, cd)
+    push16(out, 0)

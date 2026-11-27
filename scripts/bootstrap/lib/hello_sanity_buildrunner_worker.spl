@@ -1,0 +1,202 @@
+# Worker half of the Hello BuildRunner adapter twin (pure-Simple port of
+# scripts/bootstrap/hello-sanity-buildrunner-worker.py). Runs one real linkage
+# lane inside a BuildRunner-owned process tree; the result bundle is a task
+# output and never substitutes for manager verification or the worker memory
+# receipt.
+#
+# The lane itself (compile, link, run Hello) belongs to the hello-sanity-matrix
+# twin. It is reached only through `ManagedLaneRunner`, which that twin
+# provides via `hello_matrix_managed_lane_runner(options)`; this module never
+# imports it, so the worker logic is testable with a fake runner.
+#
+# Exit codes equal the Python worker's: 0 bundle published, 1 lane did not pass
+# or an identity check failed, 2 usage error (argparse).
+
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_hash_sha256_or_empty, is_dir, list_dir, mkdir_p, process_run}
+use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_mode}
+use scripts.bootstrap.lib.hello_sanity_buildrunner.{SdnField, sdn_str, sdn_int, sdn_bool, hello_forms, is_hex64, sdn_record_text, LANE_IDENTITY_FORMAT, ZipInput, zip_stored}
+use std.nogc_sync_mut.sffi.file_bytes.{file_write_bytes_tagged_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.common.text_bytes.{text_to_bytes}
+# io_runtime.file_write{,_bytes} collide with the private file_ops twins
+# under the seed's same-signature co-compile (one body silently wins and the
+# private one is then refused), so the twin calls the shared native writer.
+fn write_bytes(path: text, data: [u8]) -> bool:
+    file_write_bytes_tagged_native(host_path_native(path), data)
+
+# file_ops.file_is_regular_no_follow is module-private outside src/app.
+extern fn rt_file_is_regular_no_follow(path: text) -> bool
+
+fn regular_no_follow(path: text) -> bool:
+    unsafe(capabilities: [ffi]):
+        rt_file_is_regular_no_follow(host_path_native(path))
+
+fn write_text(path: text, content: text) -> bool:
+    write_bytes(path, text_to_bytes(content))
+
+
+struct WorkerOptions:
+    trace_stages: bool
+    backend: text
+    lane: text
+    phase: i64
+    compile_route: text
+    compiler_sha256: text
+    producer_sha256: text
+    target: text
+    timeout_seconds: i64
+    max_rss_kib: i64
+    min_free_disk_bytes: i64
+    max_log_bytes: i64
+    linker: text
+    windows_abi: text
+    output: text
+    # Filled by the worker before the runner is built.
+    source_root: text
+    compiler: text
+    runtime_path: text
+    results: text
+    cache_root: text
+
+# What the worker needs from the matrix twin's Matrix object.
+#   lane(): run the managed lane; Ok("PASS") only when it passed and no child
+#           is left running (Python: result["status"] == "PASS" and not children)
+#   validate_identity(): Matrix.validate_identity
+#   runtime_unchanged(): runtime_identity(matrix.runtime) == matrix.runtime_hashes
+#   sha(): the matrix's compiler digest
+struct ManagedLaneRunner:
+    lane: fn() -> Result<text, text>
+    validate_identity: fn() -> Result<bool, text>
+    runtime_unchanged: fn() -> bool
+    sha: fn() -> text
+
+struct WorkerParse:
+    options: WorkerOptions?
+    error: text
+
+fn usage() -> text:
+    "usage: hello-sanity-buildrunner-worker.spl --backend llvm|cranelift --lane FORM --phase 2|3 --compile-route positional|coordinator --compiler-sha256 SHA --producer-sha256 SHA --target T --timeout-seconds N --max-rss-kib N --min-free-disk-bytes N --max-log-bytes N --linker L [--windows-abi msvc|gnu] --output PATH [--trace-stages]"
+
+fn parse_int(raw: text) -> i64?:
+    if raw.len() == 0: return None
+    val body = if raw.char_at(0) == "-": raw.substring(1, raw.len()) else: raw
+    if body.len() == 0: return None
+    for i in 0..body.len():
+        val c = body.char_at(i)
+        if c < "0" or c > "9": return None
+    Some(raw.to_i64())
+
+fn arg_value(args: [text], flag: text) -> text?:
+    var i = 0
+    var found: text? = None
+    while i < args.len():
+        if args[i] == flag and i + 1 < args.len():
+            found = Some(args[i + 1])
+            i = i + 2
+        else:
+            i = i + 1
+    found
+
+pub fn parse_worker_args(args: [text]) -> WorkerParse:
+    """argparse twin: unknown flags, missing required flags and bad choices are usage errors."""
+    val known: [text] = ["--backend", "--lane", "--phase", "--compile-route", "--compiler-sha256",
+        "--producer-sha256", "--target", "--timeout-seconds", "--max-rss-kib",
+        "--min-free-disk-bytes", "--max-log-bytes", "--linker", "--windows-abi", "--output"]
+    var trace = false
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--trace-stages":
+            trace = true
+            i = i + 1
+        elif known.contains(a):
+            if i + 1 >= args.len(): return WorkerParse(options: None, error: "argument " + a + ": expected one argument")
+            i = i + 2
+        else:
+            return WorkerParse(options: None, error: "unrecognized arguments: " + a)
+    for flag in known:
+        if flag != "--windows-abi" and not arg_value(args, flag).?:
+            return WorkerParse(options: None, error: "the following arguments are required: " + flag)
+    val backend = arg_value(args, "--backend") ?? ""
+    if backend != "llvm" and backend != "cranelift": return WorkerParse(options: None, error: "argument --backend: invalid choice: '" + backend + "'")
+    val lane = arg_value(args, "--lane") ?? ""
+    if not hello_forms().contains(lane): return WorkerParse(options: None, error: "argument --lane: invalid choice: '" + lane + "'")
+    val route = arg_value(args, "--compile-route") ?? ""
+    if route != "positional" and route != "coordinator": return WorkerParse(options: None, error: "argument --compile-route: invalid choice: '" + route + "'")
+    val abi = arg_value(args, "--windows-abi") ?? "msvc"
+    if abi != "msvc" and abi != "gnu": return WorkerParse(options: None, error: "argument --windows-abi: invalid choice: '" + abi + "'")
+    val phase = parse_int(arg_value(args, "--phase") ?? "")
+    if not phase.? or (phase.unwrap() != 2 and phase.unwrap() != 3):
+        return WorkerParse(options: None, error: "argument --phase: invalid choice")
+    var numbers: [i64] = []
+    for flag in ["--timeout-seconds", "--max-rss-kib", "--min-free-disk-bytes", "--max-log-bytes"]:
+        val n = parse_int(arg_value(args, flag) ?? "")
+        if not n.?: return WorkerParse(options: None, error: "argument " + flag + ": invalid int value")
+        numbers.push(n.unwrap())
+    WorkerParse(options: Some(WorkerOptions(trace_stages: trace, backend: backend, lane: lane,
+        phase: phase.unwrap(), compile_route: route,
+        compiler_sha256: arg_value(args, "--compiler-sha256") ?? "",
+        producer_sha256: arg_value(args, "--producer-sha256") ?? "",
+        target: arg_value(args, "--target") ?? "",
+        timeout_seconds: numbers[0], max_rss_kib: numbers[1],
+        min_free_disk_bytes: numbers[2], max_log_bytes: numbers[3],
+        linker: arg_value(args, "--linker") ?? "", windows_abi: abi,
+        output: arg_value(args, "--output") ?? "",
+        source_root: "", compiler: "", runtime_path: "", results: "", cache_root: "")), error: "")
+
+pub fn managed_lane_record(o: WorkerOptions, compiler_sha: text) -> [SdnField]:
+    [sdn_str("format", LANE_IDENTITY_FORMAT), sdn_str("lane", o.lane),
+     sdn_str("backend", o.backend), sdn_int("phase", o.phase),
+     sdn_str("compile_route", o.compile_route), sdn_str("compiler_sha256", compiler_sha),
+     sdn_str("status", "PASS"), sdn_bool("admitted", false)]
+
+pub fn prepare_worker(o: WorkerOptions, root: text, os_name: text, self_exe: text) -> Result<WorkerOptions, text>:
+    """Identity checks before any lane work; returns the options the runner gets."""
+    val compiler = root + "/" + (if os_name == "windows": "compiler.exe" else: "compiler")
+    if file_hash_sha256_or_empty(compiler) != o.compiler_sha256:
+        return Err("staged compiler identity mismatch")
+    # Trust anchor in place of the manager-pinned Python producer.
+    if not is_hex64(o.producer_sha256) or self_exe == "" or file_hash_sha256_or_empty(self_exe) != o.producer_sha256:
+        return Err("running stage binary does not match its pin")
+    if os_name != "windows":
+        process_run("chmod", ["u+x", compiler])
+    var prepared = o
+    prepared.source_root = root
+    prepared.compiler = compiler
+    prepared.runtime_path = root + "/runtime"
+    prepared.results = root + "/results"
+    prepared.cache_root = root + "/.builder-cache"
+    if directory_create_mode(prepared.results, 0o777) != 0:
+        return Err("[Errno 17] File exists: '" + prepared.results + "'")
+    for name in ["runtime", "hir", "frontend"]:
+        mkdir_p(prepared.cache_root + "/" + name)
+    Ok(prepared)
+
+pub fn worker_cache_env(o: WorkerOptions) -> [[text]]:
+    """Matrix base environment overrides (key, value)."""
+    [["SIMPLE_RT_OBJ_CACHE_DIR", o.cache_root + "/runtime"],
+     ["SIMPLE_HIR_CACHE_DIR", o.cache_root + "/hir"],
+     ["SIMPLE_FRONTEND_CACHE_DIR", o.cache_root + "/frontend"]]
+
+pub fn finish_worker(o: WorkerOptions, runner: ManagedLaneRunner, output_path: text) -> Result<i64, text>:
+    """Python main() after Matrix(options): 1 when the lane did not pass, else publish."""
+    val status = (runner.lane)()?
+    if status != "PASS": return Ok(1)
+    (runner.validate_identity)()?
+    if not (runner.runtime_unchanged)(): return Err("runtime changed during managed lane")
+    val lane = o.results + "/" + o.lane
+    if not write_text(lane + "/managed-lane.sdn", sdn_record_text(managed_lane_record(o, (runner.sha)()))):
+        return Err("cannot write managed lane identity")
+    # Only regular top-level products/evidence are exported (sorted by name).
+    var names: [text] = []
+    for entry in list_dir(lane):
+        val name = if entry.contains("/"): entry.substring((entry.last_index_of("/") ?? -1) + 1, entry.len()) else: entry
+        if regular_no_follow(lane + "/" + name): names.push(name)
+    names = names.sorted()
+    var members: [ZipInput] = []
+    for name in names:
+        members.push(ZipInput(name: name, data: file_read_bytes(lane + "/" + name), mode: 0o100644))
+    if file_exists(output_path): return Err("[Errno 17] File exists: '" + output_path + "'")
+    if not write_bytes(output_path, zip_stored(members)):
+        return Err("cannot write result bundle")
+    Ok(0)
