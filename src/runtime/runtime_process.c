@@ -993,7 +993,10 @@ static void win_piped_release_failed_spawn(struct WinPipedSlot* slot) {
     ReleaseSRWLockExclusive(&win_piped_lock);
 }
 
-static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const char* cmd, SplArray* args) {
+/* explicit_environment: borrowed private UTF-16 block (the caller frees it), or
+ * NULL for the established filtered ANSI inheritance. */
+static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const char* cmd, SplArray* args,
+        const wchar_t* explicit_environment) {
     const char** child_args = NULL;
     char* cmdline = NULL;
     char* environment = NULL;
@@ -1020,8 +1023,8 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
         }
     }
     cmdline = win_cmd_build_line(cmd, child_args, argc);
-    environment = win_filtered_environment();
-    if (!cmdline || !environment) goto fail;
+    if (!explicit_environment) environment = win_filtered_environment();
+    if (!cmdline || (!explicit_environment && !environment)) goto fail;
 
     SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
     char stdin_pipe_name[128];
@@ -1090,8 +1093,11 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
     startup.StartupInfo.hStdError = stdout_write;
     DWORD creation_flags =
         CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+    if (explicit_environment) creation_flags |= CREATE_UNICODE_ENVIRONMENT;
+    LPVOID environment_block = explicit_environment
+        ? (LPVOID)explicit_environment : (LPVOID)environment;
     if (!CreateProcessA(
-            NULL, cmdline, NULL, NULL, TRUE, creation_flags, environment, NULL,
+            NULL, cmdline, NULL, NULL, TRUE, creation_flags, environment_block, NULL,
             &startup.StartupInfo, &process)) {
         goto fail;
     }
@@ -1290,7 +1296,7 @@ static bool win_core_rt_process_close_piped(struct WinPipedSlot* slot) {
 int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     struct WinPipedSlot* slot = win_piped_reserve_spawn();
     if (!slot) return -1;
-    int64_t result = win_core_rt_process_spawn_piped(slot,cmd,args);
+    int64_t result = win_core_rt_process_spawn_piped(slot,cmd,args,NULL);
     if (result < 0) win_piped_release_failed_spawn(slot);
     return result;
 }
@@ -1299,7 +1305,7 @@ int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, S
     struct WinPipedSlot* slot = win_piped_reserve_spawn();
     if (!slot) return -1;
     uint64_t generation = slot->generation; /* closing reservation: cannot recycle */
-    int64_t pid = win_core_rt_process_spawn_piped(slot, cmd, args);
+    int64_t pid = win_core_rt_process_spawn_piped(slot, cmd, args, NULL);
     if (pid < 0) { win_piped_release_failed_spawn(slot); return -1; }
     return (int64_t)generation;
 }
@@ -1486,6 +1492,104 @@ void simple_piped_owner_observe_v1(int64_t pid, int64_t collect_exit,
         }
     }
     ReleaseSRWLockExclusive(&win_piped_lock);
+}
+
+/* ===== Explicit child environment + bounded readiness (Windows) ===== */
+/* _SIMPLE_STACK_SET is internal stack plumbing: never hand it to a child,
+ * matching win_filtered_environment. In place on a double-NUL UTF-16 block. */
+static void win_piped_strip_stack_env_v1(wchar_t* block) {
+    static const wchar_t hidden[] = L"_SIMPLE_STACK_SET=";
+    const size_t hidden_len = sizeof(hidden) / sizeof(wchar_t) - 1;
+    wchar_t* out = block;
+    for (const wchar_t* in = block; *in; ) {
+        size_t length = wcslen(in);
+        if (_wcsnicmp(in, hidden, hidden_len) != 0) {
+            if (out != in) memmove(out, in, (length + 1) * sizeof(wchar_t));
+            out += length + 1;
+        }
+        in += length + 1;
+    }
+    out[0] = 0;
+    if (out == block) out[1] = 0; /* every block holds at least two units */
+}
+int64_t simple_piped_owner_spawn_environment_v1(const char* cmd, SplArray* args,
+        SplArray* environment, int64_t mode) {
+    if (!cmd || !*cmd) return PIPED_ENV_INVALID_V1;
+    DWORD error = 0;
+    wchar_t* block = win_child_env_array_v1(environment, mode, &error);
+    if (!block) return error == ERROR_NOT_ENOUGH_MEMORY ? -1 : PIPED_ENV_INVALID_V1;
+    win_piped_strip_stack_env_v1(block);
+    struct WinPipedSlot* slot = win_piped_reserve_spawn();
+    int64_t pid = slot ? win_core_rt_process_spawn_piped(slot, cmd, args, block) : -1;
+    if (slot && pid < 0) win_piped_release_failed_spawn(slot);
+    free(block);
+    return pid;
+}
+static int64_t win_qpc_now_v1(void) {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return now.QuadPart;
+}
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+/* Anonymous pipes have no overlapped reads and no wait object for "data
+ * pending", so readiness is PeekNamedPipe sampled on a ~1 ms high-resolution
+ * timer against a QPC deadline. Never consumes bytes. ERROR_BROKEN_PIPE with
+ * nothing pending is EOF (grandchildren may hold the write end past the
+ * child's own exit, so process exit is not EOF). */
+static int64_t win_piped_wait_handle_v1(HANDLE pipe, int64_t timeout_ms) {
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    const int64_t deadline = win_qpc_now_v1() + timeout_ms * (frequency.QuadPart / 1000);
+    HANDLE timer = NULL;
+    int64_t result = PIPED_WAIT_OS_ERROR_V1;
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL)) {
+            result = GetLastError() == ERROR_BROKEN_PIPE ? PIPED_WAIT_READY_V1 : PIPED_WAIT_OS_ERROR_V1;
+            break;
+        }
+        if (available > 0) { result = PIPED_WAIT_READY_V1; break; }
+        int64_t remaining = deadline - win_qpc_now_v1();
+        if (remaining <= 0) { result = PIPED_WAIT_TIMEOUT_V1; break; }
+        if (remaining > frequency.QuadPart / 1000 + 1) remaining = frequency.QuadPart / 1000 + 1; /* clamp before scaling: no overflow */
+        int64_t slice_100ns = remaining * 10000000 / frequency.QuadPart;
+        if (slice_100ns > 10000) slice_100ns = 10000; /* 1 ms sampling */
+        if (!timer) timer = CreateWaitableTimerExW(NULL, NULL,
+            CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        LARGE_INTEGER due;
+        due.QuadPart = -(slice_100ns > 0 ? slice_100ns : 1);
+        if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+            (void)WaitForSingleObject(timer, INFINITE);
+        else
+            Sleep(1);
+    }
+    if (timer) CloseHandle(timer);
+    return result;
+}
+/* The slot lock is held only to validate and DuplicateHandle the stream; the
+ * wait runs on the private duplicate, so a concurrent close/read never blocks
+ * on it and cannot recycle the handle under it. */
+int64_t simple_piped_owner_wait_readable_v1(int64_t pid, int64_t stream, int64_t timeout_ms) {
+    if (pid <= 0 || pid > UINT32_MAX || (stream != PIPED_STREAM_STDOUT_V1 && stream != PIPED_STREAM_STDERR_V1) ||
+        timeout_ms < 0 || timeout_ms > PIPED_WAIT_MAX_MS_V1) return PIPED_WAIT_INVALID_V1;
+    int64_t early = 0;
+    HANDLE pipe = NULL;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (!slot || slot->closing) early = PIPED_WAIT_UNKNOWN_V1;
+    /* stderr shares the stdout pipe on this owner (hStdError = stdout_write). */
+    else if (stream == PIPED_STREAM_STDERR_V1) early = PIPED_WAIT_NOT_PIPED_V1;
+    else if (slot->stdout_state != 0) early = PIPED_WAIT_READY_V1;
+    else if (!slot->stdout_read) early = PIPED_WAIT_NOT_PIPED_V1;
+    else if (!DuplicateHandle(GetCurrentProcess(), slot->stdout_read, GetCurrentProcess(),
+            &pipe, 0, FALSE, DUPLICATE_SAME_ACCESS)) early = PIPED_WAIT_OS_ERROR_V1;
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    if (early != 0) return early;
+    int64_t result = win_piped_wait_handle_v1(pipe, timeout_ms);
+    CloseHandle(pipe);
+    return result;
 }
 
 #if !defined(SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1)
@@ -1914,7 +2018,7 @@ static bool proc_move_pipe_fds_above_stdio(int fds[2]) {
 }
 
 static pid_t proc_spawn_piped_apple(
-        const char* cmd, char** argv,
+        const char* cmd, char** argv, char* const* envp,
         const int stdin_pipe[2], const int stdout_pipe[2]) {
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
@@ -1963,7 +2067,7 @@ static pid_t proc_spawn_piped_apple(
 
     if (posix_spawnp(
             &pid, cmd, &actions, &attributes, argv,
-            *_NSGetEnviron()) != 0) {
+            envp ? (char**)envp : *_NSGetEnviron()) != 0) {
         pid = -1;
     }
 
@@ -2137,7 +2241,7 @@ static bool rt_hal_worker_contain_process_tree(void) {
 
 static int64_t proc_spawn_piped_argv_owned_v1(
         const char* cmd, char** argv, bool sandboxed_renderer,
-        int pinned_executable_fd, uint64_t* generation_out) {
+        int pinned_executable_fd, uint64_t* generation_out, char* const* envp) {
     if (!cmd || !*cmd) return -1;
 #ifndef __linux__
     if (sandboxed_renderer) return -1;
@@ -2207,7 +2311,7 @@ static int64_t proc_spawn_piped_argv_owned_v1(
 
 #ifdef __APPLE__
     pid_t pid = proc_spawn_piped_apple(
-        cmd, argv, stdin_pipe, stdout_pipe);
+        cmd, argv, envp, stdin_pipe, stdout_pipe);
 #else
     pid_t expected_parent = getpid();
     pid_t pid = fork();
@@ -2273,6 +2377,10 @@ static int64_t proc_spawn_piped_argv_owned_v1(
             if (!rt_hal_worker_contain_process_tree()) _exit(127);
             fexecve(pinned_executable_fd, argv, rt_hal_environment);
 #endif
+        } else if (envp) {
+            /* cmd was resolved against the PARENT PATH before fork; the
+             * explicit environment never redirects command lookup. */
+            execve(cmd, argv, (char**)envp);
         } else {
             execvp(cmd, argv);
         }
@@ -2321,7 +2429,7 @@ static int64_t proc_spawn_piped_argv_owned_v1(
 
 static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv,
         bool sandboxed_renderer, int pinned_executable_fd) {
-    return proc_spawn_piped_argv_owned_v1(cmd, argv, sandboxed_renderer, pinned_executable_fd, NULL);
+    return proc_spawn_piped_argv_owned_v1(cmd, argv, sandboxed_renderer, pinned_executable_fd, NULL, NULL);
 }
 
 /*
@@ -2351,9 +2459,187 @@ int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, S
     for (int64_t i = 0; i < count; i++) argv[i+1] = (char*)rt_string_data(rt_array_get(args, i));
     argv[count+1] = NULL;
     uint64_t generation = 0;
-    if (proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, &generation) <= 0) return -1;
+    if (proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, &generation, NULL) <= 0) return -1;
     return (int64_t)generation;
 }
+
+/* ===== Explicit child environment + bounded readiness (POSIX) =====
+ * Codes are shared with the Windows twin, the interpreter/JIT lane and the
+ * Rust piped observer: see PIPED_WAIT_*_V1 in runtime_process_observer_private.h. */
+extern char** environ;
+static int posix_child_env_key_cmp_v1(const char* a, const char* b) {
+    while (*a && *a != '=' && *a == *b) { a++; b++; }
+    unsigned char ca = (unsigned char)(*a == '=' ? 0 : *a);
+    unsigned char cb = (unsigned char)(*b == '=' ? 0 : *b);
+    return (int)ca - (int)cb;
+}
+static int posix_child_env_sort_v1(const void* a, const void* b) {
+    return posix_child_env_key_cmp_v1(*(const char* const*)a, *(const char* const*)b);
+}
+/* Parent-side, pre-fork envp. Only the pointer arrays are allocated: entries
+ * borrow the caller's immutable "KEY=VALUE" texts and the parent's environ
+ * strings, both alive until exec/posix_spawn returns. The child only calls
+ * execve. mode 0 overlays the parent environment (requested keys win), mode 1
+ * is an exact replacement. _SIMPLE_STACK_SET never reaches the child. Returns NULL
+ * with *error = EINVAL (bad mode/entry/duplicate key) or ENOMEM. */
+static char** posix_child_envp_v1(SplArray* environment, int64_t mode, int* error) {
+    *error = EINVAL;
+    int64_t count = environment ? rt_array_len(environment) : 0;
+    if ((mode != 0 && mode != 1) || count < 0 || count > PIPED_ENV_MAX_ENTRIES_V1) return NULL;
+    size_t inherited = 0;
+    if (mode == 0 && environ)
+        for (char** e = environ; *e && inherited <= PIPED_ENV_MAX_ENTRIES_V1; e++) inherited++;
+    if (inherited > PIPED_ENV_MAX_ENTRIES_V1) return NULL;
+    const char** requested = (const char**)calloc((size_t)count + 1, sizeof(char*));
+    char** envp = (char**)calloc((size_t)count + inherited + 1, sizeof(char*));
+    if (!requested || !envp) { free(requested); free(envp); *error = ENOMEM; return NULL; }
+    uint64_t bytes = 0;
+    for (int64_t i = 0; i < count; i++) {
+        int64_t text = rt_array_get(environment, i);
+        const char* data = (const char*)rt_string_data(text);
+        uint64_t length = rt_string_len(text);
+        const char* equals = data ? (const char*)memchr(data, '=', (size_t)length) : NULL;
+        if (!data || length == 0 || length > PIPED_ENV_MAX_BYTES_V1 - bytes ||
+            memchr(data, 0, (size_t)length) || !equals || equals == data) goto invalid;
+        bytes += length;
+        requested[i] = data;
+    }
+    qsort(requested, (size_t)count, sizeof(char*), posix_child_env_sort_v1);
+    for (int64_t i = 1; i < count; i++)
+        if (posix_child_env_key_cmp_v1(requested[i - 1], requested[i]) == 0) goto invalid;
+    size_t used = 0;
+    for (size_t i = 0; i < inherited; i++) {
+        char* entry = environ[i];
+        if (!strchr(entry, '=') || strncmp(entry, "_SIMPLE_STACK_SET=", 18) == 0) continue;
+        if (count && bsearch(&entry, requested, (size_t)count, sizeof(char*), posix_child_env_sort_v1)) continue;
+        envp[used++] = entry;
+    }
+    for (int64_t i = 0; i < count; i++)
+        if (strncmp(requested[i], "_SIMPLE_STACK_SET=", 18) != 0) envp[used++] = (char*)requested[i];
+    envp[used] = NULL;
+    free(requested);
+    *error = 0;
+    return envp;
+invalid:
+    free(requested); free(envp);
+    return NULL;
+}
+/* execvp-equivalent lookup against the PARENT PATH, done before fork so the
+ * child stays async-signal-safe and an explicit PATH override cannot retarget
+ * which program runs. */
+static bool posix_resolve_command_v1(const char* cmd, char* out, size_t capacity) {
+    size_t length = strlen(cmd);
+    if (strchr(cmd, '/')) {
+        if (length >= capacity) return false;
+        memcpy(out, cmd, length + 1);
+        return true;
+    }
+    const char* path = getenv("PATH");
+    if (!path || !*path) path = "/usr/bin:/bin";
+    for (const char* start = path;; ) {
+        const char* end = strchr(start, ':');
+        size_t dir = end ? (size_t)(end - start) : strlen(start);
+        int written = dir ? snprintf(out, capacity, "%.*s/%s", (int)dir, start, cmd)
+                          : snprintf(out, capacity, "./%s", cmd);
+        struct stat info;
+        if (written > 0 && (size_t)written < capacity && stat(out, &info) == 0 &&
+            S_ISREG(info.st_mode) && access(out, X_OK) == 0) return true;
+        if (!end) return false;
+        start = end + 1;
+    }
+}
+static char** posix_spawn_argv_v1(const char* cmd, SplArray* args) {
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0 || argc > 32768) return NULL;
+    char** argv = (char**)calloc((size_t)argc + 2, sizeof(char*));
+    if (!argv) return NULL;
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < argc; i++) {
+        const uint8_t* data = rt_string_data(rt_array_get(args, i));
+        argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
+    }
+    return argv;
+}
+int64_t simple_piped_owner_spawn_environment_v1(const char* cmd, SplArray* args,
+        SplArray* environment, int64_t mode) {
+    if (!cmd || !*cmd) return PIPED_ENV_INVALID_V1;
+    int error = 0;
+    char** envp = posix_child_envp_v1(environment, mode, &error);
+    if (!envp) return error == EINVAL ? PIPED_ENV_INVALID_V1 : -1;
+    char resolved[4096];
+    char** argv = posix_resolve_command_v1(cmd, resolved, sizeof(resolved))
+        ? posix_spawn_argv_v1(cmd, args) : NULL;
+    int64_t pid = argv
+        ? proc_spawn_piped_argv_owned_v1(resolved, argv, false, -1, NULL, envp) : -1;
+    free(argv);
+    free(envp);
+    return pid;
+}
+/* Async (non-piped) twin over the same envp policy. Children stay in the
+ * caller's group and are reaped by rt_process_wait, exactly like
+ * rt_process_spawn_async. */
+int64_t simple_process_spawn_async_environment_v1(const char* cmd, SplArray* args,
+        SplArray* environment, int64_t mode) {
+    if (!cmd || !*cmd) return PIPED_ENV_INVALID_V1;
+    int error = 0;
+    char** envp = posix_child_envp_v1(environment, mode, &error);
+    if (!envp) return error == EINVAL ? PIPED_ENV_INVALID_V1 : -1;
+    char resolved[4096];
+    char** argv = posix_resolve_command_v1(cmd, resolved, sizeof(resolved))
+        ? posix_spawn_argv_v1(cmd, args) : NULL;
+    pid_t pid = -1;
+    if (argv) {
+        fflush(stdout);
+        fflush(stderr);
+        if (posix_spawn(&pid, resolved, NULL, NULL, argv, envp) != 0) pid = -1;
+    }
+    free(argv);
+    free(envp);
+    return pid > 0 ? (int64_t)pid : -1;
+}
+static int64_t posix_monotonic_ms_v1(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+/* Readiness never holds s_proc_lock across the wait: the stream is dup()ed
+ * under the lock, polled on the private duplicate, then closed. A concurrent
+ * close cannot recycle the descriptor under us; EOF still follows the write
+ * ends, which the duplicate does not hold. */
+int64_t simple_piped_owner_wait_readable_v1(int64_t pid, int64_t stream, int64_t timeout_ms) {
+    if (pid <= 0 || pid > INT_MAX || (stream != PIPED_STREAM_STDOUT_V1 && stream != PIPED_STREAM_STDERR_V1) ||
+        timeout_ms < 0 || timeout_ms > PIPED_WAIT_MAX_MS_V1) return PIPED_WAIT_INVALID_V1;
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return PIPED_WAIT_OS_ERROR_V1;
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    int64_t early = 0;
+    int fd = -1;
+    if (!slot || slot->closing) early = PIPED_WAIT_UNKNOWN_V1;
+    else if (slot->stream_ticket) early = PIPED_WAIT_NOT_PIPED_V1; /* stream owned by a ticket holder */
+    else if (stream == PIPED_STREAM_STDERR_V1) early = PIPED_WAIT_NOT_PIPED_V1;
+    else if (slot->stdout_state != 0) early = PIPED_WAIT_READY_V1; /* EOF/error is observable now */
+    else if (slot->stdout_fd < 0) early = PIPED_WAIT_NOT_PIPED_V1;
+    else if ((fd = fcntl(slot->stdout_fd, F_DUPFD_CLOEXEC, 3)) < 0) early = PIPED_WAIT_OS_ERROR_V1;
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    if (early != 0) return early;
+    int64_t start = posix_monotonic_ms_v1();
+    int64_t result = PIPED_WAIT_OS_ERROR_V1;
+    for (;;) {
+        int64_t elapsed = start < 0 ? 0 : posix_monotonic_ms_v1() - start;
+        int64_t remaining = timeout_ms - (elapsed < 0 ? 0 : elapsed);
+        if (remaining < 0) remaining = 0;
+        struct pollfd item = {fd, POLLIN, 0};
+        int ready = poll(&item, 1, (int)remaining);
+        if (ready > 0) { result = PIPED_WAIT_READY_V1; break; } /* POLLIN/POLLHUP/POLLERR: read decides */
+        if (ready == 0) {
+            if (remaining == 0 || start < 0) { result = PIPED_WAIT_TIMEOUT_V1; break; }
+            continue; /* early wake: recompute against the deadline */
+        }
+        if (errno != EINTR) break;
+    }
+    close(fd);
+    return result;
+}
+
 int64_t rt_process_piped_pid_for_generation_v1(int64_t generation) {
     if (generation <= 0) return -2;
     if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
@@ -4920,3 +5206,32 @@ SplArray* rt_process_input_write_some_v1(INPUT_REF_ARGS,const char* target,int64
 }
 #undef INPUT_REF_ARGS
 #undef INPUT_REF_PASS
+
+#ifdef _WIN32
+/* Text-ABI twin of rt_process_spawn_async_environment_v1 (ptr, len): same
+ * private UTF-16 overlay and the same async registry consumed by wait/kill. */
+int64_t simple_process_spawn_async_environment_v1(const char* cmd, SplArray* args,
+        SplArray* environment, int64_t mode) {
+    if (!cmd || !*cmd) return PIPED_ENV_INVALID_V1;
+    return rt_process_spawn_async_environment_v1(cmd, (uint64_t)strlen(cmd), args, environment, mode);
+}
+#endif
+
+/* Public explicit-environment / bounded-readiness exports. The Rust piped
+ * observer (src/compiler_rust/runtime/src/piped_process_observer.rs) supplies
+ * the same names over the simple_* core contract when it is linked. */
+#if !defined(SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1)
+int64_t rt_process_spawn_piped_environment_v1(const char* cmd, SplArray* args,
+        SplArray* environment, int64_t mode) {
+    return simple_piped_owner_spawn_environment_v1(cmd, args, environment, mode);
+}
+int64_t rt_process_wait_readable_v1(int64_t pid, int64_t stream, int64_t timeout_ms) {
+    return simple_piped_owner_wait_readable_v1(pid, stream, timeout_ms);
+}
+#endif
+/* Both lanes own this name independently (the Rust runtime twin lives in
+ * runtime/src/value/sffi/process_environment_v1.rs); it is not an observer. */
+int64_t rt_process_spawn_async_env_v1(const char* cmd, SplArray* args,
+        SplArray* environment, int64_t mode) {
+    return simple_process_spawn_async_environment_v1(cmd, args, environment, mode);
+}

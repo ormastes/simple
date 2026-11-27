@@ -236,3 +236,45 @@ pub unsafe extern "C" fn rt_process_spawn_async_environment_v1(ptr:*const u8,len
     }
     #[cfg(not(windows))] {let _=(ptr,len,args,env,mode);-95}
 }
+
+/// Text-ABI twin of `rt_process_spawn_async_environment_v1` (ptr, len). Same
+/// registry as wait/kill/liveness. Windows reuses the private UTF-16 overlay
+/// above; Unix builds the overlay/replacement with `Command` (case-sensitive
+/// keys). mode 0 overlays the parent environment, 1 replaces it.
+/// PID > 0, -22 rejected request, -1 spawn failure.
+#[no_mangle]
+pub unsafe extern "C" fn rt_process_spawn_async_env_v1(cmd:RuntimeValue,args:RuntimeValue,env:RuntimeValue,mode:i64)->i64 {
+    let name=match text(cmd){Ok(name) if !name.is_empty()=>name,_=>return -22};
+    #[cfg(windows)] { rt_process_spawn_async_environment_v1(name.as_ptr(),name.len() as u64,args,env,mode) }
+    #[cfg(not(windows))] {
+        let mut command=match unix::command(&name,args,env,mode){Ok(cmd)=>cmd,Err(_)=>return -22};
+        command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::inherit()).stderr(std::process::Stdio::inherit());
+        match command.spawn(){Ok(child)=>super::publish_spawned_child(&super::SPAWNED_CHILDREN,child),Err(_)=>-1}
+    }
+}
+
+#[cfg(not(windows))]
+mod unix {
+    use super::*;
+    pub(super) unsafe fn command(name:&str,args:RuntimeValue,env:RuntimeValue,mode:i64)->Result<std::process::Command,String> {
+        if mode!=0 && mode!=1 {return Err("invalid child environment mode".into());}
+        let argc=if args==RuntimeValue::NIL {0}else{rt_array_len(args)};
+        if !(0..=32768).contains(&argc){return Err("invalid child arguments".into());}
+        let count=if env==RuntimeValue::NIL {0}else{rt_array_len(env)};
+        if !(0..=65536).contains(&count){return Err("invalid child environment array".into());}
+        let mut command=std::process::Command::new(name);
+        for n in 0..argc {command.arg(text(rt_array_get(args,n))?);}
+        if mode==1 {command.env_clear();}
+        command.env_remove("_SIMPLE_STACK_SET");
+        let mut seen=std::collections::HashSet::new();let mut bytes=0usize;
+        for n in 0..count {
+            let item=text(rt_array_get(env,n))?;
+            bytes=bytes.checked_add(item.len()).ok_or("child environment byte overflow")?;
+            if bytes>4_194_304{return Err("child environment byte bound exceeded".into());}
+            let split=item.find('=').filter(|i|*i>0).ok_or("invalid child environment assignment")?;
+            if !seen.insert(item[..split].to_owned()){return Err("duplicate child environment key".into());}
+            command.env(&item[..split],&item[split+1..]);
+        }
+        Ok(command)
+    }
+}

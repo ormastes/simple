@@ -1568,8 +1568,14 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
 
     let mut command = std::process::Command::new(resolve_command_path(&*cmd));
     clear_simple_child_stack_env(&mut command);
+    command.args(&cmd_args);
+    spawn_piped_child(command, "rt_process_spawn_piped")
+}
+
+/// Shared by every piped spawn form so stdio wiring and registry publication
+/// cannot diverge between them.
+fn spawn_piped_child(mut command: std::process::Command, who: &str) -> Result<Value, CompileError> {
     command
-        .args(&cmd_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit());
@@ -1601,10 +1607,248 @@ pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
         }
         Err(error) => {
             if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
-                eprintln!("rt_process_spawn_piped: {error}");
+                eprintln!("{who}: {error}");
             }
             Ok(Value::Int(-1))
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explicit child environment + bounded readiness (piped and async). Codes are
+// shared with the C owner (src/runtime/runtime_process_observer_private.h)
+// and the Rust piped observer: PID > 0 / -22 rejected / -1 spawn failure, and
+// wait 1 ready / 0 timeout / -2 unknown / -3 not piped / -5 OS / -22 invalid.
+// ---------------------------------------------------------------------------
+const CHILD_ENV_INVALID: i64 = -22;
+const PIPED_WAIT_READY: i64 = 1;
+const PIPED_WAIT_TIMEOUT: i64 = 0;
+const PIPED_WAIT_UNKNOWN: i64 = -2;
+const PIPED_WAIT_NOT_PIPED: i64 = -3;
+const PIPED_WAIT_OS_ERROR: i64 = -5;
+const PIPED_WAIT_INVALID: i64 = -22;
+const PIPED_WAIT_MAX_MS: i64 = 86_400_000;
+
+/// Parse `[text]` "KEY=VALUE" entries. Rejects (None) anything the C owner
+/// rejects: non-text, NUL, empty key, missing '=', duplicate key (Windows keys
+/// compare case-insensitively, Unix keys exactly), and the size bounds.
+fn child_environment_entries(value: &Value) -> Option<Vec<(String, String)>> {
+    let Value::Array(items) = value else { return None };
+    if items.len() > 65_536 {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(items.len());
+    let mut seen = std::collections::HashSet::new();
+    let mut bytes = 0usize;
+    for item in items.iter() {
+        let Value::Str(text) = item else { return None };
+        let text: &str = text.as_str();
+        bytes = bytes.checked_add(text.len())?;
+        if bytes > 4 * 1_048_576 || text.contains('\0') {
+            return None;
+        }
+        // Windows keeps hidden per-drive cwd keys of the exact form "=C:".
+        let search_from = if cfg!(windows) && text.starts_with('=') { 1 } else { 0 };
+        let split = search_from + text[search_from..].find('=')?;
+        let key = &text[..split];
+        if key.is_empty() {
+            return None;
+        }
+        if key.starts_with('=') {
+            let b = key.as_bytes();
+            if !(b.len() == 3 && b[1].is_ascii_alphabetic() && b[2] == b':') {
+                return None;
+            }
+        }
+        let identity = if cfg!(windows) { key.to_ascii_uppercase() } else { key.to_owned() };
+        if !seen.insert(identity) {
+            return None;
+        }
+        entries.push((key.to_owned(), text[split + 1..].to_owned()));
+    }
+    Some(entries)
+}
+
+/// Build the command for an explicit-environment spawn, or None to reject.
+/// mode 0 overlays the parent environment, 1 replaces it. `_SIMPLE_STACK_SET`
+/// never reaches the child. Command lookup always uses the parent PATH.
+fn child_environment_command(args: &[Value], who: &str) -> Result<Option<std::process::Command>, CompileError> {
+    if args.len() < 4 {
+        return Err(CompileError::runtime(format!(
+            "{who} requires 4 arguments (cmd, args, environment, mode)"
+        )));
+    }
+    let (Value::Str(cmd), Value::Array(argv), Value::Int(mode)) = (&args[0], &args[1], &args[3]) else {
+        return Ok(None);
+    };
+    let cmd: &str = cmd.as_str();
+    if cmd.is_empty() || cmd.contains('\0') || (*mode != 0 && *mode != 1) {
+        return Ok(None);
+    }
+    let Some(entries) = child_environment_entries(&args[2]) else { return Ok(None) };
+    let mut arguments = Vec::with_capacity(argv.len());
+    for item in argv.iter() {
+        let Value::Str(text) = item else { return Ok(None) };
+        if text.contains('\0') {
+            return Ok(None);
+        }
+        arguments.push(text.as_ref().clone());
+    }
+    let mut command = std::process::Command::new(resolve_command_path(cmd));
+    command.args(&arguments);
+    if *mode == 1 {
+        command.env_clear();
+    }
+    command.envs(entries);
+    clear_simple_child_stack_env(&mut command);
+    Ok(Some(command))
+}
+
+/// Callable from Simple as:
+/// `rt_process_spawn_piped_environment_v1(cmd: text, args: [text], environment: [text], mode: i64) -> i64`
+pub fn rt_process_spawn_piped_environment_v1(args: &[Value]) -> Result<Value, CompileError> {
+    match child_environment_command(args, "rt_process_spawn_piped_environment_v1")? {
+        Some(command) => spawn_piped_child(command, "rt_process_spawn_piped_environment_v1"),
+        None => Ok(Value::Int(CHILD_ENV_INVALID)),
+    }
+}
+
+/// Callable from Simple as:
+/// `rt_process_spawn_async_env_v1(cmd: text, args: [text], environment: [text], mode: i64) -> i64`
+/// Same registry as `rt_process_spawn_async` / `rt_process_wait`.
+pub fn rt_process_spawn_async_env_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let Some(mut command) = child_environment_command(args, "rt_process_spawn_async_env_v1")? else {
+        return Ok(Value::Int(CHILD_ENV_INVALID));
+    };
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    match command.spawn() {
+        Ok(child) => Ok(Value::Int(publish_spawned_process(&SPAWNED_PROCESSES, child))),
+        Err(error) => {
+            if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
+                eprintln!("rt_process_spawn_async_env_v1: {error}");
+            }
+            Ok(Value::Int(-1))
+        }
+    }
+}
+
+/// Bounded readiness of a piped child stream (1 stdout, 2 stderr).
+///
+/// Callable from Simple as: `rt_process_wait_readable_v1(pid: i64, stream: i64, timeout_ms: i64) -> i64`
+/// The registry lock is held only to validate and duplicate the stream handle;
+/// the wait runs on the private duplicate, so other piped calls never block
+/// behind it and a concurrent close cannot recycle the handle under it.
+pub fn rt_process_wait_readable_v1(args: &[Value]) -> Result<Value, CompileError> {
+    let int_at = |i: usize| match args.get(i) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    };
+    let (Some(pid), Some(stream), Some(timeout_ms)) = (int_at(0), int_at(1), int_at(2)) else {
+        return Ok(Value::Int(PIPED_WAIT_INVALID));
+    };
+    if pid <= 0 || (stream != 1 && stream != 2) || !(0..=PIPED_WAIT_MAX_MS).contains(&timeout_ms) {
+        return Ok(Value::Int(PIPED_WAIT_INVALID));
+    }
+    let duplicate = {
+        let map = PIPED_PROCESSES.lock().unwrap();
+        let Some(process) = map.get(&pid) else {
+            return Ok(Value::Int(PIPED_WAIT_UNKNOWN));
+        };
+        if stream == 2 {
+            return Ok(Value::Int(PIPED_WAIT_NOT_PIPED));
+        }
+        if process.stdout_state != 0 {
+            return Ok(Value::Int(PIPED_WAIT_READY));
+        }
+        let Some(stdout) = process.child.stdout.as_ref() else {
+            return Ok(Value::Int(PIPED_WAIT_NOT_PIPED));
+        };
+        #[cfg(unix)]
+        let duplicate = std::os::unix::io::AsFd::as_fd(stdout).try_clone_to_owned();
+        #[cfg(windows)]
+        let duplicate = std::os::windows::io::AsHandle::as_handle(stdout).try_clone_to_owned();
+        match duplicate {
+            Ok(owned) => owned,
+            Err(_) => return Ok(Value::Int(PIPED_WAIT_OS_ERROR)),
+        }
+    };
+    Ok(Value::Int(piped_wait_owned(&duplicate, timeout_ms)))
+}
+
+#[cfg(unix)]
+fn piped_wait_owned(fd: &std::os::fd::OwnedFd, timeout_ms: i64) -> i64 {
+    use std::os::fd::AsRawFd;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let mut item = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let wait = remaining.as_millis().min(i32::MAX as u128) as i32;
+        let ready = unsafe { libc::poll(&mut item, 1, wait) };
+        if ready > 0 {
+            return PIPED_WAIT_READY; // POLLIN/POLLHUP/POLLERR: the read decides
+        }
+        if ready == 0 {
+            if remaining.is_zero() || std::time::Instant::now() >= deadline {
+                return PIPED_WAIT_TIMEOUT;
+            }
+            continue;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return PIPED_WAIT_OS_ERROR;
+        }
+    }
+}
+
+/// Anonymous pipes have no overlapped reads or "data pending" wait object:
+/// sample PeekNamedPipe on ~1 ms against a monotonic deadline. A broken pipe
+/// with nothing pending is EOF; process exit is not (grandchildren may hold
+/// the write end).
+#[cfg(windows)]
+fn piped_wait_owned(handle: &std::os::windows::io::OwnedHandle, timeout_ms: i64) -> i64 {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut std::ffi::c_void,
+            buffer: *mut std::ffi::c_void,
+            size: u32,
+            read: *mut u32,
+            available: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+    loop {
+        let mut available: u32 = 0;
+        let ok = unsafe {
+            PeekNamedPipe(
+                handle.as_raw_handle() as *mut std::ffi::c_void,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return if std::io::Error::last_os_error().raw_os_error() == Some(109) {
+                PIPED_WAIT_READY
+            } else {
+                PIPED_WAIT_OS_ERROR
+            };
+        }
+        if available > 0 {
+            return PIPED_WAIT_READY;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return PIPED_WAIT_TIMEOUT;
+        }
+        // std::thread::sleep uses a high-resolution waitable timer where the
+        // host supports it, so a 1 ms slice is ~1 ms rather than a 15.6 ms tick.
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(1)));
     }
 }
 
