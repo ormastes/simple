@@ -6067,3 +6067,25 @@ pins the border-box form, the default-UA gap is unfiled.
 - Method: give every case its own fixed-height block and a unique background
   and fill, then read first..last device row per colour in both frames. One
   page with stacked cases hides which case moved, because the error accumulates.
+## 2026-11-28 — text `<input>` value on Chrome's device line at k>1 (`work/webrender-input-row-20261128`)
+
+- **Finding first.** On the catalog forms-media page the `Name` value is NOT a row high at 4x: Chrome and Simple both ink rows 528..577, and shifting Simple by -1/0/+1 rows gives 1465/1101/1519 mismatched px in that crop (0 is best). What is left there is column/AA edge difference (glyph raster). The one-row-high value is real for other inputs (the `font-family:monospace` probe of the 2026-11-27 note).
+- **Rule (Chrome 159, UA control font 13.333px, k = 2..4).** The value's `normal` line is the face's DEVICE line, centred in the DEVICE content box with the half px rounding down the page, and the text hangs from the device strut baseline: `baseline = (k x content_h + extra_h - L_dev + 1) / 2 + strut_dev`, with no centring term when the box is not taller than the line.
+  - Simple centred in CSS px, multiplied by k, and added the painter's ascent at the rounded device size, with no device correction.
+  - DejaVu Sans Mono k=4: line 63, strut 50, painter ascent 49: one row high (330 vs 331).
+  - `height:40px` Liberation Sans k=4: 4 x 13 = 52 vs (160 - 61 + 1) / 2 = 50: two rows low. `height:41px` is 52 on both sides.
+  - Liberation Sans k=3: strut 35, painter 36: one row low, every auto-height sans input.
+  - Liberation Sans auto height k=4: 48 and 48. That is why the catalog page already matched.
+- **Fix (paint side).** `input_value_line_device_dy(st, content_h, extra_h)` in layout_foundation returns Chrome's baseline minus the painter's; `_html_draw_ir_input_value_command` pushes it as `device-y-offset` (it sums with the box's device top in `_html_draw_ir_device_top`). `extra_h` is `box_device_extra_h_at(i)`. Flat, password and overlay paths are untouched; k=1 returns 0.
+- **Pin.** `input_value_device_line_dpr4_chrome159_spec`: 4x abspos cells, 4x in-flow label lines, 3x, 2x, and a 1x guard. Red on base 4/5, green 5/5.
+- **Open, not fixed here.**
+  - Author font size inputs are excluded (`style_is_ua_control_font` guard): a 16px Liberation Sans input is 19 CSS / 76 device px tall here, 18 / 74 (k=2 37, k=3 55) in Chrome, so the formula on Simple's line moves the value the wrong way. Fix the control's `normal` line first (layout), then drop the guard. Base rows there: 16px k=4 614 vs Chrome 615; 20px monospace k=2/3 one row low.
+  - In-flow `height:40px` input on a label line: value one row low at 1x (151 vs 150), 2 device rows at k=4 after this fix (605 vs 603). Line/box placement, layout-owned.
+  - k=3 40 px DejaVu Sans Mono `E` is one row taller at the top than Chrome's (rasterizer); the spec pins that cell by its last row.
+  - The default UA input paints a dark bottom-border run Chrome does not (1x rows 239..240).
+  - Arabic value (DejaVu Sans fallback) at k=2 is one row high (164..189 vs 165..190) and at k=4 inks 330..379 vs 328..380; a CJK value is not on Chrome's rows at any k, 1x included. Glyph extents / fallback face, not this rule.
+  - An author `font-size:13.333px; line-height:1.2` is taken for the UA font by `style_is_ua_control_font` and gets the `normal` line. Recorded, not fixed.
+- **Review follow-up (same branch).**
+  - The offset goes through `_html_draw_ir_add_device_dy`, not a second `device-y-offset` prop: `_html_draw_ir_resolved_text_command` already adds one for a fallback face, `_dir_device_y_offset` reads the first and `_html_draw_ir_device_top` the last, so one was lost. Arabic value at k=3: 247..284 with two props, 246..284 (Chrome) summed.
+  - Button-type values (`submit`, `button`, `reset`) and placeholders share the command and the rule. Chrome agrees at k = 2..4 (k=3 submit 46..73, button 247..274, reset in 40px 495..522; placeholders by baseline row), so the scope stays; AC-6 pins them.
+  - Baseline: dpr4 forms-media row lowered 0.27 -> 0.19, the value base and head both measure. The drop is from earlier landed work, not this change.
