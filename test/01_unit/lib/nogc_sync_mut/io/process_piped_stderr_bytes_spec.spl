@@ -1,0 +1,95 @@
+"""
+## Purpose and audience
+Test oracles that drive a child over pipes need its stderr and need stdin and
+stdout to carry arbitrary bytes. This spec pins the split-stderr spawn, byte
+round-trips (NUL, invalid UTF-8, CRLF), and that a child flooding stderr past
+the pipe buffer before writing stdout cannot deadlock the pump.
+"""
+# @manual_section: Piped process stderr and bytes
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_split_result,
+    process_read_stderr_result, process_piped_exchange_bytes_v1, process_close_piped,
+    PipedExchangeV1}
+use std.io_runtime.{time_now_unix_micros}
+
+fn sample_bytes() -> [u8]:
+    var out: [u8] = []
+    out.push(0u8)
+    out.push(0xc3u8)
+    out.push(0xa9u8)
+    out.push(0x0au8)
+    out.push(0x0du8)
+    out.push(0x0au8)
+    out.push(0xffu8)
+    out
+
+fn sh_exchange(script: text, input: [u8]) -> PipedExchangeV1:
+    val spawned = process_spawn_piped_split_result("sh", ["-c", script])
+    expect(spawned.is_ok()).to_be(true)
+    val pid = spawned.unwrap()
+    val result = process_piped_exchange_bytes_v1(pid, input, 30000)
+    process_close_piped(pid)
+    expect(result.is_ok()).to_be(true)
+    result.unwrap()
+
+describe "piped process split stderr and bytes":
+    it "round-trips NUL, invalid UTF-8 and CRLF through stdin and stdout":
+        step("Echo seven awkward bytes through head -c")
+        val input = sample_bytes()
+        val got = sh_exchange("head -c 7", input)
+        expect(got.stdout.len()).to_equal(7)
+        var i = 0
+        while i < 7:
+            expect(got.stdout[i]).to_equal(input[i])
+            i = i + 1
+        expect(got.stderr.len()).to_equal(0)
+
+    it "reads stderr separately from stdout":
+        step("Child writes a known line to each stream")
+        val empty: [u8] = []
+        val got = sh_exchange("printf out; printf err >&2", empty)
+        expect(got.stdout.len()).to_equal(3)
+        expect(got.stdout[0]).to_equal(0x6fu8)
+        expect(got.stderr.len()).to_equal(3)
+        expect(got.stderr[0]).to_equal(0x65u8)
+
+    it "exposes stderr as text through the result wrapper":
+        step("Poll stderr text until EOF")
+        val spawned = process_spawn_piped_split_result("sh", ["-c", "printf hello >&2"])
+        expect(spawned.is_ok()).to_be(true)
+        val pid = spawned.unwrap()
+        var seen = ""
+        var tries = 0
+        var done = false
+        while not done and tries < 20000:
+            val r = process_read_stderr_result(pid)
+            if r.is_err():
+                done = true
+            else:
+                val chunk = r.unwrap()
+                if chunk.? : seen = seen + chunk.unwrap()
+            tries = tries + 1
+        process_close_piped(pid)
+        expect(seen).to_equal("hello")
+
+    it "does not deadlock when stderr exceeds the pipe buffer before stdout":
+        step("Child writes 320 KiB to stderr, then one stdout line")
+        val empty: [u8] = []
+        val got = sh_exchange("head -c 327680 /dev/zero >&2; printf done", empty)
+        expect(got.stderr.len()).to_equal(327680)
+        expect(got.stdout.len()).to_equal(4)
+
+    it "moves a multi-megabyte payload and reports throughput":
+        step("Pipe 4 MiB through head -c and time it")
+        var input: [u8] = []
+        var i = 0
+        while i < 4194304:
+            input.push((i % 251) as u8)
+            i = i + 1
+        val start = time_now_unix_micros()
+        val got = sh_exchange("head -c 4194304", input)
+        val elapsed = time_now_unix_micros() - start
+        expect(got.stdout.len()).to_equal(4194304)
+        expect(got.stdout[4194303]).to_equal(input[4194303])
+        val micros = if elapsed > 0: elapsed else: 1
+        print("piped bytes throughput: {4194304 * 1000000 / micros / 1024} KiB/s ({micros} us)")

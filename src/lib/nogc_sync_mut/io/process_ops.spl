@@ -3637,3 +3637,150 @@ pub fn _shell_signed_int_or(value: text, default: i64) -> i64:
     if trimmed == "-":
         return default
     int(trimmed)
+
+# ===== Split-stderr / byte-safe piped family =====
+# Backed by src/runtime/runtime_process.c (C lane), the Rust observer provider
+# compiler_rust/runtime/src/piped_process_observer.rs, and the interpreter in
+# compiler_rust/compiler/src/interpreter_extern/system.rs. Every extern is ONE
+# nonblocking step; the pump below polls stdin, stdout and stderr in turn, so a
+# child that fills one pipe while we wait on another cannot deadlock us.
+# stderr state: -2 not separately piped, -1 unknown/error, 0 open, 1 EOF.
+# ponytail: no stdin-close extern yet, so exchange suits children that know the
+# input length (or read none). Add rt_process_close_stdin_v1 when a caller needs EOF.
+use std.nogc_sync_mut.io.time_ops.{sleep_ms}
+
+@unsafe(reason: "raw split-stderr piped spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
+extern fn rt_process_spawn_piped_split_v1(cmd: text, cmd_len: i64, args: [text]) -> i64
+@unsafe(reason: "raw nonblocking stdout bytes; empty array means nothing buffered, consult stdout state", capabilities: [ffi])
+extern fn rt_process_read_stdout_bytes_v1(pid: i64, max_bytes: i64) -> [u8]
+@unsafe(reason: "raw nonblocking stderr bytes; empty array means nothing buffered, consult stderr state", capabilities: [ffi])
+extern fn rt_process_read_stderr_bytes_v1(pid: i64, max_bytes: i64) -> [u8]
+@unsafe(reason: "raw nonblocking stderr text; empty sentinel conflates no data with EOF or failure", capabilities: [ffi])
+extern fn rt_process_read_stderr(pid: i64) -> text
+@unsafe(reason: "raw stderr stream state: -2 not piped, -1 error, 0 open, 1 EOF", capabilities: [ffi])
+extern fn rt_process_stderr_state_v1(pid: i64) -> i64
+@unsafe(reason: "raw nonblocking [u8] stdin write at offset; count accepted, 0 pipe full, -1 failure", capabilities: [ffi])
+extern fn rt_process_write_stdin_bytes_some_v1(pid: i64, data: [u8], offset: i64, max_bytes: i64) -> i64
+
+pub val PIPED_BYTES_CHUNK_V1: i64 = 65536
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_spawn_piped_split_result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_spawn_piped_split_result(cmd: text, args: [text]) -> Result<i64, text>:
+    if cmd == "": return Err("empty_process_command")
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    val native = host_path_native(rcmd)
+    var pid: i64 = -1
+    unsafe(capabilities: [ffi]):
+        pid = rt_process_spawn_piped_split_v1(native, str_len(native), rargs)
+    if pid <= 0: return Err("process_spawn_failed")
+    Ok(pid)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_stderr_state_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_stderr_state_v1(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_stderr_state_v1(pid)
+
+fn _stderr_state_error(state: i64) -> text:
+    if state == 1: return "process_stderr_eof"
+    if state == -2: return "process_stderr_not_piped"
+    if state < 0: return "process_stderr_read_failed"
+    ""
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_read_stderr_result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_read_stderr_result(pid: i64) -> Result<text?, text>:
+    var chunk = ""
+    unsafe(capabilities: [ffi]):
+        chunk = rt_process_read_stderr(pid)
+    if chunk.len() > 0: return Ok(Some(chunk))
+    val reason = _stderr_state_error(process_stderr_state_v1(pid))
+    if reason != "": return Err(reason)
+    Ok(None)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_read_stdout_bytes_result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_read_stdout_bytes_result(pid: i64, max_bytes: i64) -> Result<[u8]?, text>:
+    var chunk: [u8] = []
+    unsafe(capabilities: [ffi]):
+        chunk = rt_process_read_stdout_bytes_v1(pid, max_bytes)
+    if chunk.len() > 0: return Ok(Some(chunk))
+    val state = _process_stdout_state_raw(pid)
+    if state == 1: return Err("process_stdout_eof")
+    if state < 0: return Err("process_stdout_read_failed")
+    Ok(None)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_read_stderr_bytes_result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_read_stderr_bytes_result(pid: i64, max_bytes: i64) -> Result<[u8]?, text>:
+    var chunk: [u8] = []
+    unsafe(capabilities: [ffi]):
+        chunk = rt_process_read_stderr_bytes_v1(pid, max_bytes)
+    if chunk.len() > 0: return Ok(Some(chunk))
+    val reason = _stderr_state_error(process_stderr_state_v1(pid))
+    if reason != "": return Err(reason)
+    Ok(None)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_write_stdin_bytes_some_result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_write_stdin_bytes_some_result(pid: i64, data: [u8], offset: i64, max_bytes: i64) -> Result<i64, text>:
+    var accepted: i64 = -1
+    unsafe(capabilities: [ffi]):
+        accepted = rt_process_write_stdin_bytes_some_v1(pid, data, offset, max_bytes)
+    if accepted < 0: return Err("process_stdin_write_failed")
+    Ok(accepted)
+
+# One pump step: at most one stdin write and one read of each stream.
+pub struct PipedPumpV1:
+    written: i64
+    stdout_chunk: [u8]
+    stderr_chunk: [u8]
+    stdout_eof: bool
+    stderr_eof: bool
+
+pub fn process_piped_pump_bytes_v1(pid: i64, input: [u8], offset: i64) -> Result<PipedPumpV1, text>:
+    var written: i64 = 0
+    if offset < input.len():
+        val w = process_write_stdin_bytes_some_result(pid, input, offset, PIPED_BYTES_CHUNK_V1)
+        if w.is_err(): return Err(w.unwrap_err())
+        written = w.unwrap()
+    var out_chunk: [u8] = []
+    var err_chunk: [u8] = []
+    var stdout_eof = false
+    var stderr_eof = false
+    val o = process_read_stdout_bytes_result(pid, PIPED_BYTES_CHUNK_V1)
+    if o.is_err():
+        if o.unwrap_err() != "process_stdout_eof": return Err(o.unwrap_err())
+        stdout_eof = true
+    else:
+        val got = o.unwrap()
+        if got.?: out_chunk = got.unwrap()
+    val e = process_read_stderr_bytes_result(pid, PIPED_BYTES_CHUNK_V1)
+    if e.is_err():
+        val reason = e.unwrap_err()
+        if reason != "process_stderr_eof" and reason != "process_stderr_not_piped": return Err(reason)
+        stderr_eof = true
+    else:
+        val got = e.unwrap()
+        if got.?: err_chunk = got.unwrap()
+    Ok(PipedPumpV1(written: written, stdout_chunk: out_chunk, stderr_chunk: err_chunk,
+        stdout_eof: stdout_eof, stderr_eof: stderr_eof))
+
+pub struct PipedExchangeV1:
+    stdout: [u8]
+    stderr: [u8]
+
+# Write all of `input` while draining stdout and stderr until both reach EOF.
+pub fn process_piped_exchange_bytes_v1(pid: i64, input: [u8], timeout_ms: i64) -> Result<PipedExchangeV1, text>:
+    var out: [u8] = []
+    var err: [u8] = []
+    var offset: i64 = 0
+    val deadline = time_now_unix_micros() + timeout_ms * 1000
+    while true:
+        val step = process_piped_pump_bytes_v1(pid, input, offset)
+        if step.is_err(): return Err(step.unwrap_err())
+        val s = step.unwrap()
+        offset = offset + s.written
+        out.extend(s.stdout_chunk)
+        err.extend(s.stderr_chunk)
+        if s.stdout_eof and s.stderr_eof and offset >= input.len():
+            return Ok(PipedExchangeV1(stdout: out, stderr: err))
+        if s.written == 0 and s.stdout_chunk.len() == 0 and s.stderr_chunk.len() == 0:
+            if time_now_unix_micros() > deadline: return Err("process_exchange_timeout")
+            sleep_ms(1)
+    Err("process_exchange_timeout")
