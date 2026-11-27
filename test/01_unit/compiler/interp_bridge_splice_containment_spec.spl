@@ -1,0 +1,225 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+## Purpose and audience
+
+Purpose: regression-pin the acceptance criteria of
+doc/08_tracking/bug/gui_window_caller_frame_silent_interp_fallback_2026-08-06.md
+on the current seed JIT lane, where the original whole-module-drop mechanism
+has been replaced by the per-call hybrid-interp-splice:
+
+1. SURFACED, not silent: a gui-window-frame program whose engine references
+   JIT-unresolvable externs must print the default-on
+   `[engine-demotion] reason=hybrid-interp-splice` diagnostic naming what was
+   demoted, and the engine receipt must record `demoted=yes`.
+2. CONTAINED to the failing call: the demotion must not poison the dynamic
+   callee tree. The engine receipt for a spliced run must still read
+   `engine=cranelift-jit` (never `engine=interpreter`): the rest of the
+   module — the whole gui_window frame's callee tree — keeps executing as
+   compiled code; only the individual spliced extern crossings route through
+   the interpreter bridge.
+3. CALLER-FRAME COST PARITY ("What a real fix needs", item 3): the same
+   engine call (`browser_engine_pixels_at`, 8x8, headless — the
+   2026-08-09 addendum's cheap repro shape) must complete from a module that
+   imports `nogc_sync_mut.ui.gui_renderer` (the gui_window.spl frame) in no
+   more than ~3x the wall time of the identical call from a module without
+   that import. The 2026-08-06 seed measured >30x (never finished in 1800s);
+   the current seed measures ~1x (both lanes are dominated by the same JIT
+   compile of the flattened closure).
+
+Audience: seed compiler engineers maintaining the hybrid splice (driver:
+`apply_hybrid_transform` call site in src/compiler_rust/driver/src/exec_core.rs;
+bridge: `interp_call_handler` in
+src/compiler_rust/compiler/src/interpreter_sffi.rs) and the engine receipt
+(src/compiler_rust/common/src/engine_receipt.rs).
+
+## Operator workflow (re-verification recipe)
+
+The test runner refuses a SIMPLE_BINARY that differs from the binary running
+the spec, so each run below uses the binary under test as both runner and
+child. Isolation knobs used throughout:
+`SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/guifallback/hir-cache` and
+`TMPDIR=$PWD/build/p3cache/guifallback/tmp`.
+
+1. Current seed (GREEN — all examples pass):
+     SIMPLE_LIB=src SIMPLE_BINARY=$PWD/build/p3cache/fresh-seed/simple.exe \
+       build/p3cache/fresh-seed/simple.exe test \
+       test/01_unit/compiler/interp_bridge_splice_containment_spec.spl \
+       --mode=interpreter --no-cache --no-session-daemon
+   Expected: 3 examples, 0 failures (measured 2026-11-28 on seed
+   d40623d3f59d; gui/text render ratio ~1.0-1.5x, each child ~25-35s).
+2. Historical RED: on the 2026-08-06 seed this spec cannot pass — the
+   gui-frame child never finished the 8x8 render inside the 300s cap
+   (measured >1620s; the doc's isolation matrix), and the demotion was a
+   whole-module drop, so the gui-frame receipt read `engine=interpreter`,
+   failing examples 1 and 2 as well. There is no safe way to re-run that
+   binary here; the cap and the engine assertions are the tripwires.
+
+## Compatibility and limitations
+
+Shells out to the seed binary (`SIMPLE_BIN` / `SIMPLE_BINARY` /
+`SIMPLE_RUNTIME` / `SIMPLE_TEST_BINARY`, default `bin/simple`) with
+`SIMPLE_ENGINE_RECEIPT=1` and `SIMPLE_EXECUTION_MODE` removed for the child —
+the hybrid splice is a JIT-lane mechanism and the lane knob must not
+pre-divert the child. The oracle is the non-forgeable `[engine-receipt]` line
+plus the `[engine-demotion]` announcement, and wall-time ratio for the
+caller-frame parity example only (the doc's own probe design; both children
+pay the same JIT compile cost, so the ratio is stable under load).
+Example 3 runs the real `browser_engine_pixels_at` on `simple://home` at 8x8
+per the doc — no display server needed; it contributes ~60-75s of child
+runtime. It asserts a 300s per-child cap: the never-finishing-again class
+(the original >1620s kill) is the regression this spec exists to catch.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{
+    process_run, env_get, env_set, env_remove_process,
+    file_write, dir_create_all, time_now_unix_micros,
+}
+
+fn simple_binary() -> text:
+    var configured = env_get("SIMPLE_BIN") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_RUNTIME") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_TEST_BINARY") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn probe_dir() -> text:
+    "build/interp_bridge_splice_containment_spec"
+
+fn write_probe(name: text, source: text) -> text:
+    dir_create_all(probe_dir())
+    val path = "{probe_dir()}/{name}.spl"
+    file_write(path, source)
+    path
+
+# The splice only happens on the default JIT lane and the receipt is only
+# printed when asked; set both around the child and restore afterwards.
+fn run_child(entry: text) -> (text, text, i64):
+    val prev_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_remove_process("SIMPLE_EXECUTION_MODE")
+    val prev_receipt = env_get("SIMPLE_ENGINE_RECEIPT") ?? ""
+    env_set("SIMPLE_ENGINE_RECEIPT", "1")
+    val result = process_run(simple_binary(), ["run", entry])
+    if prev_receipt == "":
+        env_remove_process("SIMPLE_ENGINE_RECEIPT")
+    else:
+        env_set("SIMPLE_ENGINE_RECEIPT", prev_receipt)
+    if prev_mode != "":
+        env_set("SIMPLE_EXECUTION_MODE", prev_mode)
+    result
+
+fn run_child_timed(entry: text) -> (text, text, i64, i64):
+    val start_us = time_now_unix_micros()
+    val (stdout, stderr, code) = run_child(entry)
+    val elapsed_ms = (time_now_unix_micros() - start_us) / 1000
+    (stdout, stderr, code, elapsed_ms)
+
+fn receipt_line(combined: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if line.contains("[engine-receipt]"):
+            return line
+    ""
+
+fn receipt_field(line: text, key: text) -> text:
+    val marker = key + "="
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val rest = line.substring(start + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+fn compiled_engine(engine: text) -> bool:
+    engine == "cranelift-jit" or engine == "llvm-jit" or engine == "native"
+
+# One spliced extern call: the smallest program that triggers the
+# hybrid-interp-splice demotion (rt_opengl_is_available has no JIT-linkable
+# backing in the Rust seed, exactly like the gui_renderer engine externs).
+# Braces the CHILD source needs literally are doubled: the spec's own
+# formatter would otherwise try to interpolate them here.
+fn single_call_source(with_gui_import: bool) -> text:
+    val prefix = if with_gui_import:
+        "use nogc_sync_mut.ui.gui_renderer.{{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE}}\n\n"
+    else:
+        ""
+    "{prefix}extern fn rt_opengl_is_available() -> i64\n\nfn main():\n    val ok = rt_opengl_is_available()\n    print(\"splice_ok {{ok}}\")\n"
+
+# The doc's 2026-08-09 cheap repro shape: the real engine render at 8x8, from
+# either caller frame, headless (no --open, no display server).
+fn render_source(with_gui_import: bool) -> text:
+    val prefix = if with_gui_import:
+        "use nogc_sync_mut.ui.gui_renderer.{{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE}}\n"
+    else:
+        ""
+    "{prefix}use app.browser.render_adapter.{{browser_engine_pixels_at}}\nfn main():\n    val pixels = browser_engine_pixels_at(\"simple://home\", 8, 8)\n    print(\"render_done {{pixels.len()}}\")\n"
+
+describe "gui-window-frame engine splice: loud, contained, caller-frame parity":
+    # @manual scenario evidence
+
+    it "a spliced extern call is announced and the caller tree stays on the JIT engine":
+        # @req: REQ-SSPEC-UNIT
+        step("Run an entry whose only interpreter crossing is one extern call")
+        val path = write_probe("single_call", single_call_source(false))
+        val (stdout, stderr, code) = run_child(path)
+        val combined = stdout + stderr
+        expect(code).to_equal(0)
+        expect(stdout.contains("splice_ok")).to_equal(true)
+        step("Require the loud default-on demotion naming the spliced extern")
+        expect(combined.contains("[engine-demotion] reason=hybrid-interp-splice")).to_equal(true)
+        expect(combined.contains("rt_opengl_is_available")).to_equal(true)
+        step("Require the receipt to record the demotion and a compiled caller engine")
+        val line = receipt_line(combined)
+        expect(line == "").to_equal(false)
+        expect(receipt_field(line, "demoted")).to_equal("yes")
+        expect(compiled_engine(receipt_field(line, "engine"))).to_equal(true)
+        step("Require the caller engine was NOT dropped to the interpreter")
+        expect(receipt_field(line, "engine")).to_equal("cranelift-jit")
+
+    it "the gui_window import frame does not poison the module to the interpreter":
+        # @req: REQ-SSPEC-UNIT
+        step("Run the doc's caller-frame shape: gui_renderer import + engine extern call")
+        val path = write_probe("gui_frame", single_call_source(true))
+        val (stdout, stderr, code) = run_child(path)
+        val combined = stdout + stderr
+        expect(code).to_equal(0)
+        expect(stdout.contains("splice_ok")).to_equal(true)
+        step("Require the demotion detail and a JIT caller engine, never a whole-module drop")
+        expect(combined.contains("[engine-demotion] reason=hybrid-interp-splice")).to_equal(true)
+        val line = receipt_line(combined)
+        expect(line == "").to_equal(false)
+        expect(receipt_field(line, "demoted")).to_equal("yes")
+        expect(receipt_field(line, "engine")).to_equal("cranelift-jit")
+        expect(line.contains("engine=interpreter")).to_equal(false)
+
+    it "the same engine render from the gui frame and the text frame stays within 3x":
+        # @req: REQ-SSPEC-UNIT
+        step("Run the 8x8 engine render from the text-frame module")
+        val text_path = write_probe("render_text_frame", render_source(false))
+        val (text_out, text_err, text_code, text_ms) = run_child_timed(text_path)
+        expect(text_code).to_equal(0)
+        expect(text_out.contains("render_done 64")).to_equal(true)
+        step("Run the identical render from the gui_window-frame module")
+        val gui_path = write_probe("render_gui_frame", render_source(true))
+        val (gui_out, gui_err, gui_code, gui_ms) = run_child_timed(gui_path)
+        expect(gui_code).to_equal(0)
+        expect(gui_out.contains("render_done 64")).to_equal(true)
+        step("Require both demotions to stay contained on the JIT engine")
+        val gui_line = receipt_line(gui_out + gui_err)
+        expect(gui_line == "").to_equal(false)
+        expect(receipt_field(gui_line, "engine")).to_equal("cranelift-jit")
+        step("Require each child well inside the never-finishing regression cap (300s)")
+        expect(text_ms < 300000).to_equal(true)
+        expect(gui_ms < 300000).to_equal(true)
+        step("Require the gui-frame wall time within 3x of the text frame (doc item 3)")
+        expect(gui_ms <= 3 * text_ms).to_equal(true)

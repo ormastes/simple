@@ -93,16 +93,18 @@ describe "dynamic torch SFFI readiness surface":
         val redeclares_availability = facade_text.contains("extern fn rt_torch_available")
         expect(redeclares_availability).to_equal(false)
 
-    it "preserves operation and constructor parity through provider delegates":
+    it "preserves operation and constructor parity through private raw owners":
         # @req REQ-SSPEC-LIB
-        step("Check delegate call sites for reduction, slice, and fixed-dimension constructors")
+        step("Check delegate call sites for reduction, slice, and backed constructors")
         val facade_text = facade_source()
-        # @capture(statistics): provider delegate call sites for sum_dim, slice, zeros, and full
-        step("Verify reductions, slicing, and constructors all route through the provider ABI")
+        # @capture(statistics): private raw owners for sum_dim, slice, and eye with provider delegate bodies
+        step("Verify reductions, slicing, and backed constructors all route through private always-inline owners")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_sum_dim_raw(handle: i64, dim: i64, keepdim: bool) -> i64:")
         expect(facade_text).to_contain("rt_torch_torchtensor_sum_dim(handle, dim, keepdim)")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_slice_raw(handle: i64, dim: i64, start: i64, end: i64, step: i64) -> i64:")
         expect(facade_text).to_contain("rt_torch_torchtensor_slice(handle, dim, start, end, step)")
-        expect(facade_text).to_contain("rt_torch_tensor_zeros(n, m, k, l, 4)")
-        expect(facade_text).to_contain("rt_torch_tensor_full(n, m, k, l, 4, fill)")
+        expect(facade_text).to_contain("fn _dyn_torch_tensor_eye_raw(n: i64) -> i64:")
+        expect(facade_text).to_contain("rt_torch_tensor_eye(n)")
 
     it "delegates linalg solve to the existing runtime SFFI instead of hardcoding failure":
         # @req REQ-SSPEC-LIB
@@ -124,16 +126,22 @@ describe "dynamic torch SFFI readiness surface":
         expect(runtime_text).to_contain("pub extern \"C\" fn rt_torch_torchtensor_linalg_solve")
         expect(runtime_text).to_contain("rt_torch_linalg_solve(a_handle, b_handle)")
 
-    it "keeps fixed-dimension constructor externs behind typed result wrappers":
+    it "fails closed on the unowned fixed-dimension constructor ABI":
         # @req REQ-SSPEC-LIB
-        step("Check the constructor wrappers and their locally declared fixed-dimension ABI")
+        step("Check the constructor wrappers no longer declare or call a local fixed-dimension ABI")
         val facade_text = facade_source()
-        # @capture(statistics): typed constructor wrappers over the locally declared constructor externs
-        step("Verify constructors validate dimensions before any FFI and reject invalid_dimension")
+        # @capture(statistics): typed constructor wrappers failing closed without a local legacy ABI
+        step("Verify constructors validate dimensions, declare no externs, and reject the unbacked ABI")
         expect(facade_text).to_contain("fn dyn_torch_tensor_zeros_1d_result(n: i64) -> Result<i64, text>:")
         expect(facade_text).to_contain("fn dyn_torch_tensor_full_4d_result(n: i64, m: i64, k: i64, l: i64, fill: f64) -> Result<i64, text>:")
         expect(facade_text).to_contain("invalid_dimension")
-        expect(facade_text).to_contain("extern fn rt_torch_tensor_full(d0: i64, d1: i64, d2: i64, d3: i64, ndim: i64, fill: f64) -> i64")
+        expect(facade_text).to_contain("unbacked_provider_abi")
+        val declares_local_externs = facade_text.contains("extern fn")
+        expect(declares_local_externs).to_equal(false)
+        val legacy_zeros_call = facade_text.contains("rt_torch_tensor_zeros(")
+        expect(legacy_zeros_call).to_equal(false)
+        val legacy_full_call = facade_text.contains("rt_torch_tensor_full(")
+        expect(legacy_full_call).to_equal(false)
 
     it "rejects negative linalg solve handles with an explicit typed status":
         # @req REQ-SSPEC-LIB

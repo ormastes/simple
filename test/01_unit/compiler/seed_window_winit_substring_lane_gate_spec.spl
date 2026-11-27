@@ -1,0 +1,176 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: pin that the seed driver's whole-module graphics lane gate
+(`interpreter_preference_reason` in `src/compiler_rust/driver/src/exec_core.rs`)
+diverts on what a program IMPORTS, not on text it contains. A comment or string
+literal merely mentioning the winit window module keeps the JIT lane; only a
+`use` declaration naming that module diverts to the interpreter.
+Audience: compiler engineers maintaining the seed driver lane gates.
+
+Bug: doc/08_tracking/bug/seed_window_winit_substring_lane_gate_2026-11-26.md —
+the gate was `source.contains("window_winit")` on the raw entry text, so a
+`# window_winit` comment (or a string literal holding the token) silently sent
+the whole program to the tree-walk interpreter and made 2D startup timings
+lane timings in disguise.
+
+## Operator workflow (re-verification recipe)
+
+The test runner refuses a SIMPLE_BINARY that differs from the binary running
+the spec, so each run below uses the binary under test as both runner and
+child. Isolation knobs used throughout:
+`SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/winitgate/hir-cache` and
+`TMPDIR=$PWD/build/p3cache/winitgate/tmp`.
+
+1. RED: run the pre-fix seed binary against itself:
+     SIMPLE_BINARY=$PWD/build/p3cache/fresh-seed/simple.exe \
+       build/p3cache/fresh-seed/simple.exe test \
+       test/01_unit/compiler/seed_window_winit_substring_lane_gate_spec.spl
+   The comment-mention and string-mention examples FAIL (they are diverted;
+   receipt says engine=interpreter demoted=yes reason=jit-unsafe-graphics).
+2. GREEN: build the fixed driver and run it against itself:
+     cd src/compiler_rust && \
+       CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+       CARGO_TARGET_DIR=C:/dev/lanes/p3-sweep/build/p3cache/winitgate/cargo-target \
+       cargo build --release -p simple-driver
+     SIMPLE_BINARY=$PWD/build/p3cache/winitgate/cargo-target/release/simple.exe \
+       build/p3cache/winitgate/cargo-target/release/simple.exe test \
+       test/01_unit/compiler/seed_window_winit_substring_lane_gate_spec.spl
+   Every example passes.
+3. Cross-check with the shell guard over the same fixed binary:
+     sh scripts/check/check-engine-receipt-discriminates.shs \
+       --binary build/p3cache/winitgate/cargo-target/release/simple.exe
+
+## Compatibility and limitations
+
+Shells out to the seed binary (`SIMPLE_BIN` / `SIMPLE_BINARY` /
+`SIMPLE_RUNTIME` / `SIMPLE_TEST_BINARY`, default `bin/simple`) with
+`SIMPLE_ENGINE_RECEIPT=1` and `SIMPLE_EXECUTION_MODE` removed for the child —
+the gate is bypassed whenever the lane knob is set. The oracle is the
+non-forgeable `[engine-receipt]` line plus the `[engine-demotion]`
+announcement, not wall time: lane choice must not depend on comment text.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run, env_get, env_set, env_remove_process, file_write, dir_create_all}
+
+fn simple_binary() -> text:
+    var configured = env_get("SIMPLE_BIN") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_RUNTIME") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_TEST_BINARY") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn probe_dir() -> text:
+    "build/seed_window_winit_substring_lane_gate_spec"
+
+fn write_probe(name: text, source: text) -> text:
+    dir_create_all(probe_dir())
+    val path = "{probe_dir()}/{name}.spl"
+    file_write(path, source)
+    path
+
+# The gate only fires when no lane is requested explicitly, and the receipt is
+# only printed when asked; set both around the child and restore afterwards.
+fn run_child(entry: text) -> (text, text, i64):
+    val prev_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_remove_process("SIMPLE_EXECUTION_MODE")
+    val prev_receipt = env_get("SIMPLE_ENGINE_RECEIPT") ?? ""
+    env_set("SIMPLE_ENGINE_RECEIPT", "1")
+    val result = process_run(simple_binary(), ["run", entry])
+    if prev_receipt == "":
+        env_remove_process("SIMPLE_ENGINE_RECEIPT")
+    else:
+        env_set("SIMPLE_ENGINE_RECEIPT", prev_receipt)
+    if prev_mode != "":
+        env_set("SIMPLE_EXECUTION_MODE", prev_mode)
+    result
+
+fn receipt_line(combined: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if line.contains("[engine-receipt]"):
+            return line
+    ""
+
+fn receipt_field(line: text, key: text) -> text:
+    val marker = key + "="
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val rest = line.substring(start + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+fn compiled_engine(engine: text) -> bool:
+    engine == "cranelift-jit" or engine == "llvm-jit" or engine == "native"
+
+describe "seed window_winit lane gate keys on imports, not substrings":
+    # @manual scenario evidence
+
+    it "a comment mentioning the token keeps the JIT lane":
+        # @req: REQ-SSPEC-UNIT
+        step("Run an entry whose only mention of the token is a comment")
+        val path = write_probe("comment_mention", "# window_winit\nfn main():\n    print \"ok\"\n")
+        val (stdout, stderr, code) = run_child(path)
+        expect(code).to_equal(0)
+        expect(stdout.contains("ok")).to_equal(true)
+        val line = receipt_line(stdout + stderr)
+        expect(line == "").to_equal(false)
+        step("Require a compiled engine and no whole-module graphics demotion")
+        expect(compiled_engine(receipt_field(line, "engine"))).to_equal(true)
+        expect(receipt_field(line, "demoted")).to_equal("no")
+        expect((stdout + stderr).contains("reason=jit-unsafe-graphics")).to_equal(false)
+
+    it "a string literal mentioning the token keeps the JIT lane":
+        # @req: REQ-SSPEC-UNIT
+        step("Run an entry that stores the token in a text value")
+        val path = write_probe("string_mention", "fn main():\n    val backend = \"window_winit\"\n    print backend\n")
+        val (stdout, stderr, code) = run_child(path)
+        expect(code).to_equal(0)
+        expect(stdout.contains("window_winit")).to_equal(true)
+        val line = receipt_line(stdout + stderr)
+        expect(line == "").to_equal(false)
+        step("Require a compiled engine and no whole-module graphics demotion")
+        expect(compiled_engine(receipt_field(line, "engine"))).to_equal(true)
+        expect(receipt_field(line, "demoted")).to_equal("no")
+        expect((stdout + stderr).contains("reason=jit-unsafe-graphics")).to_equal(false)
+
+    it "an actual window_winit import diverts to the interpreter with a named reason":
+        # @req: REQ-SSPEC-UNIT
+        step("Run an entry with a real window_winit import")
+        val path = write_probe("real_import", "use std.io.window_winit\nfn main():\n    print \"ok\"\n")
+        val (stdout, stderr, code) = run_child(path)
+        expect(code).to_equal(0)
+        expect(stdout.contains("ok")).to_equal(true)
+        step("Require the interpreter lane, the demotion flag, and the gate's reason")
+        expect((stdout + stderr).contains("[engine-demotion] reason=jit-unsafe-graphics")).to_equal(true)
+        val line = receipt_line(stdout + stderr)
+        expect(line == "").to_equal(false)
+        expect(receipt_field(line, "engine")).to_equal("interpreter")
+        expect(receipt_field(line, "demoted")).to_equal("yes")
+        expect(line.contains("reason=jit-unsafe-graphics")).to_equal(true)
+
+    it "a plain program controls the JIT lane end to end":
+        # @req: REQ-SSPEC-UNIT
+        step("Run a trivial entry with no mention and no import")
+        val path = write_probe("plain", "fn main():\n    print \"ok\"\n")
+        val (stdout, stderr, code) = run_child(path)
+        expect(code).to_equal(0)
+        expect(stdout.trim()).to_equal("ok")
+        val line = receipt_line(stdout + stderr)
+        expect(line == "").to_equal(false)
+        expect(compiled_engine(receipt_field(line, "engine"))).to_equal(true)
+        expect(receipt_field(line, "demoted")).to_equal("no")

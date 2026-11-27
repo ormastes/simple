@@ -11,13 +11,45 @@ grep -Fq 'fn dyn_torch_available() -> bool:' "$source"
 test "$(grep -Fc 'rt_torch_available()' "$source")" -eq 2
 ! grep -Fq 'if not rt_torch_available()' "$source"
 
+# Raw declarations are owned only by std.nogc_sync_mut.torch.sffi; the
+# facade imports them and declares no extern of its own.
+! grep -Fq 'extern fn' "$source"
+
+# Every raw provider call must sit in a private always-inline lexical owner
+# (`_dyn_torch_*_raw`, plus the availability owner); typed wrappers hold no
+# unsafe blocks and make no raw calls.
 raw_calls=$(awk '
-    /unsafe\(capabilities: \[ffi\]\):/ { pending=1; next }
+    /^@always_inline/ { inline_pending=1; next }
+    /^fn (_dyn_torch_[A-Za-z0-9_]*_raw|dyn_torch_available)\(/ {
+        if (!inline_pending) bad=1
+        in_raw=1; unsafe_seen=0; inline_pending=0; next
+    }
+    /^fn / {
+        if (in_raw && !unsafe_seen) bad=1
+        in_raw=0; inline_pending=0
+    }
+    /unsafe\(capabilities: \[ffi\]\):/ {
+        if (!in_raw) bad=1
+        unsafe_seen++
+        pending=1; next
+    }
     pending && /^[[:space:]]+rt_torch_/ { count++; pending=0; next }
     pending { pending=0 }
-    END { print count + 0 }
+    END { if (bad) print "BAD"; else print count + 0 }
 ' "$source")
-test "$raw_calls" -eq 61
+case "$raw_calls" in
+    ''|*[!0-9]*)
+        echo 'Torch dynamic SFFI authority: FAIL raw call or unsafe block outside an always-inline owner' >&2
+        exit 1
+        ;;
+esac
+test "$raw_calls" -eq 37
+
+# The unowned legacy fixed-dimension constructor ABI (symbol names owned by
+# the provider array-form ABI, registered by no engine) must stay uncallable
+# and fail closed with a typed error.
+! grep -Eq 'rt_torch_tensor_(zeros|ones|rand|randn|full|empty)\(' "$source"
+grep -Fq 'unbacked_provider_abi' "$source"
 
 if grep -Eq 'rt_alloc|dlsym|CString|HashMap|mutex' "$source" \
     || grep -Eq '^[[:space:]]*(while|for)[[:space:]]' "$source"; then
@@ -25,4 +57,4 @@ if grep -Eq 'rt_alloc|dlsym|CString|HashMap|mutex' "$source" \
     exit 1
 fi
 
-echo 'Torch dynamic SFFI authority: PASS lexical_raw_calls=61 direct_call_shape=retained explicit_alloc_lookup_lock_loop=none'
+echo "Torch dynamic SFFI authority: PASS owner_raw_calls=$raw_calls local_extern_decls=0 wrapper_unsafe_blocks=0 legacy_abi=fail_closed explicit_alloc_lookup_lock_loop=none"
