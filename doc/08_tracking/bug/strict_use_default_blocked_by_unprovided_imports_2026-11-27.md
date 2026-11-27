@@ -53,3 +53,5 @@ Columns: distinct importers, symbol, via-module, reason it is still open.
 
 ## Fix direction
 For each site, import from the defining module, or add an explicit `export` when the middle module really is the public facade. Flip the default once a full census, including the timed-out directories, is empty.
+
+**Batch 3 follow-up (pre-existing failures, not a regression):** `test/01_unit/lib/hardware/fpga_linux/synthesis_wrapper_vexriscv_spec.spl` gives 11 pass / 5 fail. The 5 failures are AC-3 TCL assertions: `add_files` for `.v`, the VexRiscv filename, `.v` extension, `S_AXI_HP0` enable, `PSU__USE__S_AXI_GP`/HP config. The base commit before batch 3 gives the identical verdict without strict. The `describe` titles name `SynthesisProject add_verilog_sources` / `enable_axi_hp_port`, which exist nowhere. Either implement those generator features or rewrite the spec against `generate_vivado_tcl_rv64`.
