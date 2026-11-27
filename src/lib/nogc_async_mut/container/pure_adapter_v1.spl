@@ -49,7 +49,7 @@ pub struct PureContainerOwnerPolicyV1:
     # storage view, start launches the job and RETURNS while it runs, stop cancels and collects the
     # job, destroy tears the view down. The per-container view is the A2 seam: store, view_root,
     # base_root and quota above are passed to _prepare_v1 untouched.
-    hold_running: bool = false
+    hold_running: ContainerCapabilityFlagV1 = ContainerCapabilityFlagV1(false)
 
 pub struct PureContainerRequestV1:
     pod_uid: text
@@ -332,7 +332,7 @@ impl PureSimpleContainerAdapterV1:
                 if window != "": return _pure_op_refused_v1(action, window, RUNTIME_STATUS_BLOCKED)
             var next = current
             next.phase = if action == "prepare": RUNTIME_PHASE_PREPARED else: RUNTIME_PHASE_CREATED
-            if action == "create" and self.policy.hold_running:
+            if action == "create" and self.policy.hold_running.value:
                 val prepared = _prepare_v1(self._spec(decoded))
                 if prepared.status == "rejected":
                     return _pure_op_refused_v1(action, "pure-container-prepare-rejected:" + prepared.reason, RUNTIME_STATUS_REJECTED)
@@ -348,7 +348,7 @@ impl PureSimpleContainerAdapterV1:
                 return self._op(action, decoded, current, RUNTIME_STATUS_BLOCKED, "pure-container-start-requires-created")
             val window = self._launch_window(action, request, decoded, deadline)
             if window != "": return _pure_op_refused_v1(action, window, RUNTIME_STATUS_BLOCKED)
-            if self.policy.hold_running: return self._begin(action, decoded, key, current)
+            if self.policy.hold_running.value: return self._begin(action, decoded, key, current)
             val ran = self._set(key, self._run(decoded, current))
             val status = if ran.phase == RUNTIME_PHASE_EXITED: RUNTIME_STATUS_OK else: RUNTIME_STATUS_BLOCKED
             return self._op(action, decoded, ran, status, ran.reason)
@@ -359,7 +359,7 @@ impl PureSimpleContainerAdapterV1:
         val current = self.records[key]
         if current.phase == RUNTIME_PHASE_UNKNOWN:
             return self._op(action, decoded, current, RUNTIME_STATUS_BLOCKED, "pure-container-cleanup-unproven")
-        if self.policy.hold_running: return self._finish_held(action, decoded, key, current)
+        if self.policy.hold_running.value: return self._finish_held(action, decoded, key, current)
         var next = current
         if action == "stop":
             if current.phase == RUNTIME_PHASE_DESTROYED: return self._op(action, decoded, current, RUNTIME_STATUS_OK, "")
