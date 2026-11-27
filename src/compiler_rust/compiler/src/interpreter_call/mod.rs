@@ -635,16 +635,21 @@ fn own_vs_import_bound(
     if Arc::ptr_eq(&own, &import) {
         return Ok(None);
     }
-    let Some(import_score) = overload_score(&import, values) else {
+    // Named arguments do not rank (positional `values` misorder them): fit
+    // is arity-only and any two fitting candidates tie, mirroring the HIR
+    // lowerer.
+    let score = |f: &FunctionDef| {
+        if named {
+            let required = f.params.iter().filter(|p| p.default.is_none()).count();
+            (values.len() >= required && values.len() <= f.params.len()).then_some(0)
+        } else {
+            overload_score(f, values)
+        }
+    };
+    let Some(import_score) = score(&import) else {
         return Ok(None);
     };
-    // Named arguments do not rank (positional `values` misorder them): any
-    // two fitting candidates tie, mirroring the HIR lowerer.
-    let own_score = overload_score(&own, values);
-    let (own_score, import_score) = match (named, own_score) {
-        (true, Some(_)) => (Some(0), 0),
-        _ => (own_score, import_score),
-    };
+    let own_score = score(&own);
     match own_score {
         None => Ok(Some(import)),
         Some(own_score) if own_score > import_score => Ok(None),
