@@ -423,10 +423,48 @@ module path.
 
 ### Behaviour change to expect
 
-Programs that printed the right text by accident on seed `r` are now rejected,
-because they are the same ill-typed join as the garbage cases: `[]` vs a dict or
-text (`r.len()`, `"{r}"` happened to work), `[1]` vs `[1.5]` and `[1]` vs `["a"]`
-printed whole (element reads were wrong).
+Programs that printed the right text on seed `r` for the inputs tried are now
+rejected, because the other arm of the same join was read as garbage or only
+worked by accident:
+
+- `[]` vs a dict or text (`r.len()`, `"{r}"` happened to work), `[1]` vs `[1.5]`
+  and `[1]` vs `["a"]` printed whole (element reads were wrong).
+- An int/float join in an int slot: `val r: i64 = match k: case 0: n; case 1:
+  n * 2; case _: 0.0` printed `21 42` on `r` for the int arms and garbage for
+  the float arm. It is now `binding `r` is declared as `i64` but receives
+  `f64``; likewise `r = if c: 1 else: 2.5` (int `r`), `P(n: if c: k else: 2.5)`
+  and `xs[r]` with `r` a float.
+- A `.spl` file with top-level statements or no `main` is no longer exempt: it
+  is a compiled module by file kind, so its own mixed joins are rejected.
+
+### Fixed in `src`
+
+- `src/lib/gc_async_mut/pure/nn/embedding.spl` (two copies of the lookup loop):
+  the row index read from an `[f64]` tensor was used as an array index and
+  pushed into `last_indices: [i64]` unconverted; the comment said "convert from
+  f64 to i64" but the code was `val idx_int = idx`. Now `idx as i64`, and the
+  bounds test compares against `0`. Found by the float-index error through
+  `test/01_unit/lib/gc_async_mut/embedding_spec.spl`.
+
+### Residuals found in review (NOT fixed here)
+
+The first two behave the same on `r` and on the fixed seed.
+
+- Integer width mixes are not judged and are misread: `val r = if c: n else: m`
+  with `n: i32`, `m: i64` returns `1705032704` for `m = 6000000000` (the join
+  takes the first arm's width). Same for `u8` vs `i64`. All ints are one join
+  class here; a width rule (widen to the larger, or E1003) is open.
+- A 3-arm implicit tail `match` in a `-> f64` function with arms `1` / `2.5` /
+  `3` returns `0.0` for every arm. The 2-arm form and the tail `if` form are
+  right. The tail-statement join (`hir_tail_if_value_type`) is a separate path
+  from the value join fixed here.
+- A lambda body is value position even when the call result is discarded:
+  `val f = z if c: p(1) else: q(2)` followed by `f(true)` is now E1003
+  (`i64` vs `text`); it ran on `r`. The lowering cannot see that every call
+  site discards the result. Write the lambda with a statement body, or give
+  both arms one type.
+- Arms typed through a generic call or an untyped lambda (`gen(x)`, `y: y +
+  1`) are ANY and belong to class (A); they still print garbage.
 
 ### Sweep of existing code (2026-11-27)
 
@@ -445,8 +483,24 @@ that ends in `continue` and so yields no value. Not run: the full bootstrap and
 the rest of `test/01_unit` (9,985 specs; a spec takes 30-200 s through
 `simple test` here). `storage_view_v1_spec`, `parsers_json_core_spec`,
 `if_val_match_diverging_value_type_spec` and `match_empty_array_bug_spec` pass
-through `simple test` on the final seed. Spec files are scripts, so only the
-modules they import are checked.
+through `simple test` on the final seed.
+
+#### After the review fixes (2026-11-28, seed `z`)
+
+Spec files are now compiled modules, so their own functions are checked too,
+and the int-slot and float-index errors are new. Re-run in the final
+(non-audit) mode, which stops at the first error of a unit:
+
+| lane | input | lowered to completion | not verified | new E1003 |
+|---|---|---|---|---|
+| run/JIT, flattened import closure | the same 1,351 unit specs | 1,232 | 119 (100 stopped on a HIR error, 3 MIR, 3 module load, 13 no verdict) | 1: the float index in `embedding.spl` (fixed above); no value-join rejection |
+| `compile`, per file, 15 s cap | first 1,507 files of `src/compiler` (stopped there: about 35 files a minute on the loaded host) | 889 | 618 capped; `src/lib`, `src/app`, `src/os` not re-run | 0 |
+
+So the file-kind switch rejected no spec in the sample, and it was kept. The
+int-slot and float-index rules were NOT swept over `src/lib`, `src/app` or
+`src/os` per file; they are covered only as far as the 1,232 spec closures
+reach. The five specs (the four above plus `embedding_spec`) pass through
+`simple test` on the fixed seed.
 
 ### Tests
 

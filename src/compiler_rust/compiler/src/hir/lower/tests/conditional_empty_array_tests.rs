@@ -553,14 +553,27 @@ fn nested_empty_literals_are_weak_at_every_depth() {
         "    val r = if c: [[]] else: xs\n",
         "    val r = if c: xs else: [[], []]\n",
         "    val r = match n:\n        case 0: ts\n        case _: [[]]\n",
+        "    val r = match c:\n        case true: ts\n        case false: [[]]\n",
+        "    val r = match n:\n        case 0: [[]]\n        case 1: [[], []]\n        case _: ts\n",
         "    val r = if c: [] else: xs\n",
     ] {
         let source = format!("fn probe(c: bool, n: i64, xs: [[f64]], ts: [[text]], fs: [f64]) -> i64:\n{body}    0\n");
         parse_and_lower(&source).unwrap_or_else(|e| panic!("must lower:\n{body}{e}"));
     }
     // Still judged above the hollow depth, and for populated inner arrays.
-    for body in ["    val r = if c: [[]] else: fs\n", "    val r = if c: [[1]] else: xs\n"] {
+    for body in [
+        "    val r = if c: [[]] else: fs\n",
+        "    val r = if c: [[1]] else: xs\n",
+        "    val r = match n:\n        case 0: ts\n        case 1: [[]]\n        case _: xs\n",
+    ] {
         let msg = join_error(&format!("fn probe(c: bool, n: i64, xs: [[f64]], ts: [[text]], fs: [f64]) -> i64:\n{body}    0\n"));
         assert!(msg.contains("value arms disagree"), "{body}{msg}");
     }
+}
+
+#[test]
+fn nested_hollow_then_arm_takes_the_concrete_sibling_type() {
+    let module = parse_and_lower("fn probe(c: bool, xs: [[f64]]) -> i64:\n    val r = if c: [[]] else: xs\n    0\n").unwrap();
+    let Some(HirType::Array { element, .. }) = local_ty(&module, "probe", "r") else { panic!("r must be an array") };
+    assert!(matches!(module.types.get(element), Some(HirType::Array { element, .. }) if *element == TypeId::F64));
 }
