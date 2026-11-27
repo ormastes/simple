@@ -21,6 +21,16 @@ use super::lowerer::{GenericIdentityParamSpec, Lowerer};
 use crate::hir::types::{HirExpr, HirExprKind, HirStmt, HirType, TypeId};
 
 
+thread_local! {
+    /// Every `uninferred-any` report of the lowerings run on this thread.
+    static REPORTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Drain the `uninferred-any` reports (warnings and errors) of this thread.
+pub(crate) fn take_uninferred_any_reports() -> Vec<String> {
+    REPORTS.with(|reports| std::mem::take(&mut *reports.borrow_mut()))
+}
+
 fn is_numeric(ty: TypeId) -> bool {
     matches!(
         ty,
@@ -239,6 +249,7 @@ impl Lowerer {
             if !reported.insert(text.clone()) {
                 continue;
             }
+            REPORTS.with(|reports| reports.borrow_mut().push(text.clone()));
             if self.strict_any {
                 eprintln!("error[uninferred-any]: {text}");
                 first.get_or_insert(error);

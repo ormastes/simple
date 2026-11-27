@@ -671,6 +671,7 @@ impl Lowerer {
 
         // Restore context; lambda-local variables must not leak to the outer function.
         ctx.locals.truncate(saved_locals_len);
+        ctx.uninferred_locals.retain(|index, _| *index < saved_locals_len);
         ctx.local_map = saved_local_map;
 
         Ok(HirExpr {

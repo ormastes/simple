@@ -203,8 +203,45 @@ fn value_read_out_of_an_uninferred_one_is_rejected_too() {
 
 #[test]
 fn diagnostic_names_the_function_and_every_site_is_reported() {
+    let _ = crate::hir::lower::implicit_generic::take_uninferred_any_reports();
     let text = rejected("fn add(a, b):\n    a + b\nfn sub(a, b):\n    a - b\nfn main():\n    0\n");
     assert!(text.contains("in `add`"), "{text}");
+    let reports = crate::hir::lower::implicit_generic::take_uninferred_any_reports();
+    assert_eq!(reports.len(), 4, "both operands of both functions: {reports:?}");
+    assert!(reports.iter().any(|r| r.contains("in `sub`") && r.contains("parameter `b`")), "{reports:?}");
+}
+
+#[test]
+fn warning_mode_reports_the_same_sites_and_lowers_the_same_hir_as_untyped_code_always_did() {
+    // The warning must not change lowering: an annotated twin of the same
+    // body differs only in the parameter types, and the untyped body is still
+    // erased to `any` with the report attached.
+    let _ = crate::hir::lower::implicit_generic::take_uninferred_any_reports();
+    let module = lower_with("fn add(a, b):\n    a + b\nfn main():\n    0\n", false).unwrap();
+    assert_eq!(crate::hir::lower::implicit_generic::take_uninferred_any_reports().len(), 2);
+    let add = module.functions.iter().find(|f| f.name == "add").unwrap();
+    assert!(add.params.iter().all(|p| p.ty == TypeId::ANY));
+    assert_eq!(add.return_type, TypeId::ANY);
+}
+
+#[test]
+fn local_callable_shadowing_an_identity_function_is_not_instantiated() {
+    // `id(n)` calls the local lambda, which returns text, not the global `id`.
+    for decl in ["fn id(x):\n    x\n", "fn id<T>(x: T) -> T:\n    x\n"] {
+        let lambda = format!("{decl}fn probe(n: i64) -> text:\n    val id = \\v: \"n={{v}}\"\n    val r = id(n)\n    r\n");
+        let module = lower_run_lane(&lambda).unwrap();
+        assert_ne!(local_ty(&module, "probe", "r"), TypeId::I64, "{decl}");
+        let param = format!("{decl}fn probe(id: fn(i64) -> text, n: i64) -> text:\n    val r = id(n)\n    r\n");
+        let module = lower_run_lane(&param).unwrap();
+        assert_eq!(local_ty(&module, "probe", "r"), TypeId::STRING, "{decl}");
+    }
+}
+
+#[test]
+fn lambda_locals_do_not_leave_uninferred_facts_on_reused_slots() {
+    // The lambda's `t`/`u` slots are reused by `z`/`w`/`q` after it.
+    let source = "fn opaque(x):\n    val y = x\n    y\nfn probe(xs: [f64]) -> f64:\n    val f = \\v:\n        val t = opaque(v)\n        val u = opaque(v)\n        t\n    val z: f64 = 2.0\n    val w: f64 = 1.5\n    val q: [f64] = xs\n    z + w + q[0]\n";
+    lower_run_lane(source).expect("annotated locals after a lambda are typed");
 }
 
 #[test]

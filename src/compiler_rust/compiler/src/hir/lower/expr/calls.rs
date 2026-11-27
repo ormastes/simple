@@ -286,7 +286,15 @@ impl Lowerer {
             _ => ret_ty,
         };
         let erased_ret_ty = ret_ty;
-        let ret_ty = self.refine_generic_identity_return(orig_callee, resolved_callee_symbol, args, ret_ty, ctx);
+        // Only a callee that resolved to a global function has a generic
+        // signature to instantiate: a local callable (lambda, fn-typed
+        // parameter) that shadows a same-named function does not.
+        let ret_ty = match &func_hir.kind {
+            HirExprKind::Global(symbol) => {
+                self.refine_generic_identity_return(orig_callee, Some(symbol.as_str()), args, ret_ty, ctx)
+            }
+            _ => ret_ty,
+        };
         // Check the RESOLVED symbol, not the bare callee name: in a flattened
         // unit with a cross-module same-named collision, `func_hir.kind` may
         // carry a different (owner-mangled) symbol than `callee`'s bare text,
