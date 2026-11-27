@@ -3,13 +3,13 @@
 # (bug interp_private_names_selfhost_check_2026-11-09, mirror of the seed's
 # `check_private_use_names` in interpreter_module/module_loader.rs): a braced
 # `use m.{name}` naming a bare (non-pub) top-level `fn` of `m` from a file in a
-# DIFFERENT directory is diagnosed. Staged like W-HIR-UNDECL-IMPORT-001: a
-# recorded warning W-HIR-PRIVATE-IMPORT-001 by default (closure census is
-# non-zero, see the bug doc), a hard error E-HIR-PRIVATE-IMPORT-001 under
-# SIMPLE_STRICT_PRIVATE_IMPORTS=1. A `pub fn`, a module with an `export` list
-# (opaque to the seed), or a same-directory sibling import stays silent; a pair
-# frozen in scripts/check/private_import_baseline.txt is the seed's
-# `[visibility-warning]`, never an error.
+# DIFFERENT directory is a hard error E-HIR-PRIVATE-IMPORT-001 by default.
+# `export use m.{name}` re-export facades warn [W-HIR-PRIVATE-IMPORT-001]
+# without failing (matching seed export_handler.rs). A `pub fn`, a module with
+# an `export` list (opaque to the seed), a same-directory sibling, a declared
+# `friend` of an `internal_export`, or a `test/**` importer stays allowed; a
+# pair frozen in scripts/check/private_import_baseline.txt (including SCV
+# snapshot paths) is the seed's `[visibility-warning]`, never an error.
 #
 # Harness note: run WITHOUT SIMPLE_BOOTSTRAP=1 -- under that env (and no
 # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE) module_build.spl skips import resolution
@@ -18,7 +18,6 @@
 
 use std.spec
 use std.spec.step
-use std.nogc_sync_mut.io_runtime.{env_set_process}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.*
@@ -34,7 +33,7 @@ val PROVIDER_PATH = "privimp/sub/lib_mod.spl"
 val PRIVATE_PROVIDER = "fn secret_helper() -> i64:\n    42\npub fn open_api() -> i64:\n    secret_helper()"
 
 fn privimp_probe_at(provider_name: text, provider_path: text, provider_source: text,
-                    consumer_name: text, consumer_path: text, consumer_source: text, strict: text) -> [text]:
+                    consumer_name: text, consumer_path: text, consumer_source: text, _unused_mode: text) -> [text]:
     # Returns [count of HARD (non-recovered) `private fn` visibility errors, joined diagnostic messages].
     val log = Logger(level: 0)
     val provider = parse_full_frontend(provider_source, provider_name, provider_name, log)
@@ -49,10 +48,8 @@ fn privimp_probe_at(provider_name: text, provider_path: text, provider_source: t
         ]):
         case Ok(value): surfaces = value
         case Err(_): assert_true(false)
-    env_set_process("SIMPLE_STRICT_PRIVATE_IMPORTS", strict)
     var lowering = hirlowering_for_module(consumer_name, surfaces)
     lowering.lower_module(consumer)
-    env_set_process("SIMPLE_STRICT_PRIVATE_IMPORTS", "")
     var msgs = ""
     var hard_private = 0
     var i = 0
@@ -71,93 +68,165 @@ val CROSS_DIR_SRC = "use privimp.sub.lib_mod.\{secret_helper\}\nfn main() -> i64
 val SEED_TEXT = "private fn `secret_helper` of module `privimp.sub.lib_mod`"
 
 describe "HIR private fn cross-module import visibility":
-    it "warns by default on a braced import of a private fn from another directory":
-        step("given privimp/main.spl imports secret_helper from privimp/sub/lib_mod.spl when lowered then W-HIR-PRIVATE-IMPORT-001 carries the seed text, no hard error, and the name still binds")
+    it "rejects a braced import of a private fn from another directory by default":
+        step("given privimp/main.spl imports secret_helper from privimp/sub/lib_mod.spl when lowered by default then E-HIR-PRIVATE-IMPORT-001 is one hard error with the seed text and the name is not bound")
         val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main", "privimp/main.spl", CROSS_DIR_SRC, "")
-        expect(r[0]).to_equal("0")
-        expect(r[1]).to_contain("[W-HIR-PRIVATE-IMPORT-001]")
+        expect(r[0]).to_equal("1")
+        expect(r[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
         expect(r[1]).to_contain(SEED_TEXT)
         expect(r[1]).to_contain("is not visible to")
         expect(r[1]).to_contain("mark it `pub` or `export` it")
-        expect(r[1].contains("unresolved name")).to_equal(false)
+        expect(r[1].contains("W-HIR-PRIVATE-IMPORT-001")).to_equal(false)
 
-    it "rejects the same import under SIMPLE_STRICT_PRIVATE_IMPORTS=1":
-        step("given the same import when strict then E-HIR-PRIVATE-IMPORT-001 is one hard error with the seed text")
-        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main", "privimp/main.spl", CROSS_DIR_SRC, "1")
+    it "rejects an aliased private fn by default and names the source fn":
+        step("given use privimp.sub.lib_mod braced secret_helper as sh by default then the hard error names secret_helper")
+        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main", "privimp/main.spl",
+            "use privimp.sub.lib_mod.\{secret_helper as sh\}\nfn main() -> i64:\n    sh()", "")
         expect(r[0]).to_equal("1")
         expect(r[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
         expect(r[1]).to_contain(SEED_TEXT)
 
-    it "rejects an aliased private fn under strict and names the source fn":
-        step("given use privimp.sub.lib_mod braced secret_helper as sh when strict then the error names secret_helper")
-        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main", "privimp/main.spl",
-            "use privimp.sub.lib_mod.\{secret_helper as sh\}\nfn main() -> i64:\n    sh()", "1")
+    it "rejects a cross-directory private fn import when the importer uses Windows backslashes":
+        step("given privimp\\main.spl imports secret_helper from privimp\\sub\\lib_mod.spl then E-HIR-PRIVATE-IMPORT-001 rejects it")
+        val r = privimp_probe_at(PROVIDER_NAME, "privimp\\sub\\lib_mod.spl", PRIVATE_PROVIDER,
+            "privimp.main", "privimp\\main.spl", CROSS_DIR_SRC, "")
         expect(r[0]).to_equal("1")
+        expect(r[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
         expect(r[1]).to_contain(SEED_TEXT)
 
-    it "allows a pub fn from another directory even in strict mode":
+    it "allows a pub fn from another directory by default":
         step("given the same provider when main imports open_api then no diagnostic")
         val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main", "privimp/main.spl",
-            "use privimp.sub.lib_mod.\{open_api\}\nfn main() -> i64:\n    open_api()", "1")
+            "use privimp.sub.lib_mod.\{open_api\}\nfn main() -> i64:\n    open_api()", "")
         expect(r[0]).to_equal("0")
         expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
 
-    it "skips a module with an export list (opaque to the seed) even in strict mode":
+    it "skips a module with an export list (opaque to the seed) by default":
         step("given fn hidden plus export hidden when main imports hidden then no diagnostic")
         val r = privimp_probe("fn hidden() -> i64:\n    1\nexport hidden", "privimp.main", "privimp/main.spl",
-            "use privimp.sub.lib_mod.\{hidden\}\nfn main() -> i64:\n    hidden()", "1")
+            "use privimp.sub.lib_mod.\{hidden\}\nfn main() -> i64:\n    hidden()", "")
         expect(r[0]).to_equal("0")
         expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
 
-    it "allows a same-directory sibling to import the private fn even in strict mode":
+    it "allows a same-directory sibling to import the private fn by default":
         step("given privimp/sub/sibling.spl imports secret_helper from privimp/sub/lib_mod.spl then no diagnostic (compatibility exception)")
-        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.sub.sibling", "privimp/sub/sibling.spl", CROSS_DIR_SRC, "1")
+        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.sub.sibling", "privimp/sub/sibling.spl", CROSS_DIR_SRC, "")
         expect(r[0]).to_equal("0")
         expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
 
-    it "lets a test-file importer use the private fn even in strict mode":
-        step("given test/01_unit/privimp/main_spec.spl imports secret_helper from privimp/sub/lib_mod.spl when strict then no diagnostic (owner decision 2026-11-13: tests may import private items)")
-        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main_spec", "test/01_unit/privimp/main_spec.spl", CROSS_DIR_SRC, "1")
+    it "allows a Windows backslash same-directory sibling to import the private fn":
+        step("given privimp\\sub\\sibling.spl imports secret_helper from privimp\\sub\\lib_mod.spl then no diagnostic")
+        val r = privimp_probe_at(PROVIDER_NAME, "privimp\\sub\\lib_mod.spl", PRIVATE_PROVIDER,
+            "privimp.sub.sibling", "privimp\\sub\\sibling.spl", CROSS_DIR_SRC, "")
+        expect(r[0]).to_equal("0")
+        expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
+
+    it "lets a test-file importer use the private fn by default":
+        step("given test/01_unit/privimp/main_spec.spl imports secret_helper from privimp/sub/lib_mod.spl then no diagnostic (owner decision 2026-11-13: tests may import private items)")
+        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.main_spec", "test/01_unit/privimp/main_spec.spl", CROSS_DIR_SRC, "")
         expect(r[0]).to_equal("0")
         expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
         expect(r[1].contains("visibility-warning")).to_equal(false)
 
-    it "lets an absolute test path with a /test/ component import the private fn in strict mode":
-        step("given /repo/test/system/privimp_spec.spl imports secret_helper when strict then no diagnostic")
-        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.abs_spec", "/repo/test/system/privimp_spec.spl", CROSS_DIR_SRC, "1")
+    it "lets an absolute test path with a /test/ component import the private fn":
+        step("given /repo/test/system/privimp_spec.spl imports secret_helper then no diagnostic")
+        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.abs_spec", "/repo/test/system/privimp_spec.spl", CROSS_DIR_SRC, "")
         expect(r[0]).to_equal("0")
         expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
 
     it "normalises a leading ./ and backslashes like the seed's is_test_caller":
-        step("given ./test/x_spec.spl and test\\x_spec.spl importers when strict then no diagnostic")
-        val r1 = privimp_probe(PRIVATE_PROVIDER, "privimp.dot_spec", "./test/01_unit/privimp/dot_spec.spl", CROSS_DIR_SRC, "1")
+        step("given ./test/x_spec.spl and test\\x_spec.spl importers then no diagnostic")
+        val r1 = privimp_probe(PRIVATE_PROVIDER, "privimp.dot_spec", "./test/01_unit/privimp/dot_spec.spl", CROSS_DIR_SRC, "")
         expect(r1[0]).to_equal("0")
         expect(r1[1].contains("PRIVATE-IMPORT")).to_equal(false)
-        val r2 = privimp_probe(PRIVATE_PROVIDER, "privimp.bs_spec", "test\\01_unit\\privimp\\bs_spec.spl", CROSS_DIR_SRC, "1")
+        val r2 = privimp_probe(PRIVATE_PROVIDER, "privimp.bs_spec", "test\\01_unit\\privimp\\bs_spec.spl", CROSS_DIR_SRC, "")
         expect(r2[0]).to_equal("0")
         expect(r2[1].contains("PRIVATE-IMPORT")).to_equal(false)
 
-    it "still rejects a src importer of a private fn defined under test/ in strict mode":
+    it "still rejects a src importer of a private fn defined under test/":
         step("given test/helpers/privimp_helper.spl defines a private fn when src/privimp/main.spl imports it then E-HIR-PRIVATE-IMPORT-001 (only the importer side is exempt)")
         val r = privimp_probe_at("privimp_helper", "test/helpers/privimp_helper.spl",
             "fn secret_helper() -> i64:\n    42",
             "privimp.main", "src/privimp/main.spl",
-            "use privimp_helper.\{secret_helper\}\nfn main() -> i64:\n    secret_helper()", "1")
+            "use privimp_helper.\{secret_helper\}\nfn main() -> i64:\n    secret_helper()", "")
         expect(r[0]).to_equal("1")
         expect(r[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
 
-    it "still rejects a src importer whose directory merely contains test in strict mode":
-        step("given src/contest/main.spl imports secret_helper when strict then E-HIR-PRIVATE-IMPORT-001 (contest is not a test directory)")
-        val r = privimp_probe(PRIVATE_PROVIDER, "contest.main", "src/contest/main.spl", CROSS_DIR_SRC, "1")
+    it "still rejects a src importer whose directory merely contains test":
+        step("given src/contest/main.spl imports secret_helper then E-HIR-PRIVATE-IMPORT-001 (contest is not a test directory)")
+        val r = privimp_probe(PRIVATE_PROVIDER, "contest.main", "src/contest/main.spl", CROSS_DIR_SRC, "")
         expect(r[0]).to_equal("1")
         expect(r[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
 
-    it "keeps a legacy pair frozen in private_import_baseline.txt as the seed visibility-warning even in strict mode":
+    it "keeps a legacy pair frozen in private_import_baseline.txt as the seed visibility-warning":
         step("given the baseline row src/app/bootstrap_builder/codec.spl|builder_read_result_v1 when imported from another directory then a visibility-warning is recorded and no hard error")
         val r = privimp_probe_at("app.bootstrap_builder.codec", "src/app/bootstrap_builder/codec.spl",
             "fn builder_read_result_v1() -> i64:\n    1",
             "app.cli.privimp_probe", "src/app/cli/privimp_probe.spl",
-            "use app.bootstrap_builder.codec.\{builder_read_result_v1\}\nfn main() -> i64:\n    builder_read_result_v1()", "1")
+            "use app.bootstrap_builder.codec.\{builder_read_result_v1\}\nfn main() -> i64:\n    builder_read_result_v1()", "")
         expect(r[0]).to_equal("0")
         expect(r[1]).to_contain("[visibility-warning] 'builder_read_result_v1' is a private fn of module 'app.bootstrap_builder.codec'")
         expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
+
+    it "matches baselined pairs through SCV snapshot prefixes as visibility-warning instead of hard error":
+        step("given build/scv/snapshots/<rev>/src/app/bootstrap_builder/codec.spl|builder_read_result_v1 then SCV prefix stripping preserves the baseline warning")
+        val r = privimp_probe_at("app.bootstrap_builder.codec", "build/scv/snapshots/scv-revision-v1-test/src/app/bootstrap_builder/codec.spl",
+            "fn builder_read_result_v1() -> i64:\n    1",
+            "app.cli.privimp_probe", "build/scv/snapshots/scv-revision-v1-test/src/app/cli/privimp_probe.spl",
+            "use app.bootstrap_builder.codec.\{builder_read_result_v1\}\nfn main() -> i64:\n    builder_read_result_v1()", "")
+        expect(r[0]).to_equal("0")
+        expect(r[1]).to_contain("[visibility-warning] 'builder_read_result_v1' is a private fn of module 'app.bootstrap_builder.codec'")
+        expect(r[1].contains("PRIVATE-IMPORT")).to_equal(false)
+
+    it "warns without failing on an export use re-export facade matching seed export_handler":
+        step("given privimp/facade.spl re-exports secret_helper via export use then W-HIR-PRIVATE-IMPORT-001 warns and no hard error is emitted")
+        val r = privimp_probe(PRIVATE_PROVIDER, "privimp.facade", "privimp/facade.spl",
+            "export use privimp.sub.lib_mod.\{secret_helper\}", "")
+        expect(r[0]).to_equal("0")
+        expect(r[1]).to_contain("[W-HIR-PRIVATE-IMPORT-001]")
+        expect(r[1].contains("[E-HIR-PRIVATE-IMPORT-001]")).to_equal(false)
+
+    it "flattens ModuleSurface.exports when resolve_import_list uses default module_exports":
+        step("given a frozen facade ModuleSurface carrying Export entries when resolve_import_list runs with default empty module_exports then W-HIR-PRIVATE-IMPORT-001 warns instead of E-HIR-PRIVATE-IMPORT-001")
+        val log = Logger(level: 0)
+        val facade_src = "export use privimp.sub.lib_mod.\{secret_helper\}"
+        val provider = parse_full_frontend(PRIVATE_PROVIDER, PROVIDER_NAME, PROVIDER_NAME, log)
+        val facade = parse_full_frontend(facade_src, "privimp.facade", "privimp.facade", log)
+        var modules: Dict<text, Module> = {}
+        modules[PROVIDER_NAME] = provider
+        modules["privimp.facade"] = facade
+        var surfaces = ModuleSurfacesByName.empty()
+        match module_surfaces_from_test_modules(modules, [
+                SourceFile(path: PROVIDER_PATH, content: PRIVATE_PROVIDER, module_name: PROVIDER_NAME),
+                SourceFile(path: "privimp/facade.spl", content: facade_src, module_name: "privimp.facade")
+            ]):
+            case Ok(value): surfaces = value
+            case Err(_): assert_true(false)
+        var lowering = hirlowering_for_module("privimp.facade", surfaces)
+        lowering.resolve_import_list(facade.imports, "privimp.facade", false)
+        var msgs = ""
+        var hard_private = 0
+        var i = 0
+        while i < lowering.diagnostic_messages.len():
+            val m: text = lowering.diagnostic_messages[i]
+            msgs = msgs + m + "\n"
+            if i < lowering.diagnostic_recovered.len() and not lowering.diagnostic_recovered[i] and m.contains("private fn `"):
+                hard_private = hard_private + 1
+            i = i + 1
+        expect("{hard_private}").to_equal("0")
+        expect(msgs).to_contain("[W-HIR-PRIVATE-IMPORT-001]")
+        expect(msgs.contains("[E-HIR-PRIVATE-IMPORT-001]")).to_equal(false)
+
+    it "allows a declared friend to import an internal_export fn while rejecting unrelated callers":
+        step("given friend client + internal_export secret_helper when client imports it then allowed, when other imports it then E-HIR-PRIVATE-IMPORT-001")
+        val friend_provider = "friend client\ninternal_export secret_helper\nfn secret_helper() -> i64:\n    42"
+        val r_friend = privimp_probe_at("server.sub.provider", "src/server/sub/provider.spl", friend_provider,
+            "client.caller", "src/client/caller.spl",
+            "use server.sub.provider.\{secret_helper\}\nfn main() -> i64:\n    secret_helper()", "")
+        expect(r_friend[0]).to_equal("0")
+        expect(r_friend[1].contains("PRIVATE-IMPORT")).to_equal(false)
+        val r_other = privimp_probe_at("server.sub.provider", "src/server/sub/provider.spl", friend_provider,
+            "other.caller", "src/other/caller.spl",
+            "use server.sub.provider.\{secret_helper\}\nfn main() -> i64:\n    secret_helper()", "")
+        expect(r_other[0]).to_equal("1")
+        expect(r_other[1]).to_contain("[E-HIR-PRIVATE-IMPORT-001]")
