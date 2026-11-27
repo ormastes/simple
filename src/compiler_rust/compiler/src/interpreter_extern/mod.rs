@@ -1609,6 +1609,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_fsync", file_io::rt_file_fsync);
     insert_simple!("rt_file_sync", file_io::rt_file_fsync);
     insert_simple!("rt_dir_sync", file_io::rt_dir_sync);
+    insert_simple!("rt_file_read_under_root_bytes", file_io::rt_file_read_under_root_bytes);
+    insert_simple!("rt_file_write_under_root_bytes", file_io::rt_file_write_under_root_bytes);
     insert_simple!("rt_file_get_size", file_io::rt_file_get_size);
     insert_simple!("rt_file_hash", cranelift::rt_file_hash);
     insert_simple!("rt_file_hash_sha256", file_io::rt_file_hash_sha256);

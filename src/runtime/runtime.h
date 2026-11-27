@@ -1822,6 +1822,8 @@ int64_t     rt_file_read_regular_no_follow_bounded(
 /* Byte-array sibling for binary payloads (images/archives); identical
  * admission arms, no UTF-8 decode. Returns a [u8] RuntimeValue. */
 int64_t     rt_file_read_regular_no_follow_bounded_bytes(const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes);
+int64_t     rt_file_read_under_root_bytes(const uint8_t* root_ptr, uint64_t root_len, const uint8_t* rel_ptr, uint64_t rel_len, int64_t max_bytes);
+int8_t      rt_file_write_under_root_bytes(int64_t root, int64_t rel, int64_t data);
 /* Arm code of the last bounded no-follow read: 77 never called, 100 succeeded,
  * 1..10 a named rejection, 0 this extern unresolved in the reading lane. */
 int64_t     rt_file_read_regular_no_follow_last_failure(void);

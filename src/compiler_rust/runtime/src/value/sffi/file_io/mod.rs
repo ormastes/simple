@@ -28,6 +28,7 @@
 // Module declarations
 pub mod metadata;
 pub mod file_ops;
+pub mod under_root;
 pub mod directory;
 pub mod descriptor;
 pub mod io_file;
@@ -51,7 +52,7 @@ pub use metadata::{
 };
 pub use file_ops::{
     rt_file_canonicalize, rt_file_read_text, rt_file_read_regular_no_follow_bounded, rt_file_read_regular_no_follow_last_failure, rt_file_read_text_rv,
-    rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_size, rt_file_hash_sha256, rt_file_fsync, rt_dir_sync,
+    rt_file_write_text, rt_file_copy, rt_file_remove, rt_file_size, rt_file_hash_sha256, rt_file_fsync, rt_dir_sync, rt_file_read_under_root_bytes, rt_file_write_under_root_bytes,
     rt_file_fsync_cached, rt_file_rename, rt_file_read_lines, rt_file_append_text, rt_file_read_bytes,
     rt_file_write_bytes, rt_file_write_bytes_array, rt_file_atomic_write, rt_file_atomic_write_mode,
     rt_file_atomic_write_bytes_array, rt_file_wrap_smf_dynlib, rt_file_extract_smf_dynlib, rt_file_move,

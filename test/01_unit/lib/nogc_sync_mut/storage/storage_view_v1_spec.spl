@@ -15,7 +15,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_di
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error, _sv_save_inner}
-use std.nogc_sync_mut.sosix.fs_v1.{dir_create_new}
+use std.nogc_sync_mut.sosix.fs_v1.{dir_create_new, file_read_under_root_bytes, file_write_bytes_under_root}
 use app.io.file_ops.{path_absolute}
 
 fn _hex(b: [u8]) -> text:
@@ -285,6 +285,67 @@ describe "storage_view_v1 hardening":
         # Remove only the junction itself; the target dir must survive.
         process_run("cmd", ["/c", "rmdir", (vol_dir + "/link").replace("/", "\\")])
         expect(file_exists(outside + "/secret.txt")).to_equal(true)
+        _cleanup(base)
+
+    only_on_windows "open-time primitives refuse a junction at an intermediate component":
+        # Bypasses the view's parent walk: the runtime itself must refuse a link
+        # at ANY component when it opens, so a swap after that walk cannot redirect.
+        val base = _temp("junction-open")
+        val root = base + "/root"
+        val outside = base + "/outside"
+        expect(dir_create_all(root + "/a")).to_equal(true)
+        expect(dir_create_all(outside)).to_equal(true)
+        expect(file_write_bytes(outside + "/secret.txt", "secret".bytes())).to_equal(true)
+        val made = process_run("cmd", ["/c", "mklink", "/J", (root + "/a/link").replace("/", "\\"), outside.replace("/", "\\")])
+        expect(made.2).to_equal(0)
+        val read = file_read_under_root_bytes(root, "a/link/secret.txt", 1000)
+        var refused = false
+        match read:
+            case Ok(_): refused = false
+            case Err(_): refused = true
+        expect(refused).to_equal(true)
+        expect(file_write_bytes_under_root(root, "a/link/new.txt", "evil".bytes())).to_equal(false)
+        expect(file_exists(outside + "/new.txt")).to_equal(false)
+        # A link at the leaf is refused too, and the outside target is untouched.
+        expect(file_write_bytes_under_root(root, "a/link", "evil".bytes())).to_equal(false)
+        expect(file_exists(outside + "/secret.txt")).to_equal(true)
+        process_run("cmd", ["/c", "rmdir", (root + "/a/link").replace("/", "\\")])
+        _cleanup(base)
+
+    it "refuses runtime staging names as view paths and does not scan residue":
+        val base = _temp("staging-names")
+        val store = _store(base)
+        val view = _new_view(base, store, "v1", 1000)
+        val a = storage_view_v1_write(view, ".simple-under-root-1.tmp", "x".bytes())
+        expect(a.status).to_equal("rejected")
+        val b = storage_view_v1_write(view, "d/.simple-atomic-bytes-x", "x".bytes())
+        expect(b.status).to_equal("rejected")
+        # Residue left by a crash is ignored by the upper scan (and so by write accounting).
+        expect(file_write_bytes(base + "/views/v1/upper/.simple-under-root-9-9.tmp", "junk".bytes())).to_equal(true)
+        val ok = storage_view_v1_write(view, "real.txt", "ok".bytes())
+        expect(ok.status).to_equal("ok")
+        expect(ok.used.value).to_equal(2)
+        _cleanup(base)
+
+    it "open-time primitives write and read a nested path and reject escapes":
+        val base = _temp("under-root")
+        val root = base + "/root"
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write_bytes_under_root(root, "x/y/z.bin", "payload".bytes())).to_equal(true)
+        var got = ""
+        match file_read_under_root_bytes(root, "x/y/z.bin", 1000):
+            case Ok(value): got = _hex(value)
+            case Err(_): got = "err"
+        expect(got).to_equal(_hex("payload".bytes()))
+        expect(file_write_bytes_under_root(root, "x/y/z.bin", "again".bytes())).to_equal(true)
+        expect(file_write_bytes_under_root(root, "../escape.txt", "evil".bytes())).to_equal(false)
+        expect(file_write_bytes_under_root(root, "x/../escape.txt", "evil".bytes())).to_equal(false)
+        expect(file_exists(base + "/escape.txt")).to_equal(false)
+        var missing = false
+        match file_read_under_root_bytes(root, "x/none.bin", 1000):
+            case Ok(_): missing = false
+            case Err(_): missing = true
+        expect(missing).to_equal(true)
         _cleanup(base)
 
     it "rejects reserved device names as view ids and root names":

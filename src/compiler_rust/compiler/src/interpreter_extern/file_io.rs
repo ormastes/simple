@@ -878,6 +878,51 @@ pub fn rt_dir_sync(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `rt_file_read_under_root_bytes(root, rel, max_bytes) -> [u8]?`: read `rel`
+/// under the trusted `root`, refusing a link at every component at open time
+/// (todo 479). Shares the runtime crate's implementation; failure arm is
+/// recorded for `rt_file_read_regular_no_follow_last_failure`.
+pub fn rt_file_read_under_root_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let root = extract_path(args, 0)?;
+    let rel = extract_path(args, 1)?;
+    let max_bytes = match args.get(2) {
+        Some(Value::Int(value)) if *value >= 0 => *value,
+        _ => return Ok(interp_read_no_follow_fail(INTERP_READ_NF_BAD_ARGS)),
+    };
+    match simple_runtime::value::sffi::file_io::under_root::read_under_root(&root, &rel, max_bytes) {
+        Ok(bytes) => {
+            INTERP_READ_NF_LAST_FAILURE.with(|cell| cell.set(INTERP_READ_NF_OK));
+            Ok(Value::byte_array(bytes))
+        }
+        Err(code) => Ok(interp_read_no_follow_fail(code)),
+    }
+}
+
+/// `rt_file_write_under_root_bytes(root, rel, data) -> bool` (todo 479).
+pub fn rt_file_write_under_root_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    let root = extract_path(args, 0)?;
+    let rel = extract_path(args, 1)?;
+    let bytes: Vec<u8> = if let Some(view) = args.get(2).and_then(Value::byte_array_view) {
+        view.to_vec()
+    } else {
+        let items: Vec<Value> = match args.get(2) {
+            Some(Value::Array(items)) => items.iter().cloned().collect(),
+            Some(Value::FrozenArray(items)) => items.iter().cloned().collect(),
+            _ => return Ok(Value::Bool(false)),
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for item in items.iter() {
+            match item {
+                Value::Int(value) => out.push(*value as u8),
+                Value::UInt { value, .. } => out.push(*value as u8),
+                _ => return Ok(Value::Bool(false)),
+            }
+        }
+        out
+    };
+    Ok(Value::Bool(simple_runtime::value::sffi::file_io::under_root::write_under_root(&root, &rel, &bytes)))
+}
+
 /// CRC32 checksum of a text string. Returns the checksum as i64.
 pub fn rt_crc32_text(args: &[Value]) -> Result<Value, CompileError> {
     let text = extract_content(args, 0)?;

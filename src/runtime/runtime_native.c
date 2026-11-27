@@ -17844,6 +17844,503 @@ int8_t rt_file_atomic_write_bytes_array(int64_t path, int64_t data) {
     return ok;
 }
 
+
+/* ================================================================
+ * Open-time confinement under a trusted root (todo 479).
+ *
+ * rt_file_read_under_root_bytes / rt_file_write_under_root_bytes walk `rel`
+ * one component at a time below `root`, refusing a reparse point (Windows) or
+ * symlink (POSIX) at EVERY component at open time and holding the directory
+ * chain open until the final operation completes. A held directory cannot be
+ * renamed, deleted or replaced (Windows: no FILE_SHARE_DELETE; POSIX: every
+ * operation is fd-relative), so a junction swapped in after a path-policy walk
+ * cannot redirect the final open or write. `root` is trusted but must not be
+ * a link at its own final component. Rust twin:
+ * compiler_rust/runtime/src/value/sffi/file_io/under_root.rs.
+ * Failure arms mirror rt_file_read_regular_no_follow_last_failure: 2 bad
+ * args, 4 open, 5 metadata, 6 not regular, 7 too large, 8 link, 9 read.
+ * ================================================================ */
+#define RT_UR_MAX_DEPTH 64
+
+static int rt_ur_split(const char* rel, char* buf, size_t bufsz, char** segs, int* count) {
+    size_t len = strlen(rel);
+    if (len == 0 || len >= bufsz || rel[0] == '/') return 0;
+    memcpy(buf, rel, len + 1);
+    int n = 0;
+    char* p = buf;
+    for (;;) {
+        char* slash = strchr(p, '/');
+        if (slash) *slash = 0;
+        if (*p == 0 || strcmp(p, ".") == 0 || strcmp(p, "..") == 0 || strchr(p, '\\')
+#if defined(_WIN32)
+            || strchr(p, ':')
+#endif
+        ) return 0;
+        if (n >= RT_UR_MAX_DEPTH) return 0;
+        segs[n++] = p;
+        if (!slash) break;
+        p = slash + 1;
+    }
+    *count = n;
+    return 1;
+}
+
+static unsigned long rt_ur_temp_counter;
+#if defined(_WIN32)
+/* Windows: every step is an NtCreateFile RELATIVE to the parent directory
+ * handle (OBJECT_ATTRIBUTES.RootDirectory), so no step re-resolves a path by
+ * name. Holding a directory without share-delete does NOT stop
+ * FSCTL_SET_REPARSE_POINT (it needs only FILE_WRITE_ATTRIBUTES), but a
+ * relative open does not re-resolve a path by name. That alone is NOT enough:
+ * a relative open still FOLLOWS a reparse point set on the held directory (a
+ * relative symlink target resolves against the held directory's own path), so
+ * every open also sets OBJ_DONT_REPARSE, which fails it with
+ * STATUS_REPARSE_POINT_ENCOUNTERED (reported as the link arm 8). Each opened
+ * handle is additionally checked for FILE_ATTRIBUTE_REPARSE_POINT. */
+typedef struct { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } RtUrUstr;
+typedef struct {
+    ULONG Length; HANDLE RootDirectory; RtUrUstr* ObjectName; ULONG Attributes;
+    PVOID SecurityDescriptor; PVOID SecurityQualityOfService;
+} RtUrObjAttr;
+typedef struct { LONG_PTR Status; ULONG_PTR Information; } RtUrIosb;
+typedef LONG (NTAPI *RtUrNtCreateFileFn)(PHANDLE, ACCESS_MASK, RtUrObjAttr*, RtUrIosb*,
+    PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+
+#define RT_UR_LIST_DIR 0x1u
+#define RT_UR_ADD_FILE 0x2u
+#define RT_UR_ADD_SUBDIR 0x4u
+#define RT_UR_READ_ATTR 0x80u
+#define RT_UR_SYNC 0x100000u
+#define RT_UR_DELETE 0x10000u
+#define RT_UR_DIRECTORY_FILE 0x1u
+#define RT_UR_SYNC_IO 0x20u
+#define RT_UR_NON_DIRECTORY_FILE 0x40u
+#define RT_UR_OPEN_REPARSE 0x200000u
+#define RT_UR_FILE_OPEN 1u
+#define RT_UR_FILE_CREATE 2u
+
+typedef struct {
+    HANDLE held[RT_UR_MAX_DEPTH + 1];
+    int count;
+} RtUrChain;
+
+static void rt_ur_close(RtUrChain* c) {
+    while (c->count > 0) CloseHandle(c->held[--c->count]);
+}
+
+typedef LONG (NTAPI *RtUrNtSetInfoFn)(HANDLE, RtUrIosb*, PVOID, ULONG, ULONG);
+static RtUrNtSetInfoFn rt_ur_nt_set_info(void) {
+    static RtUrNtSetInfoFn fn;
+    if (!fn) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll) fn = (RtUrNtSetInfoFn)(void*)GetProcAddress(ntdll, "NtSetInformationFile");
+    }
+    return fn;
+}
+
+static RtUrNtCreateFileFn rt_ur_nt_create_file(void) {
+    static RtUrNtCreateFileFn fn;
+    if (!fn) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll) fn = (RtUrNtCreateFileFn)(void*)GetProcAddress(ntdll, "NtCreateFile");
+    }
+    return fn;
+}
+
+/* One open relative to `parent`; err is an arm (4 open, 6 wrong kind). */
+static HANDLE rt_ur_open_rel(HANDLE parent, const char* name, ACCESS_MASK access, ULONG share,
+        ULONG disposition, ULONG options, int* err) {
+    RtUrNtCreateFileFn nt = rt_ur_nt_create_file();
+    wchar_t wide[512];
+    int n = nt ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wide, 512) : 0;
+    if (n <= 1) { *err = 4; return INVALID_HANDLE_VALUE; }
+    RtUrUstr us;
+    us.Length = (USHORT)((n - 1) * 2);
+    us.MaximumLength = us.Length;
+    us.Buffer = wide;
+    RtUrObjAttr oa;
+    memset(&oa, 0, sizeof(oa));
+    oa.Length = sizeof(oa);
+    oa.RootDirectory = parent;
+    oa.ObjectName = &us;
+    oa.Attributes = 0x40 | 0x1000; /* OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE */
+    RtUrIosb iosb;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    LONG st = nt(&h, access, &oa, &iosb, NULL, FILE_ATTRIBUTE_NORMAL, share, disposition,
+        options | RT_UR_SYNC_IO | RT_UR_OPEN_REPARSE, NULL, 0);
+    if (st < 0) {
+        /* NOT_A_DIRECTORY / FILE_IS_A_DIRECTORY: wrong kind; everything else: open. */
+        if ((ULONG)st == 0xC000050Bu || (ULONG)st == 0xC0000280u) *err = 8; /* reparse point met */
+        else *err = ((ULONG)st == 0xC0000103u || (ULONG)st == 0xC00000BAu) ? 6 : 4;
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
+/* 0 when `h` is a non-link of the wanted kind, else the arm. */
+static int rt_ur_check(HANDLE h, int want_dir) {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(h, &info)) return 5;
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return 8;
+    int is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return is_dir == want_dir ? 0 : 6;
+}
+
+/* Open the trusted root by name, then each directory component relative to its
+ * parent. The deepest handle is c->held[c->count - 1]. 0 or an arm. */
+static int rt_ur_walk(const char* root, char** segs, int dirs, int create, RtUrChain* c) {
+    c->count = 0;
+    wchar_t* wide = rt_widen_long_path_rc(root);
+    if (!wide) return 4;
+    ACCESS_MASK access = RT_UR_LIST_DIR | RT_UR_READ_ATTR | RT_UR_SYNC |
+        (create ? (RT_UR_ADD_FILE | RT_UR_ADD_SUBDIR) : 0);
+    HANDLE h = CreateFileW(wide, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) return 4;
+    int bad = rt_ur_check(h, 1);
+    if (bad) { CloseHandle(h); return bad; }
+    c->held[c->count++] = h;
+    for (int i = 0; i < dirs; i++) {
+        int err = 0;
+        HANDLE parent = c->held[c->count - 1];
+        h = rt_ur_open_rel(parent, segs[i], access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            RT_UR_FILE_OPEN, RT_UR_DIRECTORY_FILE, &err);
+        if (h == INVALID_HANDLE_VALUE && create && err == 4) {
+            h = rt_ur_open_rel(parent, segs[i], access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                RT_UR_FILE_CREATE, RT_UR_DIRECTORY_FILE, &err);
+            /* A concurrent writer may have created it first: retry as an open. */
+            if (h == INVALID_HANDLE_VALUE)
+                h = rt_ur_open_rel(parent, segs[i], access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    RT_UR_FILE_OPEN, RT_UR_DIRECTORY_FILE, &err);
+        }
+        if (h == INVALID_HANDLE_VALUE) return err;
+        bad = rt_ur_check(h, 1);
+        if (bad) { CloseHandle(h); return bad; }
+        c->held[c->count++] = h;
+    }
+    return 0;
+}
+
+static int rt_ur_read(const char* root, const char* rel, int64_t max_bytes, uint8_t** out, size_t* out_len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    *out = NULL;
+    *out_len = 0;
+    if (max_bytes < 0 || (uint64_t)max_bytes >= (uint64_t)SIZE_MAX || !rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 2;
+    RtUrChain* c = (RtUrChain*)calloc(1, sizeof(RtUrChain));
+    if (!c) return 9;
+    int error = rt_ur_walk(root, segs, n - 1, 0, c);
+    HANDLE h = INVALID_HANDLE_VALUE;
+    uint8_t* bytes = NULL;
+    size_t total = 0;
+    if (error == 0) {
+        error = 100;
+        int err = 0;
+        h = rt_ur_open_rel(c->held[c->count - 1], segs[n - 1],
+            0x1u /* FILE_READ_DATA */ | RT_UR_READ_ATTR | RT_UR_SYNC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            RT_UR_FILE_OPEN, RT_UR_NON_DIRECTORY_FILE, &err);
+        if (h == INVALID_HANDLE_VALUE) { error = err; goto done; }
+        int bad = rt_ur_check(h, 0);
+        if (bad) { error = bad; goto done; }
+        LARGE_INTEGER size;
+        if (!GetFileSizeEx(h, &size)) { error = 5; goto done; }
+        if (size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) { error = 7; goto done; }
+        size_t capacity = (size_t)size.QuadPart + 1;
+        bytes = (uint8_t*)rt_observed_malloc_v1(capacity);
+        if (!bytes) { error = 9; goto done; }
+        for (;;) {
+            if (total == capacity) {
+                size_t limit = (size_t)max_bytes + 1;
+                if (capacity >= limit) break;
+                size_t grown = capacity > limit / 2 ? limit : capacity * 2;
+                uint8_t* replacement = (uint8_t*)rt_observed_realloc_v1(bytes, grown);
+                if (!replacement) { error = 9; goto done; }
+                bytes = replacement;
+                capacity = grown;
+            }
+            size_t chunk = capacity - total;
+            if (chunk > 1048576) chunk = 1048576;
+            DWORD count = 0;
+            if (!ReadFile(h, bytes + total, (DWORD)chunk, &count, NULL)) { error = 9; goto done; }
+            if (count == 0) break;
+            total += (size_t)count;
+        }
+        if (total > (size_t)max_bytes) error = 7;
+    }
+done:
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    rt_ur_close(c);
+    free(c);
+    if (error != 100) { free(bytes); return error; }
+    *out = bytes;
+    *out_len = total;
+    return 100;
+}
+
+/* Returns 1 on success, else 0. */
+static int rt_ur_write(const char* root, const char* rel, const uint8_t* data, size_t len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    if (!rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 0;
+    RtUrChain* c = (RtUrChain*)calloc(1, sizeof(RtUrChain));
+    if (!c) return 0;
+    int ok = 0;
+    HANDLE temp = INVALID_HANDLE_VALUE;
+    unsigned char* info = NULL;
+    if (rt_ur_walk(root, segs, n - 1, 1, c) != 0) goto done;
+    HANDLE parent = c->held[c->count - 1];
+    {
+        /* An existing leaf must be a plain file; a link or directory is refused. */
+        int err = 0;
+        HANDLE existing = rt_ur_open_rel(parent, segs[n - 1], RT_UR_READ_ATTR | RT_UR_SYNC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, RT_UR_FILE_OPEN, 0, &err);
+        if (existing != INVALID_HANDLE_VALUE) {
+            int bad = rt_ur_check(existing, 0);
+            CloseHandle(existing);
+            if (bad) goto done;
+        } else if (err != 4) {
+            goto done;
+        }
+    }
+    {
+        char name[128];
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        unsigned long seq = (unsigned long)InterlockedIncrement((volatile LONG*)&rt_ur_temp_counter);
+        snprintf(name, sizeof(name), ".simple-under-root-%lu-%lu-%08lx%08lx.tmp",
+            (unsigned long)GetCurrentProcessId(), seq,
+            (unsigned long)ft.dwHighDateTime, (unsigned long)ft.dwLowDateTime);
+        int err = 0;
+        temp = rt_ur_open_rel(parent, name, 0x40000000u /* GENERIC_WRITE */ | RT_UR_DELETE |
+            RT_UR_READ_ATTR | RT_UR_SYNC, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            RT_UR_FILE_CREATE, RT_UR_NON_DIRECTORY_FILE, &err);
+        if (temp == INVALID_HANDLE_VALUE) goto done;
+        int wrote = 1;
+        size_t off = 0;
+        while (off < len) {
+            DWORD chunk = (DWORD)((len - off) > 1048576 ? 1048576 : (len - off));
+            DWORD count = 0;
+            if (!WriteFile(temp, data + off, chunk, &count, NULL) || count == 0) { wrote = 0; break; }
+            off += count;
+        }
+        if (wrote && !FlushFileBuffers(temp)) wrote = 0;
+        if (wrote) {
+            /* INVARIANT (do not weaken): this rename cannot carry OBJ_DONT_REPARSE and
+             * DOES follow a reparse point set on RootDirectory. It is safe only because
+             * `temp` stays open WITHOUT FILE_SHARE_DELETE across the rename, which keeps
+             * the parent non-empty so FSCTL_SET_REPARSE_POINT on it fails (error 145).
+             * Adding share-delete to the temp, or closing it before the rename,
+             * reopens the write escape.
+             * Publish by a handle-relative rename (NtSetInformationFile FileRenameInformation: the Win32
+             * SetFileInformationByHandle wrapper rejects a RootDirectory with ERROR_INVALID_PARAMETER). */
+            wchar_t wide[512];
+            int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, segs[n - 1], -1, wide, 512);
+            if (wn > 1) {
+                size_t name_bytes = (size_t)(wn - 1) * 2;
+                size_t size = offsetof(FILE_RENAME_INFO, FileName) + name_bytes + 2;
+                info = (unsigned char*)calloc(1, size);
+                if (info) {
+                    FILE_RENAME_INFO* ri = (FILE_RENAME_INFO*)info;
+                    ri->ReplaceIfExists = TRUE;
+                    ri->RootDirectory = parent;
+                    ri->FileNameLength = (DWORD)name_bytes;
+                    memcpy(ri->FileName, wide, name_bytes);
+                    for (int attempt = 0; attempt < 8 && !ok; attempt++) {
+                        RtUrIosb ios;
+                        RtUrNtSetInfoFn ns = rt_ur_nt_set_info();
+                        LONG rn = ns ? ns(temp, &ios, info, (ULONG)size, 10 /* FileRenameInformation */) : -1;
+                        ok = rn >= 0;
+                        if (!ok) {
+                            /* A sharing violation or an access-denied from another open handle on
+                             * the target (even a share-all reader) can clear by itself. */
+                            if ((ULONG)rn != 0xC0000043u && (ULONG)rn != 0xC0000022u) break;
+                            Sleep((DWORD)1 << attempt);
+                        }
+                    }
+                }
+            }
+        }
+        if (!ok) {
+            FILE_DISPOSITION_INFO del;
+            del.DeleteFile = TRUE;
+            SetFileInformationByHandle(temp, FileDispositionInfo, &del, sizeof(del));
+        }
+    }
+done:
+    if (temp != INVALID_HANDLE_VALUE) CloseHandle(temp);
+    rt_ur_close(c);
+    free(c);
+    free(info);
+    return ok;
+}
+#else
+static int rt_ur_open_dir_at(int dirfd, const char* name) {
+    int fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return (errno == ELOOP || errno == ENOTDIR) ? -8 : -4;
+    return fd;
+}
+
+/* Returns the held directory fd of the parent, or a negative arm. */
+static int rt_ur_walk(const char* root, char** segs, int dirs, int create) {
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return (errno == ELOOP || errno == ENOTDIR) ? -8 : -4;
+    for (int i = 0; i < dirs; i++) {
+        int next = rt_ur_open_dir_at(fd, segs[i]);
+        if (next == -4 && create) {
+            (void)mkdirat(fd, segs[i], 0755);
+            next = rt_ur_open_dir_at(fd, segs[i]);
+        }
+        rt_crt_close(fd);
+        if (next < 0) return next;
+        fd = next;
+    }
+    return fd;
+}
+
+static int rt_ur_read(const char* root, const char* rel, int64_t max_bytes, uint8_t** out, size_t* out_len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    *out = NULL;
+    *out_len = 0;
+    if (max_bytes < 0 || (uint64_t)max_bytes >= (uint64_t)SIZE_MAX || !rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 2;
+    int parent = rt_ur_walk(root, segs, n - 1, 0);
+    if (parent < 0) return -parent;
+    int fd = openat(parent, segs[n - 1], O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    int open_errno = errno;
+    rt_crt_close(parent);
+    if (fd < 0) return open_errno == ELOOP ? 8 : 4;
+    int error = 100;
+    uint8_t* bytes = NULL;
+    size_t total = 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0) { error = 5; goto done; }
+    if (!S_ISREG(st.st_mode)) { error = 6; goto done; }
+    if (st.st_size < 0 || (uint64_t)st.st_size > (uint64_t)max_bytes) { error = 7; goto done; }
+    size_t capacity = (size_t)st.st_size + 1;
+    bytes = (uint8_t*)rt_observed_malloc_v1(capacity);
+    if (!bytes) { error = 9; goto done; }
+    for (;;) {
+        if (total == capacity) {
+            size_t limit = (size_t)max_bytes + 1;
+            if (capacity >= limit) break;
+            size_t grown = capacity > limit / 2 ? limit : capacity * 2;
+            uint8_t* replacement = (uint8_t*)rt_observed_realloc_v1(bytes, grown);
+            if (!replacement) { error = 9; goto done; }
+            bytes = replacement;
+            capacity = grown;
+        }
+        size_t chunk = capacity - total;
+        if (chunk > 1048576) chunk = 1048576;
+        ssize_t count = read(fd, bytes + total, chunk);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { error = 9; goto done; }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    if (total > (size_t)max_bytes) error = 7;
+done:
+    rt_crt_close(fd);
+    if (error != 100) { free(bytes); return error; }
+    *out = bytes;
+    *out_len = total;
+    return 100;
+}
+
+static int rt_ur_write(const char* root, const char* rel, const uint8_t* data, size_t len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    if (!rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 0;
+    int dirfd = rt_ur_walk(root, segs, n - 1, 1);
+    if (dirfd < 0) return 0;
+    int ok = 0;
+    char temp[128];
+    unsigned long seq = __atomic_fetch_add(&rt_ur_temp_counter, 1, __ATOMIC_RELAXED);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    snprintf(temp, sizeof(temp), ".simple-under-root-%lu-%lu-%lx%lx.tmp", (unsigned long)getpid(), seq, (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
+    struct stat st;
+    if (fstatat(dirfd, segs[n - 1], &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+        (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))) goto done;
+    int fd = openat(dirfd, temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) goto done;
+    int wrote = 1;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t count = write(fd, data + off, len - off);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { wrote = 0; break; }
+        off += (size_t)count;
+    }
+    if (wrote && fsync(fd) != 0) wrote = 0;
+    if (rt_crt_close(fd) != 0) wrote = 0;
+    if (!wrote || renameat(dirfd, temp, dirfd, segs[n - 1]) != 0) {
+        (void)unlinkat(dirfd, temp, 0);
+        goto done;
+    }
+    ok = 1;
+done:
+    rt_crt_close(dirfd);
+    return ok;
+}
+#endif
+
+int64_t rt_file_read_under_root_bytes(const uint8_t* root_ptr, uint64_t root_len,
+        const uint8_t* rel_ptr, uint64_t rel_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char root[RT_TEXT_PATH_MAX];
+    char rel[RT_TEXT_PATH_MAX];
+    if (root_len == 0 || rel_len == 0 ||
+        !rt_text_arg_to_path(root_ptr, root_len, root, sizeof(root)) ||
+        !rt_text_arg_to_path(rel_ptr, rel_len, rel, sizeof(rel))) return RT_RNF_FAIL(2);
+    uint8_t* bytes;
+    size_t total;
+    int status = rt_ur_read(root, rel, max_bytes, &bytes, &total);
+    if (status != 100) return RT_RNF_FAIL(status);
+    rt_rnf_last_failure = 100;
+    SplArray* result = rt_byte_array_new_len((uint64_t)total);
+    if (!result) { free(bytes); return RT_RNF_FAIL(9); }
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (total > 0 && array) memcpy(array->data, bytes, total);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
+}
+
+/* (root RuntimeValue text, rel RuntimeValue text, [u8] RuntimeValue) -> bool.
+ * Same array decoding as rt_file_atomic_write_bytes_array. */
+int8_t rt_file_write_under_root_bytes(int64_t root_value, int64_t rel_value, int64_t data) {
+    SplArray* a = (SplArray*)(intptr_t)data;
+    if (a == NULL) return 0;
+    char* root = rt_core_string_to_cpath(root_value);
+    char* rel = rt_core_string_to_cpath(rel_value);
+    int8_t ok = 0;
+    if (root && rel) {
+        int64_t n = rt_array_len(a);
+        unsigned char* buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
+        if (buf != NULL) {
+            int packed = rt_array_is_byte_packed(a);
+            int decoded = 1;
+            for (int64_t i = 0; i < n; i++) {
+                int64_t v = rt_array_get(a, i);
+                if (!packed) {
+                    if (!rt_core_is_int(v)) { decoded = 0; break; }
+                    v = rt_core_as_int(v);
+                }
+                buf[i] = (unsigned char)(v & 0xFF);
+            }
+            if (decoded) ok = rt_ur_write(root, rel, buf, (size_t)n) != 0;
+            free(buf);
+        }
+    }
+    free(root);
+    free(rel);
+    return ok;
+}
 /* ================================================================
  * Stage2 Windows/MSVC link gap (2026-09-12): rt_file_atomic_write_mode,
  * rt_file_list_dir, rt_file_mode, rt_fs_read_text. Declared as externs in
