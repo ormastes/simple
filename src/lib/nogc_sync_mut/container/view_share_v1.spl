@@ -25,12 +25,15 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_seal_readonly, file_write_b
 use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_remove_all}
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.file_system.metadata.{file_mode_bits}
+use std.nogc_sync_mut.io_runtime.{env_get}
 
 pub unit ShareCountV1: i64
 export ShareCountV1
 
 val _PIN_OWNER = "pure-container"
 val _MAX_OBJECT_BYTES: i64 = 268435456
+val _ROOT_PREFIX = "container."
 
 pub struct ContainerViewCreateV1:
     status: text           # "ok" | "rejected"
@@ -83,11 +86,30 @@ fn _object_path(store: text, key: text) -> text:
 fn _native(path: text) -> text:
     path.replace("/", "\\")
 
+# Absolute System32 directory: process_run searches the working directory first, so a
+# bare tool name would let a planted attrib.cmd run instead of the system tool.
+fn _system32() -> text:
+    var root = env_get("SystemRoot").trim()
+    if root == "":
+        root = env_get("windir").trim()
+    if root == "":
+        root = "C:\\Windows"
+    root + "\\System32"
+
+# Root name of a container's saved state. It lives in the store's root namespace, so
+# it is prefixed; create refuses a base root that starts with the prefix.
+pub fn container_view_root_name_v1(container_id: text) -> text:
+    _ROOT_PREFIX + container_id
+
+fn _read_only(path: text) -> bool:
+    val mode = file_mode_bits(path)
+    mode >= 0 and (mode & 146) == 0
+
 # Windows file id of `path` ("" when it cannot be read). `fsutil file queryfileid`
 # prints `File ID is 0x<128-bit id>`; the id is unique per volume, so two names
 # with the same id are one file.
 pub fn container_file_id_v1(path: text) -> text:
-    val ran = process_run("fsutil", ["file", "queryfileid", _native(path)])
+    val ran = process_run(_system32() + "\\fsutil.exe", ["file", "queryfileid", _native(path)])
     if ran.2 != 0:
         return ""
     val out = ran.0.trim()
@@ -109,7 +131,7 @@ fn _seal_lower(view: StorageViewV1, paths: [text]) -> text:
         return ""
     if not host_is_windows_host():
         return "seal-failed"
-    val ran = process_run("attrib", ["+R", _native(lower) + "\\*", "/S"])
+    val ran = process_run(_system32() + "\\attrib.exe", ["+R", _native(lower) + "\\*", "/S"])
     if ran.2 != 0:
         return "attrib-failed"
     for rel in paths:
@@ -127,7 +149,7 @@ pub fn container_view_residue_v1(view: StorageViewV1) -> ShareCountV1:
     if is_dir(_lower_dir(view)):
         n = n + 1
     for pin in immutable_store_v1_list_owner_pins(view.store, _PIN_OWNER):
-        if pin.pin_id.contains(view.view_id):
+        if pin.pin_id == view.view_id or pin.pin_id == "pins/" + view.view_id:
             n = n + 1
     ShareCountV1(n)
 
@@ -144,6 +166,8 @@ fn _abandon(view: StorageViewV1, reason: text) -> ContainerViewCreateV1:
 pub fn container_view_create_v1(store: text, view_root: text, container_id: text, base_root: text,
         quota: ViewBytesV1) -> ContainerViewCreateV1:
     val absent = _no_view(store, view_root, container_id)
+    if base_root.starts_with(_ROOT_PREFIX):
+        return _rejected(absent, "base-root-reserved")
     var generation = StoreGenerationV1(0)
     if base_root != "":
         val head = immutable_store_v1_root_head(store, base_root)
@@ -168,14 +192,14 @@ pub fn container_view_create_v1(store: text, view_root: text, container_id: text
 
 # Stop: save upper/ (over the base) as the container's own root, named by its id.
 pub fn container_view_stop_v1(view: StorageViewV1) -> ContainerViewStopV1:
-    val head = immutable_store_v1_root_head(view.store, view.view_id)
+    val head = immutable_store_v1_root_head(view.store, container_view_root_name_v1(view.view_id))
     var expected = StoreGenerationV1(0)
     if head.status == "ok":
         expected = head.generation
     elif head.status != "missing":
         return ContainerViewStopV1(status: "rejected", reason: "root-" + head.reason,
             generation: StoreGenerationV1(0))
-    val saved = storage_view_v1_save(view, view.view_id, expected)
+    val saved = storage_view_v1_save(view, container_view_root_name_v1(view.view_id), expected)
     if saved.status != "ok":
         return ContainerViewStopV1(status: "rejected", reason: saved.reason,
             generation: StoreGenerationV1(0))
@@ -217,12 +241,14 @@ pub fn container_view_verify_share_v1(view: StorageViewV1) -> ContainerViewShare
             return _proof_failed("unavailable", "file-id-unavailable", count)
         if lid == oid:
             same = same + 1
-        if file_seal_readonly(lower):
+        # Read the attribute first; a write is only attempted through a name that is
+        # already read-only, so an unsealed view can never be corrupted by the proof.
+        if _read_only(lower) and _read_only(obj):
             ro = ro + 1
-        val before = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
-        val wrote = file_write_bytes(lower, "overwrite-attempt".bytes())
-        val after = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
-        if not wrote and before == after:
-            refused = refused + 1
+            val before = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
+            val wrote = file_write_bytes(lower, "overwrite-attempt".bytes())
+            val after = file_read_regular_no_follow_bounded(obj, _MAX_OBJECT_BYTES).unwrap_or("")
+            if not wrote and before == after:
+                refused = refused + 1
     ContainerViewShareProofV1(status: "ok", reason: "", entries: ShareCountV1(count),
         same_file_id: ShareCountV1(same), read_only: ShareCountV1(ro), write_refused: ShareCountV1(refused))

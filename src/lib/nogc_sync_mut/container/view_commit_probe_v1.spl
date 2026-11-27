@@ -17,6 +17,7 @@ braces so it needs no escaping. Windows only: elsewhere the sample is "unavailab
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.nogc_sync_mut.io_runtime.{env_get}
 
 pub unit SampleBytesV1: i64
 export SampleBytesV1
@@ -40,12 +41,21 @@ fn _script(mode: text, path: text) -> text:
         take = "$a=[System.IO.File]::ReadAllBytes('" + path + "');$a[0]=$a[0];"
     head + take + "$p.Refresh();Write-Output ('SAMPLE,'+($p.PrivateMemorySize64-$b)+','+($p.WorkingSet64-$w))"
 
+# Absolute path: process_run looks in the working directory first.
+fn _powershell() -> text:
+    var root = env_get("SystemRoot").trim()
+    if root == "":
+        root = env_get("windir").trim()
+    if root == "":
+        root = "C:\\Windows"
+    root + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+
 fn _sample(mode: text, path: text) -> CommitSampleV1:
     if not host_is_windows_host():
         return _failed("unavailable", "windows-only")
     if path.contains("'"):
         return _failed("failed", "path-quote")
-    val ran = process_run("powershell", ["-NoProfile", "-NonInteractive", "-Command", _script(mode, path.replace("/", "\\"))])
+    val ran = process_run(_powershell(), ["-NoProfile", "-NonInteractive", "-Command", _script(mode, path.replace("/", "\\"))])
     if ran.2 != 0:
         return _failed("failed", "powershell-exit-" + ran.2.to_string() + ": " + ran.1.trim())
     for line in ran.0.split("\n"):
