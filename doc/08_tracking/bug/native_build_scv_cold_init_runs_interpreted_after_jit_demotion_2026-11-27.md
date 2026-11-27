@@ -108,3 +108,38 @@ The three source fixes above dodge seed bugs; they are not closed by this change
 1. Same-name type field inference: lowering `Pointcut.matches_name` inferred `self` as `ANY` while four `Pointcut` types coexisted (trait in `00.common/cache_contract/aspect_plugin_model_v1.spl:10`, class in `35.semantics/aspect_seal/facet_model.spl:93`, struct in `src/lib/nogc_sync_mut/src/aop.spl:24`, and the renamed core struct). Three remain after the rename. Same class as the OPEN `doc/08_tracking/bug/browser_4k_whole_module_dejit_name_collisions_2026-10-04.md` (rename-to-dodge); the RESOLVED `hir_type_inference_any_field_2026-05-02.md` does not cover this instance.
 2. Bare-receiver method ambiguity: `files[path].as_str()` on a `Dict<text, SdnValue>` index gave `CODEGEN-AMBIGUOUS-METHOD` (4 candidates). Covered by the OPEN `doc/08_tracking/bug/codegen_bare_method_receiver_type_blind_candidate_selection_2026-07-28.md`; this is a new site.
 3. Docstring counted as a skipped top-level statement: `jit_skipped_top_level_statements` in `src/compiler_rust/driver/src/exec_core.rs` (the `N::Expression(_)` arm, ~line 466) counts a bare string literal above a `pub fn` as a statement the JIT would skip and demotes the whole entry module. Other entry-capable files with the pattern: `src/app/ui/chrome_showcase/main.spl`, `startup_aspect_packs.spl:91`, `smf_elf_parser.spl:240`, `smf_writer.spl:184`. Fix in the seed: ignore bare string-literal expression statements (docstrings).
+
+## Post-source_closure stall: measured (2026-11-27, seed simple-local-20261127h, worktree c27-census)
+
+The silent period after `source_closure 93/93` is NOT a hang and NOT clang/lld/cargo (no such children ever
+appear). Phase map for `native-build <entry>` on a 3-line entry:
+
+1. Coordinator SCV admission/inventory: 331 s cold-init (`SIMPLE_SCV_INVENTORY_COLD_INIT=1`), **209 s** on the
+   next run WITHOUT the env var, **21-24 s** from the run after that (journal/cursor now warm in `build/scv`).
+   Iterate WITHOUT `SIMPLE_SCV_INVENTORY_COLD_INIT` once one cold-init has completed in the checkout.
+2. Parse shard child (`run src/app/cli/parse_shard_main.spl --parse-fibers=0/1`, default `SIMPLE_PARSE_SHARDING`):
+   source_closure 93 files in ~125-132 s, then the FileFiber parse loop
+   (`_driver_run_parse_fibers`, `src/compiler/80.driver/driver_parse_shard_entry.spl`) is the silent part:
+   one busy core, ~2 GB WS. New `[build-trace] parse-fibers:file:{start,parsed,tldr-done}` points (this change)
+   show per-file cost: io_runtime.spl 2 KB 4.3 s parse + 0.3 s TLDR; external_text.spl 22 KB 55 s parse + 83 s TLDR;
+   file_text_session.spl 17 KB 40 s parse + 40 s TLDR; i.e. ~2.5 ms/byte parse + ~2-4 ms/byte TLDR summary.
+   7 files took 300 s; with 93 files this phase alone is well over 30 min. The shard is only a cache warmer
+   (its output is parser/TLDR cache files), and HIR shards (hir=3) and the final worker repeat the same
+   frontend work afterwards.
+3. `SIMPLE_PARSE_SHARDING=0` skips parse AND HIR warm pools (admission 23 s) but then
+   `mir_parallel=-1` ("memory budget cannot fit a MIR worker alongside the coordinator", coordinator RSS ~3.5 GB)
+   fails with `error: MIR shard admission refused`; add `SIMPLE_MIR_SHARDING=0` to reach the single final worker.
+4. Final worker (`run src/app/cli/native_build_worker.spl`): ~1 cpu-s per wall-s, silent (on Windows its stdout is captured by
+   `process_run_timeout_live` until exit), >12 min and still running when last sampled.
+
+Root cause of the slowness (from code reading, Fable review): the coordinator forces the interpreter on its children.
+`native_build_main.spl:2793-2799` sets `SIMPLE_EXECUTION_MODE=interpret` when unset on a non-bootstrap route; `run_parse_shards` spawns `parse_shard_main.spl` (and later the final worker) with the inherited env, and the seed maps `interpret` to `ExecutionMode::Interpret` (`exec_core.rs:160`), so the JIT is never tried (no demotion line). Parse alone is ~400 B/s, parse + TLDR ~160-210 B/s. Forced interpretation was introduced after `native_build_direct_seed_jit_hang_2026-07-30.md`. Probe: export `SIMPLE_EXECUTION_MODE=jit` in the outer shell (the coordinator only overrides an empty mode). Fast iteration recipe: `SIMPLE_PARSE_SHARDING=0 SIMPLE_MIR_SHARDING=0 SIMPLE_BUILD_TRACE=1`
+after one warm-up admission.
+
+Run 4 result (`SIMPLE_PARSE_SHARDING=0 SIMPLE_MIR_SHARDING=0`): admission 21 s, then the single final worker ran
+the full 2400 s `timeout` cap (coordinator saw rc=143 at +2337 s; worker CPU ~1 core, WS ~2 GB, no child
+processes, no clang/lld ever spawned) and produced no exe, so the smoke output (`true` / `false`) is still NOT
+reached and todo 478 / the plan-doc "STILL OWED native link smoke" stay open. The worker's `[build]` progress
+lines are captured on Windows (`process_run_bounded` / `process_run_timeout_windows`; Unix relays live) and not echoed until exit, so its internal phase at the kill is
+unknown; next step is to make the worker's stdout live (or `SIMPLE_NATIVE_BUILD_WORKER_SPAWN_TRACE`) and re-run
+with a >2400 s cap, or run the children on JIT (see root cause above).
