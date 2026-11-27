@@ -54,7 +54,7 @@ went 0/7 and `gzip_rfc1951_1952_spec.spl` 77/116; with this fix 6/7 and 82/116
 
 Follow-up (2026-11-28): the rest of the chain is now public too, so no baseline
 row is left anywhere on the zip/deflate path. `crc32.spl` publishes `crc32`,
-`crc32_init/update/finalize`, `crc32c*` and `update_byte`. `gzip/deflate.spl`
+`crc32_init/update/finalize`, and `crc32c*`; `update_byte` stays private (nothing imports it, its row was a leftover). `gzip/deflate.spl`
 publishes `deflate_block_stored/fixed/fixed_sync_flush` and
 `deflate_length_code/distance_code`. `gzip/lz77.spl` publishes `lz77_compress`.
 All 15 baseline rows are removed.
