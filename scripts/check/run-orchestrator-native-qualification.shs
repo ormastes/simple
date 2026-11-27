@@ -42,8 +42,9 @@
 #   --no-guest      skip the guest-VM wrapper
 # Environment:
 #   ORCH_QUAL_SSH_PORT (2299)            ORCH_QUAL_SPEC_TIMEOUT (1800 s)
-#   ORCH_QUAL_PEER_BUILD_TIMEOUT (14400) ORCH_QUAL_NATIVE_BUILD_ARGS ("")
-#   ORCH_QUAL_MEM_MAX (30G; 0 = no cgroup cap; needs `systemd-run --user`)
+#   ORCH_QUAL_PEER_BUILD_TIMEOUT (14400) ORCH_QUAL_NATIVE_BUILD_ARGS ("--threads 4")
+#   ORCH_QUAL_MEM_MAX (60% of MemAvailable, min 30G; 0 = no cgroup cap;
+#                      needs `systemd-run --user`)
 #   ORCH_QUAL_CACHE_SCOPE (orch-native-qual)
 
 set -u
@@ -65,8 +66,22 @@ INTENT_FIXTURE="test/fixtures/orchestration/caret_agent_session.sdn"
 SSH_PORT="${ORCH_QUAL_SSH_PORT:-2299}"
 SPEC_TIMEOUT="${ORCH_QUAL_SPEC_TIMEOUT:-1800}"
 PEER_BUILD_TIMEOUT="${ORCH_QUAL_PEER_BUILD_TIMEOUT:-14400}"
-MEM_MAX="${ORCH_QUAL_MEM_MAX:-30G}"
+# Memory cap for each spec run and for the peer build. Measured 2026-11-27 with
+# a stage-2 compiler: under 30G the peer build either OOMs (more than 4 parse
+# shards, or forced parallel workers) or degrades to ONE serial worker at
+# ~75 s per unit (~20 h for 976 modules). So the default takes 60% of the
+# memory available at start, never below 30G; UNVERIFIED above 30G.
+default_mem_max() {
+    dm_kb=$(sed -n 's/^MemAvailable: *\([0-9]*\) kB/\1/p' /proc/meminfo 2>/dev/null)
+    case "$dm_kb" in ''|*[!0-9]*) echo 30G; return ;; esac
+    dm_g=$((dm_kb * 6 / 10 / 1048576))
+    if [ "$dm_g" -lt 30 ]; then dm_g=30; fi
+    echo "${dm_g}G"
+}
+MEM_MAX="${ORCH_QUAL_MEM_MAX:-$(default_mem_max)}"
 CACHE_SCOPE="${ORCH_QUAL_CACHE_SCOPE:-orch-native-qual}"
+# 8 default workers under a 30G cap were OOM-killed (rc=143) on 2026-11-27; 4 fit.
+PEER_BUILD_ARGS="${ORCH_QUAL_NATIVE_BUILD_ARGS---threads 4}"
 
 die() {
     echo "ERROR — $*"
@@ -172,6 +187,7 @@ selftest() {
 #!/bin/sh
 if [ "$1" = "native-build" ]; then
     [ "${FAKE_BUILD_FAIL:-0}" = "1" ] && { echo "error: fake codegen failure"; exit 1; }
+    [ "${FAKE_BUILD_FAIL:-0}" = "oom" ] && { echo "Terminated"; exit 143; }
     while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
     printf '#!/bin/sh\nexit 0\n' > "$out"; chmod +x "$out"; exit 0
 fi
@@ -253,6 +269,11 @@ FAKE
         st_rc=$?
         [ "$st_rc" -eq 1 ] || selftest_fail "peer build failure: exit $st_rc, wanted 1"
         selftest_expect "$ST/out/last-run.txt" '^FAIL t/ssh_spec.spl .*peer-build-failed' "case6 fail"
+        FAKE_BUILD_FAIL=oom ORCH_QUAL_IN_SELFTEST=1 ORCH_QUAL_MEM_MAX=0 sh "$0" --root "$ST/root" \
+            --out-dir "$ST/out" --no-guest --list "$ST/l6" "$ST/fake" > "$ST/out.txt" 2>&1
+        st_rc=$?
+        [ "$st_rc" -eq 0 ] || selftest_fail "peer build killed: exit $st_rc, wanted 0"
+        selftest_expect "$ST/out/last-run.txt" '^BLOCKED t/ssh_spec.spl .*peer-build-resource-limit' "case6 blocked"
     fi
 
     rm -rf "$ST"
@@ -368,13 +389,37 @@ ensure_peer() {
     rm -f "$ep_out" "$ep_id"
     ep_log="$OUT_DIR/logs/peer-build.log"
     echo "peer: building $GATEWAY_ENTRY with $BIN (timeout ${PEER_BUILD_TIMEOUT}s) ..."
+    # The build runs in the background so a compile error stops it at once: a
+    # failed native-build has been seen to keep respawning workers for more
+    # than 30 minutes after `phase 3 FAILED` instead of exiting.
     # shellcheck disable=SC2086
     SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE="$CACHE_SCOPE-peer" $WRAP timeout "$PEER_BUILD_TIMEOUT" \
-        "$BIN" native-build "$GATEWAY_ENTRY" ${ORCH_QUAL_NATIVE_BUILD_ARGS:-} -o "$ep_out" > "$ep_log" 2>&1
+        "$BIN" native-build "$GATEWAY_ENTRY" $PEER_BUILD_ARGS -o "$ep_out" > "$ep_log" 2>&1 &
+    ep_pid=$!
+    ep_stopped=""
+    while kill -0 "$ep_pid" 2>/dev/null; do
+        if grep -q 'first-compile-error\|phase 3 FAILED' "$ep_log" 2>/dev/null; then
+            kill "$ep_pid" 2>/dev/null
+            ep_stopped=" (stopped on first compile error)"
+            break
+        fi
+        sleep 5
+    done
+    wait "$ep_pid"
     ep_rc=$?
-    if [ "$ep_rc" -ne 0 ] || [ ! -x "$ep_out" ]; then
-        ep_first=$(grep -i -m 1 'error' "$ep_log" | cut -c1-200)
-        PEER_ERR="peer-build-failed rc=$ep_rc log=$ep_log first-error: ${ep_first:-none}"
+    if [ "$ep_rc" -ne 0 ] || [ -n "$ep_stopped" ] || [ ! -x "$ep_out" ]; then
+        ep_first=$(tr '\r' '\n' < "$ep_log" | grep -m 1 'first-compile-error' | cut -c1-300)
+        [ -n "$ep_first" ] || ep_first=$(tr '\r' '\n' < "$ep_log" | grep -m 1 '^error\|\[ERROR\]' | cut -c1-300)
+        rm -f "$ep_out"
+        # No compiler diagnostic and a timeout or signal: the build ran out of
+        # time or memory (cgroup OOM shows as rc 143/137). That is a resource
+        # limit of this host, reported as BLOCKED, not a verdict on the source.
+        if [ -z "$ep_first" ] && [ -z "$ep_stopped" ] && { [ "$ep_rc" -eq 124 ] || [ "$ep_rc" -ge 128 ]; }; then
+            PEER_BLOCKED=1
+            PEER_ERR="peer-build-resource-limit rc=$ep_rc (124=timeout ${PEER_BUILD_TIMEOUT}s, 137/143=killed, MemoryMax=$MEM_MAX) log=$ep_log"
+            return 1
+        fi
+        PEER_ERR="peer-build-failed rc=$ep_rc$ep_stopped log=$ep_log first-error: ${ep_first:-none}"
         return 1
     fi
     printf '%s\n' "$ep_want" > "$ep_id"
@@ -391,7 +436,12 @@ ssh_round_trip() {
         return
     }
     [ -f "$ROOT/$INTENT_FIXTURE" ] || die "intent fixture missing: $INTENT_FIXTURE"
-    ensure_peer || { record FAIL "$srt_spec" "$PEER_ERR"; return; }
+    PEER_BLOCKED=0
+    ensure_peer || {
+        if [ "$PEER_BLOCKED" -eq 1 ]; then record BLOCKED "$srt_spec" "$PEER_ERR"
+        else record FAIL "$srt_spec" "$PEER_ERR"; fi
+        return
+    }
 
     FIX=$(mktemp -d "${TMPDIR:-/tmp}/orch-qual-ssh.XXXXXX") || die "mktemp for the ssh fixture"
     chmod 700 "$FIX"

@@ -159,3 +159,45 @@ fixtures. The estimate above covers signed Linux provisioning.
 - **New blocker:** `compiler_cli_build` aborted with `rss-cap-exceeded` (60 GiB). Record:
   `doc/08_tracking/bug/stage2_cli_build_rss_cap_leak_check_closure_2026-11-27.md`.
   Resume with `BOOTSTRAP_VERIFY_MODULE_WORKERS=1`. The `test_runner_build` row (the #12122 fix) is still unexercised.
+
+## Update 2026-11-27 (native qualification prep)
+
+- **Runner:** `sh scripts/check/run-orchestrator-native-qualification.shs <self-hosted simple>`
+  runs the 134 `cited` and `inventory` specs of
+  `scripts/check/orchestrator_native_qualification_specs.txt` one at a time, then the SSH
+  round trip (builds or reuses the peer, generates keys and the `SIMPLE_CARET_SSH_ACCEPTANCE_*`
+  fixture, submits one intent, starts and stops a user sshd on 127.0.0.1:2299), then
+  `scripts/check/check-linux-orchestrator-host-qemu.shs --run-specs <bin>` when present.
+  Verdicts go to `build/orch-native-qual/last-run.txt`. Exit 1 on any FAIL, 2 on a script
+  error; BLOCKED and NOT_RUN are counted separately and exit 0. `--selftest` uses a fake binary.
+- **Stage-2 peer build: NOT BUILT.** Compiler:
+  `build/bootstrap/pinned-src/pinned-967f9178950e/.simple/storage/build/bootstrap/stage2/aarch64-unknown-linux-gnu/simple`.
+  Command: `SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE=orchpeer-20261127 systemd-run --user --scope -q -p MemoryMax=30G timeout 14400 <stage2> native-build src/app/orchestrator/main.spl --threads 4 -o <out>`.
+  - First error: `cold HIR receipt capture failed: cold-hir-abi-unresolved:unresolved-inference:0:0:declaration=constant:PURE_CONTAINER_BACKEND_V1`
+    in `src/lib/common/contracts/container/pure_backend_v1.spl`. Worked around by stating `: text`
+    on the two alias constants (bug `p3_cold_hir_unresolved_public_interfaces_2026-10-05`).
+    The failed build did not exit: it logged `phase 3 FAILED` three times and was still
+    spawning workers 36 minutes in.
+  - After the workaround the build compiles cleanly but too slowly. The pool estimates
+    43.5 GB per HIR worker against the 30 GB cap and degrades to one serial worker:
+    21 objects in 30 minutes, about 75 s per unit, so roughly 20 h for the 976 modules.
+  - More parallelism under 30 GB is OOM-killed by the cgroup (rc=143, no compiler message):
+    8 or 6 parse shards, and 4 shards with `SIMPLE_HIR_SHARD_WORKER_KB=6000000`.
+  - Resume on a free host: `ORCH_QUAL_MEM_MAX=64G sh scripts/check/run-orchestrator-native-qualification.shs --only ssh --no-guest <self-hosted simple>`.
+    The parallel path above 30 GB is unverified.
+  - Build 3 also logged `[parser_error] std/nogc_async_mut/container/pure_adapter_v1.spl line 80:9`
+    and `108:9` (non-fatal there). Check them when a peer links.
+- **SSH round trip: still BLOCKED on the compiled peer.** The fixture and transport were
+  re-checked with the seed as both runner and peer (diagnostic only):
+  `SPEC FILE VERDICT: test/03_system/app/orchestrator/feature/caret_configured_ssh_gateway_spec.spl outcome=ERROR declared>=1 executed=1 passed=0 failed=1 skipped=0 blocked=0 dropped=0`,
+  with one peer invocation of `gateway-stdio-v1` over SSH. This is the known
+  `rt_stdin_read`/`rt_stdout_write` gap, not a native result.
+- **Seed diagnostic of the `cited` group** (`--only cited --no-guest`, Rust seed, not qualification):
+  3 PASS (`oci_execution_options_effects_spec` 11/11, `host_identity_v1_spec` 27/27,
+  `server_ssh_v1_spec` 14/14), 2 BLOCKED (`host_linux_provision_startup_v3_spec`,
+  `linux_agent_attachment_v6_spec`), 2 FAIL:
+  - `linux_service_native_identity_v3_spec` 3 failed: `unknown extern function: gettid` (seed limitation).
+  - `simple_container_api_v2_spec` 2 failed: it reads `build/simple-container-api/linux-case.sdn`
+    and `windows-case.sdn`, which nothing in the repo creates, and unwraps the error instead of
+    reporting `pending("BLOCKED: ...")`. Until the fixture exists or the spec is changed, the
+    runner exits 1 on this host.
