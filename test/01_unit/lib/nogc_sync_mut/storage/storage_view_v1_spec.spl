@@ -14,9 +14,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write_bytes, secure_temp_di
     file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error, _sv_manifest_encode, StorageViewV1}
-use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_ingest}
-use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_XXH3_128}
+use std.nogc_sync_mut.storage.storage_view_v1.{_sv_merged_count_error, _sv_save_inner}
 use std.nogc_sync_mut.sosix.fs_v1.{dir_create_new}
 use app.io.file_ops.{path_absolute}
 
@@ -318,8 +316,8 @@ describe "storage_view_v1 hardening":
     it "rejects a merged entry count above the manifest decode cap":
         # A real 4096-entry base is too slow on the interpreter; the save path
         # calls this same check before any ingest.
-        expect(_sv_merged_count_error(4096)).to_equal("")
-        expect(_sv_merged_count_error(4097)).to_equal("manifest-too-many-entries")
+        expect(_sv_merged_count_error(4096, 4096)).to_equal("")
+        expect(_sv_merged_count_error(4097, 4096)).to_equal("manifest-too-many-entries")
 
 describe "storage_view_v1 exclusive create":
     it "dir_create_new claims a fresh dir once and reports exists after":
@@ -489,36 +487,25 @@ describe "storage_view_v1 overlay shadowing":
         _cleanup(base)
 
 describe "storage_view_v1 save entry cap wiring":
-    it "storage_view_v1_save rejects with manifest-too-many-entries when base plus upper exceeds the cap":
+    it "_sv_save_inner rejects with manifest-too-many-entries when base plus upper exceeds the cap":
         val base = _temp("savecap")
         val store = _store(base)
-        val blob = immutable_store_v1_ingest(store, "x".bytes(), HASH_POLICY_V1_XXH3_128)
-        expect(blob.status).to_equal("ok")
-        # A cap-sized (4096) base manifest sharing one object key; the cap
-        # constant is not parameterised, so build the base directly.
-        var paths: [text] = []
-        var keys: Dict<text, text> = {}
-        var lens: Dict<text, i64> = {}
-        for i in 0..4096:
-            val p = "f{i}"
-            paths.push(p)
-            keys[p] = blob.object_key
-            lens[p] = 1
-        val encoded = match _sv_manifest_encode(paths, keys, lens):
-            case Ok(value): value
-            case Err(reason): reason
-        val manifest = immutable_store_v1_ingest(store, encoded.bytes(), HASH_POLICY_V1_XXH3_128)
-        expect(manifest.status).to_equal("ok")
-        val view = _new_view(base, store, "v1", 1000)
-        val capped = StorageViewV1(store: view.store, view_root: view.view_root, view_id: view.view_id,
-            base_root: view.base_root, base_generation: view.base_generation,
-            base_manifest_key: manifest.object_key, quota: view.quota, volumes: view.volumes)
-        expect(storage_view_v1_write(capped, "extra", "e".bytes()).status).to_equal("ok")
-        val objects_before = _count_objects(store)
-        val saved = storage_view_v1_save(capped, "main", StoreGenerationV1(0))
-        expect(saved.status).to_equal("rejected")
-        expect(saved.reason).to_equal("manifest-too-many-entries")
-        expect(_count_objects(store)).to_equal(objects_before)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "b1", "1".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(seed, "b2", "2".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.status).to_equal("ok")
+        expect(storage_view_v1_write(loaded.view, "u1", "x".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(loaded.view, "u2", "y".bytes()).status).to_equal("ok")
+        # Merged count is 4. Public save passes _SV_MAX_FILES (read in
+        # storage_view_v1_save); the internal entry takes the cap so the wiring
+        # is driven with a small one instead of a 4096-entry fixture.
+        val over = _sv_save_inner(loaded.view, "main", StoreGenerationV1(1), "cap-pin", "cap-owner", 3)
+        expect(over.status).to_equal("rejected")
+        expect(over.reason).to_equal("manifest-too-many-entries")
+        val at_cap = _sv_save_inner(loaded.view, "main", StoreGenerationV1(1), "cap-pin", "cap-owner", 4)
+        expect(at_cap.status).to_equal("ok")
         _cleanup(base)
 
 describe "storage_view_v1 atomic staging residue":
@@ -545,4 +532,55 @@ describe "storage_view_v1 atomic staging residue":
         expect(file_write_bytes(vdir + "/.simple-atomic-bytes-abc123/precious.txt", "keep".bytes())).to_equal(true)
         expect(storage_view_v1_destroy(view).status).to_equal("rejected")
         expect(file_exists(vdir + "/.simple-atomic-bytes-abc123/precious.txt")).to_equal(true)
+        _cleanup(base)
+
+describe "storage_view_v1 file/dir path conflicts":
+    it "rejects writing a file over a base directory and a path under a base file":
+        val base = _temp("conflict")
+        val store = _store(base)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "a/b", "ab".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(seed, "f", "f".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(loaded.status).to_equal("ok")
+        val over_dir = storage_view_v1_write(loaded.view, "a", "x".bytes())
+        expect(over_dir.status).to_equal("rejected")
+        expect(over_dir.reason).to_equal("path-conflict")
+        val under_file = storage_view_v1_write(loaded.view, "f/g", "x".bytes())
+        expect(under_file.status).to_equal("rejected")
+        expect(under_file.reason).to_equal("path-conflict")
+        expect(file_exists(base + "/views/v2/upper/a")).to_equal(false)
+        expect(file_exists(base + "/views/v2/upper/f")).to_equal(false)
+        _cleanup(base)
+
+    it "keeps write, save, load and read consistent":
+        val base = _temp("roundtrip")
+        val store = _store(base)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "a/b", "ab".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        expect(storage_view_v1_write(loaded.view, "a/c", "ac".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_write(loaded.view, "d", "d".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(loaded.view, "main", StoreGenerationV1(1)).status).to_equal("ok")
+        val again = storage_view_v1_load(store, base + "/views", "v3", "main")
+        expect(again.status).to_equal("ok")
+        expect(storage_view_v1_read(again.view, "a/b").bytes).to_equal("ab".bytes())
+        expect(storage_view_v1_read(again.view, "a/c").bytes).to_equal("ac".bytes())
+        expect(storage_view_v1_read(again.view, "d").bytes).to_equal("d".bytes())
+        _cleanup(base)
+
+    it "save fails closed when a tampered upper puts a file over a base directory":
+        val base = _temp("savetamper")
+        val store = _store(base)
+        val seed = _new_view(base, store, "v1", 1000)
+        expect(storage_view_v1_write(seed, "a/b", "ab".bytes()).status).to_equal("ok")
+        expect(storage_view_v1_save(seed, "main", StoreGenerationV1(0)).status).to_equal("ok")
+        val loaded = storage_view_v1_load(store, base + "/views", "v2", "main")
+        # Bypass the write API to reach the otherwise-unreachable merged state.
+        expect(file_write_bytes(base + "/views/v2/upper/a", "x".bytes())).to_equal(true)
+        val saved = storage_view_v1_save(loaded.view, "main", StoreGenerationV1(1))
+        expect(saved.status).to_equal("rejected")
+        expect(saved.reason).to_equal("manifest-path-conflict")
         _cleanup(base)

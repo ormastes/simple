@@ -684,6 +684,8 @@ pub fn storage_view_v1_write(view: StorageViewV1, rel_path: text, bytes: [u8]) -
         for p in base.paths:
             if p != rel_path and p.to_lower() == wanted:
                 return _sv_write_rejected("path-case-collision")
+        if _sv_base_path_conflict(base.paths, rel_path):
+            return _sv_write_rejected("path-conflict")
     val scan = match _sv_scan_upper(upper):
         case Ok(value): value
         case Err(reason): return _sv_write_rejected(reason)
@@ -708,6 +710,30 @@ pub fn storage_view_v1_write(view: StorageViewV1, rel_path: text, bytes: [u8]) -
     if reason != "":
         return _sv_write_rejected(reason)
     ViewWriteV1(status: "ok", reason: "", used: ViewBytesV1(used_other + new_len))
+
+# True when `rel` would sit beside a base entry as both a file and a directory:
+# base has an entry under `rel/`, or a FILE at an ancestor of `rel`.
+fn _sv_base_path_conflict(base_paths: [text], rel: text) -> bool:
+    val below = rel + "/"
+    for p in base_paths:
+        if p.starts_with(below) or rel.starts_with(p + "/"):
+            return true
+    false
+
+# Merged manifest must not hold a file at X and another path under `X/`.
+fn _sv_merged_path_conflict(paths: [text]) -> bool:
+    var seen: Dict<text, bool> = {}
+    for p in paths:
+        seen[p] = true
+    for p in paths:
+        val segs = p.split("/")
+        var prefix = ""
+        for i in 0..(segs.len() - 1):
+            prefix = prefix + segs[i]
+            if seen.contains_key(prefix):
+                return true
+            prefix = prefix + "/"
+    false
 
 fn _sv_read_base(view: StorageViewV1, rel_path: text) -> ViewReadV1:
     if view.base_manifest_key == "":
@@ -772,13 +798,13 @@ pub fn storage_view_v1_read(view: StorageViewV1, rel_path: text) -> ViewReadV1:
 # ------------------------------------------------------------------ save
 
 # Merged base+upper entry count must stay decodable by load (manifest cap).
-fn _sv_merged_count_error(count: i64) -> text:
-    if count > _SV_MAX_FILES:
+fn _sv_merged_count_error(count: i64, max_files: i64) -> text:
+    if count > max_files:
         return "manifest-too-many-entries"
     ""
 
 fn _sv_save_inner(view: StorageViewV1, root_name: text, expected: StoreGenerationV1,
-        pin_id: text, owner: text) -> ViewSaveV1:
+        pin_id: text, owner: text, max_files: i64) -> ViewSaveV1:
     val upper = _sv_upper_dir(view.view_root, view.view_id)
     val scan = match _sv_scan_upper(upper):
         case Ok(value): value
@@ -808,9 +834,15 @@ fn _sv_save_inner(view: StorageViewV1, root_name: text, expected: StoreGeneratio
     for rel in scan.paths:
         if not keymap.contains_key(rel):
             merged_count = merged_count + 1
-    val cap_reason = _sv_merged_count_error(merged_count)
+    val cap_reason = _sv_merged_count_error(merged_count, max_files)
     if cap_reason != "":
         return _sv_save_rejected(cap_reason)
+    var merged_paths: [text] = paths
+    for rel in scan.paths:
+        if not keymap.contains_key(rel):
+            merged_paths.push(rel)
+    if _sv_merged_path_conflict(merged_paths):
+        return _sv_save_rejected("manifest-path-conflict")
     # Upper files override base entries of the same path; the manifest encode
     # below rejects any remaining case-insensitive collision before publishing.
     for i in 0..scan.paths.len():
@@ -875,7 +907,7 @@ pub fn storage_view_v1_save(view: StorageViewV1, root_name: text, expected: Stor
         return _sv_save_rejected("pin-scope-failed")
     val pin_id = "save-" + scope.hex.substring(0, 8) + "-" + view.view_id
     val owner = "view-" + scope.hex.substring(0, 8) + "-" + view.view_id
-    val result = _sv_save_inner(view, root_name, expected, pin_id, owner)
+    val result = _sv_save_inner(view, root_name, expected, pin_id, owner, _SV_MAX_FILES)
     if result.status != "ok":
         # Every failure path drops the pin; "pin-missing" just means none was made.
         immutable_store_v1_release_pin(view.store, pin_id, owner)
