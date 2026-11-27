@@ -92,6 +92,27 @@ fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     }
 }
 
+/// Some(true) when the weak literal reached through `Some(..)`/blocks/ifs is a `{}`, Some(false)
+/// for `[]`.
+fn weak_literal_is_dict(expr: &HirExpr) -> Option<bool> {
+    match &expr.kind {
+        HirExprKind::Array(_) => Some(false),
+        HirExprKind::Dict(_) => Some(true),
+        HirExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "Some") => {
+            weak_literal_is_dict(&args[0])
+        }
+        HirExprKind::LetIn { body, .. } => weak_literal_is_dict(body),
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Expr(e)) => weak_literal_is_dict(e),
+            _ => None,
+        },
+        HirExprKind::If { then_branch, else_branch: Some(else_branch), .. } => {
+            weak_literal_is_dict(then_branch).or_else(|| weak_literal_is_dict(else_branch))
+        }
+        _ => None,
+    }
+}
+
 /// True when the arm value is concrete (not bottom, not a weak empty literal).
 fn hir_value_is_concrete(expr: &HirExpr) -> bool {
     weak_expr(expr) == Some(false)
@@ -332,7 +353,6 @@ impl Lowerer {
         // Only Option enums are looked through, never Result.
         match (self.option_enum_payload(a), self.option_enum_payload(b)) {
             (Some(pa), Some(pb)) => return self.same_collection_kind(pa, pb),
-            (None, Some(pb)) if a == TypeId::ANY => return self.same_collection_kind(TypeId::ANY, pb),
             _ => {}
         }
         matches!(
@@ -340,6 +360,22 @@ impl Lowerer {
             (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
                 | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
         )
+    }
+
+    /// `same_collection_kind` for a weak arm `weak` of type `a`. An erased (ANY) `Some([])` /
+    /// `Some({})` carries its kind only in the literal, so derive array-vs-dict from it and
+    /// require the sibling Option payload to match.
+    fn weak_arm_matches_sibling(&self, weak: &HirExpr, a: TypeId, b: TypeId) -> bool {
+        if a == TypeId::ANY {
+            if let Some(payload) = self.option_enum_payload(b) {
+                return match weak_literal_is_dict(weak) {
+                    Some(true) => matches!(self.module.types.get(payload), Some(HirType::Dict { .. })),
+                    Some(false) => matches!(self.module.types.get(payload), Some(HirType::Array { .. })),
+                    None => false,
+                };
+            }
+        }
+        self.same_collection_kind(a, b)
     }
 
     /// Lower an if expression to HIR
@@ -395,7 +431,7 @@ impl Lowerer {
             if hir_value_is_weak_empty(&then_hir)
                 && hir_value_is_concrete(other)
                 && other.ty != TypeId::ANY
-                && self.same_collection_kind(then_hir.ty, other.ty)
+                && self.weak_arm_matches_sibling(&then_hir, then_hir.ty, other.ty)
                 && !ast_expr_tail_is_array_repeat(then_branch)
             {
                 ty = other.ty;
@@ -881,7 +917,7 @@ impl Lowerer {
             && hir_value_is_weak_empty(&then_branch)
             && hir_value_is_concrete(&else_branch)
             && else_branch.ty != TypeId::ANY
-            && self.same_collection_kind(then_ty, else_branch.ty)
+            && self.weak_arm_matches_sibling(&then_branch, then_ty, else_branch.ty)
             && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
         let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
 

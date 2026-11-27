@@ -54,3 +54,18 @@ Second revision: `Some(<array/dict literal>)` also stays erased (a literal's ele
 a guess: `var c = Some([0]); c = Some([1.5, 2.5])` and heterogeneous `Some([..])` pushes read
 garbage when typed, rvd b03/b05). Only `Some(<local|call|field>)` with a declared array/dict
 type becomes `Option<T>`.
+
+### (B) review follow-ups (2026-11-28)
+
+- Kind fix: the erased `Some([])` / `Some({})` arm used to adopt any sibling Option (d10 k2:
+  `if c: Some([]) else: Some(base_dict)` then `d.len()` = -1 on y JIT). The array-vs-dict kind
+  is now derived from the weak arm's literal (`weak_literal_is_dict`, peeling `Some`) at both
+  join sites (if and match) and must equal the sibling Option payload's kind. Test:
+  `option_wrapped_empty_literal_never_adopts_sibling_of_other_collection_kind`.
+- OPEN (owner no-ANY rule): untyped `Some(<literal>)` is still the erased ANY interim.
+  Proper fix: a deferred element type `Option<[?E]>` resolved from the expected type, the join
+  sibling, or the first push; defaulted at function end; conflicting evidence = compile error.
+- Still wrong, to be solved by that fix: rvd/y d04 j6 (well-typed
+  `if c: Some([7.5]) else: Some(xs)` = 0.0 on r and y); d07/d14/d08/d10 k5 (ill-typed literal
+  reassign/push is silent garbage, should be errors); d13 (`-> [i64]?` returning `Some([f64])`
+  should be a hard error).

@@ -396,3 +396,24 @@ fn some_array_literal_payload_stays_erased_so_reassignment_and_mixed_pushes_stay
         }
     }
 }
+
+#[test]
+fn option_wrapped_empty_literal_never_adopts_sibling_of_other_collection_kind() {
+    // d10 k1/k2: an erased `Some([])` vs `Some(<dict>)` (and `Some({})` vs `Some(<array>)`)
+    // must keep the first arm's type instead of adopting the other kind's Option.
+    for (empty, base, bad_dict) in [("[]", "base", true), ("{}", "xs", false)] {
+        let source = format!(
+            "fn probe(c: bool, xs: [f64], base: Dict<text, f64>) -> i64:\n    val r = if c: Some({empty}) else: Some({base})\n    0\n"
+        );
+        let module = parse_and_lower(&source).unwrap();
+        let ty = local_type(&module, "r");
+        if let HirType::Enum { name, .. } = ty {
+            if name == "Option" {
+                let payload = option_payload(&module, ty);
+                let is_dict = matches!(payload, HirType::Dict { .. });
+                let is_array = matches!(payload, HirType::Array { .. });
+                assert!(!(bad_dict && is_dict) && !(!bad_dict && is_array), "{empty} vs {base}: adopted the other kind: {payload:?}");
+            }
+        }
+    }
+}
