@@ -379,6 +379,15 @@ pub unsafe extern "C" fn rt_get_env(name_ptr: *const u8, name_len: u64) -> Runti
     rt_env_get(name_ptr, name_len)
 }
 
+/// Raw pointer/length ABI twin of [`rt_env_get`] for the low-level sffi tier
+/// (`src/compiler/70.backend/sffi_minimal.spl`). Distinct name so the raw
+/// `(ptr, len) -> i64?` view never shares a name with the typed
+/// `(text) -> text?` view: the seed keys extern return types by bare name.
+#[no_mangle]
+pub unsafe extern "C" fn rt_env_get_raw(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
+    rt_env_get(name_ptr, name_len)
+}
+
 /// Set environment variable
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_set(name_ptr: *const u8, name_len: u64, value_ptr: *const u8, value_len: u64) -> bool {
@@ -2939,6 +2948,22 @@ mod tests {
             assert!(rt_process_is_running(pid));
             assert!(rt_process_kill(pid));
             assert!(!rt_process_is_running(pid));
+        }
+    }
+
+    /// rt_env_get_raw (sffi_minimal raw tier) forwards to rt_env_get.
+    #[test]
+    fn test_env_get_raw_matches_env_get() {
+        unsafe {
+            let (name_ptr, name_len) = str_to_ptr("TEST_VAR_SIMPLE_RAW_TWIN");
+            let (value_ptr, value_len) = str_to_ptr("raw_twin_value");
+            assert!(rt_env_set(name_ptr, name_len, value_ptr, value_len));
+            let raw = rt_env_get_raw(name_ptr, name_len);
+            let typed = rt_env_get(name_ptr, name_len);
+            assert!(!raw.is_nil());
+            assert_eq!(rt_string_len(raw), rt_string_len(typed));
+            let (missing_ptr, missing_len) = str_to_ptr("TEST_VAR_SIMPLE_RAW_TWIN_MISSING");
+            assert!(rt_env_get_raw(missing_ptr, missing_len).is_nil());
         }
     }
 

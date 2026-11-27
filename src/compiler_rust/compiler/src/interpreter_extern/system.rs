@@ -408,6 +408,13 @@ pub fn rt_env_get(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+/// `extern fn rt_env_get_raw(name_ptr: i64, name_len: i64) -> i64?`: raw-ABI
+/// twin of [`rt_env_get`] for `src/compiler/70.backend/sffi_minimal.spl`.
+pub fn rt_env_get_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let key = super::file_io::raw_ptr_len_text(args, 0, "rt_env_get_raw")?;
+    rt_env_get(&[Value::text(key)])
+}
+
 pub fn rt_lexer_source_set(args: &[Value]) -> Result<Value, CompileError> {
     let Some(Value::Str(source)) = args.first() else {
         return Err(CompileError::runtime("rt_lexer_source_set requires a text source"));

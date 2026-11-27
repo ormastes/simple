@@ -25,7 +25,10 @@
 # Return shape = text after `->` that follows the parameter list, whitespace
 # removed; no `->` = `()`. Generic params are renamed positionally ($G1, $G2…)
 # so `<T> -> T?` and `<TElement> -> TElement?` are one shape. `void` and `()`
-# are NOT merged (not proven equivalent in the seed's lookup).
+# are NOT merged (not proven equivalent in the seed's lookup). Non-generic
+# type aliases (`type NAME = TARGET`) are substituted, token-bounded, when NAME
+# has exactly ONE target tree-wide (e.g. `RuntimeValuePtr` = `i64`); an alias
+# with conflicting definitions is left as written.
 #
 # Baseline: scripts/check/extern_return_shape_baseline.txt, one line per
 # conflicting name: `name<TAB>shape | shape ...` (sorted). FAIL on a NEW
@@ -88,8 +91,35 @@ normalize() {
 # census for repo $1 at rev $2 -> decls file $3; prints decl count
 census() {
     git -C "$1" grep -n -I -E 'extern[[:space:]]+fn[[:space:]]+rt_' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null \
-        | sed "s#^$2:##" | normalize > "$3"
+        | sed "s#^$2:##" | normalize > "$3.raw"
+    # Non-generic type aliases (`type NAME = TARGET`), same pathspec. An alias
+    # is substituted only when every definition of NAME tree-wide names the
+    # same TARGET and no struct/class/enum/union/trait shares NAME (a
+    # nominal type of that name could be in scope instead); otherwise the
+    # alias stays as written.
+    git -C "$1" grep -h -I -E '^[[:space:]]*(pub[[:space:]]+)?type[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null \
+        | awk '{ s=$0; sub(/#.*$/,"",s); sub(/^[ \t]*(pub[ \t]+)?type[ \t]+/,"",s); p=index(s,"="); n=substr(s,1,p-1); t=substr(s,p+1)
+                 gsub(/[ \t]/,"",n); gsub(/[ \t]/,"",t); if (n!="" && t!="") print n "\t" t }' \
+        | { cat; git -C "$1" grep -h -I -o -E '^[[:space:]]*(pub[[:space:]]+)?(struct|class|enum|union|trait)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null | awk '{ print $NF "\t#nominal" }'; } \
+        | sort -u | awk -F'\t' '{ c[$1]++; t[$1]=$2 } END { for (n in c) if (c[n]==1 && t[n]!="#nominal") print n "\t" t[n] }' > "$3.alias"
+    alias_resolve "$3.alias" < "$3.raw" > "$3"
+    rm -f "$3.raw" "$3.alias"
     wc -l < "$3" | tr -d ' '
+}
+
+# alias map $1 (NAME \t TARGET); stdin/stdout decls; token-bounded, up to 4 rounds
+alias_resolve() {
+    awk -F'\t' -v OFS='\t' '
+      NR==FNR { a[$1]=$2; next }
+      # single left-to-right identifier scan per round: O(len(shape)), not O(#aliases)
+      { r=$2
+        for (round=0; round<4; round++) { changed=0; out=""; s=r
+          while (match(s, /[A-Za-z_$][A-Za-z0-9_]*/)) {
+            tok=substr(s,RSTART,RLENGTH); out=out substr(s,1,RSTART-1); s=substr(s,RSTART+RLENGTH)
+            if (substr(tok,1,1)!="$" && (tok in a)) { out=out a[tok]; changed=1 } else out=out tok }
+          r=out s
+          if (!changed) break }
+        $2=r; print }' "$1" -
 }
 
 # decls -> conflicts (name \t shape | shape ...), sorted
@@ -136,17 +166,17 @@ selftest() {
     st=$(mktemp -d) || return 2
     r="$st/repo"; mkdir -p "$r/src/a" "$r/src/b" "$r/src/vendor/x"
     git -C "$r" init -q && git -C "$r" config core.autocrlf false && git -C "$r" config user.email t@t && git -C "$r" config user.name t
-    printf 'extern fn rt_one(x: i64) -> i64\nextern fn rt_gen<T>(t: i64) -> T?\nextern fn rt_dup(x: i64) -> i64\n' > "$r/src/a/m.spl"
-    printf 'val s = "extern fn rt_one(x: i64) -> bool"\n# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\n' > "$r/src/b/m.spl"
+    printf 'extern fn rt_one(x: i64) -> i64\nextern fn rt_gen<T>(t: i64) -> T?\nextern fn rt_dup(x: i64) -> i64\ntype Ptr = i64\nextern fn rt_al() -> Ptr?\ntype Amb = i64\nextern fn rt_amb() -> Amb\ntype Nom = i64\nextern fn rt_nom() -> Nom?\n' > "$r/src/a/m.spl"
+    printf 'val s = "extern fn rt_one(x: i64) -> bool"\n# extern fn rt_one(x: i64) -> text\nextern fn rt_gen<TElem>(t: i64) -> TElem?\nextern fn rt_dup(x: i64) -> text?\nextern fn rt_al() -> i64?\npub type Amb = u8\nextern fn rt_amb() -> i64\nstruct Nom:\n    x: i64\nextern fn rt_nom() -> i64?\n' > "$r/src/b/m.spl"
     printf 'extern fn rt_one(x: i64) -> bool\n' > "$r/src/vendor/x/m.spl"
     git -C "$r" add -A && git -C "$r" commit -qm base
     fails=0
-    printf 'rt_dup\ti64 | text?\n' > "$st/base_ok"
-    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^PASS' || { echo "selftest: clean fixture must PASS (comment, vendor, generic rename ignored): $out"; fails=1; }
+    printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\ti64? | Nom?\n' > "$st/base_ok"
+    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^PASS' || { echo "selftest: clean fixture must PASS (comment, vendor, generic rename, unique alias resolved, ambiguous alias kept): $out"; fails=1; }
     printf 'extern fn rt_one(x: i64) -> u8\n' >> "$r/src/b/m.spl"; git -C "$r" commit -qam new
     out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^FAIL' && echo "$out" | grep -q 'NEW: rt_one' || { echo "selftest: new conflict must FAIL naming rt_one: $out"; fails=1; }
     git -C "$r" reset -q --hard HEAD~1
-    printf 'rt_dup\ti64 | text?\nrt_gone\ti64 | u8\n' > "$st/base_stale"
+    printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\ti64? | Nom?\nrt_gone\ti64 | u8\n' > "$st/base_stale"
     out=$(MODE=check run_check "$r" HEAD "$st/base_stale"); echo "$out" | grep -q 'STALE: rt_gone' || { echo "selftest: stale row must FAIL: $out"; fails=1; }
     e="$st/empty"; mkdir -p "$e/src"; git -C "$e" init -q; git -C "$e" config core.autocrlf false; git -C "$e" config user.email t@t; git -C "$e" config user.name t
     printf 'x\n' > "$e/src/n.spl"; git -C "$e" add -A; git -C "$e" commit -qm e
