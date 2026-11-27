@@ -28,12 +28,25 @@ Four elements replace what `any` is used for today:
 |---|---------|-------------------------|--------------|
 | 1 | Annotations + HM-style inference + implicit generics | "I did not write a type" | Partly (§2) |
 | 2 | SFFI: thin monomorphic C-ABI layer + safe generic Simple wrapper | values crossing the runtime boundary | Raw layer yes; registry and typed wrapper no |
-| 3 | Typed sum types (`enum`: `SdnValue`, `JsonValue`) | **closed** heterogeneous data | Yes |
-| 4 | Trait objects (`dyn Trait` / `interface`) | **open** heterogeneous data | Yes |
+| 3 | Typed sum types (`enum`: `SdnValue`, `JsonValue`) | **closed** heterogeneous data | Yes, with open enum bugs to fix first (§8.1) |
+| 4 | Trait objects (`dyn Trait` / `interface`) | **open** heterogeneous data | **No**, not for heterogeneous values in the self-hosted compiler (§8.2) |
 
 Choosing between 3 and 4: if the set of cases is known where the type is
 defined, use an `enum`; if other modules must be able to add cases, use a trait
-object.
+object. Until §8.2 is closed, element 3 is the only working answer for
+heterogeneous data and element 1 for homogeneous data.
+
+**What is decided and what is proposed.** The owner decision fixes: the `any`
+rule, the four elements, the tiers (locals inferred; `pub`/cross-module
+annotated; private agree gives one copy; private disagree gives a capped,
+deduplicated implicit generic; over cap or unsupported recursion is an
+"annotate" error; disagreeing arms are an error naming both), and warn then
+error. Everything more specific in this document is a **proposal** made to
+fill in that decision and is listed for confirmation in §13: the definition of
+script mode, treating all unannotated methods as must-annotate, the value
+restriction, the cap value, the rules for method, field and arithmetic uses of
+an inferred `T`, keeping collection access as compiler intrinsics, and
+realizing the codec inside the compiler first.
 
 The census found **no case that needs `any` in safe compiled code**. Every
 category maps to a generic, a sum type, a trait object, a typed handle, or a
@@ -178,8 +191,9 @@ an `@unsafe` function does not set the unsafe depth today
 
 ### 3.2 Script mode
 
-Script mode is a property of the **source unit**, not of how it is executed. A
-script is a `.shs` file, or an `.spl` file with top-level statements and no
+What counts as script mode is an **open owner decision** (Q7); this section is
+the recommended answer. Script mode is a property of the **source unit**, not
+of how it is executed. A script is a `.shs` file, or an `.spl` file with top-level statements and no
 `fn main`. In such a unit `any` is allowed and unannotated code behaves as it
 does today.
 
@@ -282,7 +296,8 @@ variable to one closed type, the function gets that signature and exactly one
 copy of code.
 
 "Private means module-local" has to be **true** for this, and gap 9 in §2.3
-says it may not be. Before T2 is relied on, either file privacy is enforced (a
+says it may not be. This is an open owner decision (Q8). Before T2 is relied
+on, either file privacy is enforced (a
 use of a non-exported function from another file is an error), or the scope of
 call-site collection is widened to the package, or a private function with no
 same-file call sites is treated as T1. A private function with no call sites
@@ -491,28 +506,84 @@ interpreter. All collection externs take the tagged word for container and
 element, and compiled code boxes every `i64`/`u64` element through a runtime
 call.
 
+Adding an f64-packed layout touches four representations [read]: the Rust
+runtime, the C core array, the legacy boxed C array (`SplArray` in
+`src/runtime/runtime.h`) and the seed interpreter's array value, plus every
+accessor.
+
 Hot-path rule: `[T]` indexing, `len`, `push` and text concatenation stay
 **compiler intrinsics**. Moving them into Simple library wrappers would add a
 call per element unless wrappers inline. Generic Simple wrappers are for the
 long tail: handles, tree maps, hash sets, threads, mutexes. Text is not at
 risk: it crosses as a concrete `text` with no codec.
 
+### 7.7 Wrappers are not free by default
+
+[read] The seed's small-function inliner refuses a function with a field
+access or an allocation, so a wrapper that reads a handle's field does not
+qualify. The self-hosted inliner is cost-thresholded, skips its two larger
+passes on the LLVM path, and skips **all** inlining under `SIMPLE_BOOTSTRAP=1`.
+The interpreter never inlines. So bootstrap-built compilers and interpreted
+runs pay a call per wrapper. Rules that follow: every SFFI wrapper is marked
+`@always_inline` (already used 796 times in the tree), and a handle is a
+newtype, not a class with a field.
+
 ## 8. Elements 3 and 4
 
-Both exist; the work is migration (S8) and one inference gap (S5).
+The decision text says both already exist. The census corrects that for
+element 4 and qualifies it for element 3.
 
-- **Closed:** `enum` with typed payloads and exhaustive `match`. The largest
-  single migration is here: JSON/YAML/SDN helper APIs that take `any` (about
-  510 uses, 47% of all explicit `any`) take `JsonValue` / `SdnValue` instead.
-- **Open:** `dyn Trait` / `interface`. A parameter typed with a plain trait
-  name is rewritten to a static generic by
-  `src/app/desugar/trait_static_dispatch.spl`; `dyn Trait`, `[Trait]` and
-  interfaces stay dynamic. Spec matchers with heterogeneous argument lists are
-  the main candidate.
-- **Gap (S5):** method calls on an inferred `T` (§5.3). Explicit bounds are
-  rare in the tree (116 `<T: Trait>`, 220 `where`, most in the seed std), so
-  the trait-bound machinery has little real-world exercise. S5 is the risky
-  stage.
+### 8.1 Sum types: exist, need bug fixes
+
+`enum` with typed payloads and exhaustive `match` needs no new language
+feature. The largest single migration lands here: JSON/YAML/SDN helper APIs
+that take `any` (about 510 uses, 47% of all explicit `any`) take `JsonValue` /
+`SdnValue` instead.
+
+Cost [read]: both compilers lower an enum match to a chain of pattern tests;
+only dense integer matches become a switch. That is cheap for `JsonValue`
+(7 variants) and `SdnValue` (8), and a cost for very large enums.
+
+Open bugs under `doc/08_tracking/bug/` that such a migration will hit, and
+which are therefore prerequisites, not follow-ups:
+
+- `enum_payload_dict_copied_on_function_return_2026-07-28`: wrong result in
+  the interpreter, rejected by the JIT. `JsonValue.Object` carries a dict.
+- `enum_pattern_match_optional_value_silent_fallthrough_2026-07-20`: matching
+  a `T?` against payload patterns silently never matches.
+- Also relevant: `enum_associated_fn_never_called_on_jit_2026-07-28`,
+  `enum_variant_resolved_globally_by_bare_name_httpmethod_collision_2026-09-06`,
+  `codegen_large_match_dispatch_body_2026-07-27`,
+  `backend_plugin_enum_equality_mir_2026_10_12`, and the seed/pure-Simple
+  split on enum discriminants (hashed versus positional).
+
+### 8.2 Trait objects: not available yet
+
+`src/app/desugar/trait_static_dispatch.spl` is **not** trait-object support.
+It is a line-at-a-time source rewriter that turns `fn f(x: Trait)` into
+`fn f<__T0: Trait>(x: __T0)` (static dispatch); it skips `dyn` parameters,
+`[Trait]` arrays and multi-line signatures, and it is not in the compiler
+pipeline.
+
+| | Parsed | Type-checked | Code generation |
+|---|---|---|---|
+| Seed interpreter | yes | n/a | trait-object value, dispatch by method name |
+| Seed native | yes | no object-safety check | real vtables, pointer in the object header word; falls back to bare-name dispatch when no impl is found |
+| Self-hosted | yes | yes, with an object-safety check | fat-pointer layout exists, but calls are devirtualized only: one implementor is a direct call, none is a trap, **several is a compile error** |
+
+The two compilers also disagree on layout (header-word vtable versus fat
+pointer), and real `dyn X` uses in `src` are essentially zero.
+
+So element 4 needs language work in the self-hosted compiler
+(multi-implementor dynamic dispatch, one layout shared with the seed) before
+it can replace heterogeneous `any`. Until then no migration targets
+`dyn Trait`; open-set cases stay on the baseline or use an enum.
+
+### 8.3 Inference gap
+
+Method calls on an inferred `T` (§5.3). Explicit bounds are rare in the tree
+(116 `<T: Trait>`, 220 `where`, most in the seed std), so the trait-bound
+machinery has little real-world exercise. This is the risky inference stage.
 
 ## 9. Diagnostics
 
@@ -625,6 +696,21 @@ what the warn phase reports.
 The alternative, full inference in both, doubles the large items (write-back,
 call-site inference, bounds) in a compiler that is meant to stay minimal.
 
+**Consequence of the recommendation, stated plainly.** `bin/simple` is
+currently the Rust seed and no full-CLI self-hosted binary is deployed
+(`.claude/rules/commands.md`). Under the recommended scope, tiers T2 and T3,
+write-back and bound inference do not exist in the deployed compiler until a
+self-hosted binary is deployed. Until then users of `bin/simple` get the arm
+join, stage-1 identity instantiation, the mis-typing fixes and the syntactic
+warnings, and nothing more. If that is not acceptable, the answer to Q6 is
+"full inference in the seed" and the cost is the seed's missing write-back.
+
+Under `SIMPLE_BOOTSTRAP=1` the seed skips lint and several checks and forces
+lenient types [read], so it accepts whatever the self-hosted checker accepts,
+and more. The seed's syntactic warnings must therefore never be stricter than
+the self-hosted rule: they cover written `any` and unannotated **exported**
+signatures, not private functions that the self-hosted compiler would infer.
+
 Parity that is required either way: same verdict from both compilers on the
 shared fixture corpus for every check both implement; same message text and
 codes; same cap constant; same script predicate.
@@ -659,5 +745,20 @@ wrong values, not working code.
   `Option<T>`?
 - **Q5 (census D2).** Does plain `unsafe` allow `any`, or only code granted the
   `type_erasure` capability?
-- **Q6.** Full inference in the seed, or the bounded seed scope recommended in
-  §11? The plan is written for the recommendation.
+- **Q6 (census D4).** Seed scope: syntactic checks only (recommended, §11) or
+  full inference parity? The plan is written for the recommendation; §11
+  states what that means for the deployed compiler.
+- **Q7 (census D3).** Script mode by file kind (recommended, §3.2) or by
+  interpreted execution (today's proxy)?
+- **Q8.** Enforce file privacy? 386 of 553 non-exported unannotated functions
+  have no same-file caller (§5.2). The alternatives are widening inference
+  scope to the package or treating those functions as must-annotate.
+- **Q9.** Trait objects (§8.2): commit to multi-implementor dynamic dispatch
+  in the self-hosted compiler, with which layout, or defer element 4 and rely
+  on enums?
+- **Q10.** Confirm the proposals listed at the end of §1 that go beyond the
+  decision text: all unannotated methods must be annotated; only `fn`
+  declarations generalize; method-presence constraints, no field access and a
+  numeric bound for arithmetic on an inferred `T`; collection access stays a
+  compiler intrinsic; the codec is compiler-inserted first and a user-level
+  `FfiCodec<T>` trait follows Q1.

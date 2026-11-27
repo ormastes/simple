@@ -138,14 +138,18 @@ and an ERROR after phase 3 (staged). See
 
 - `nil` only inside `unsafe:`; use `Option<T>` / `None` (match arm `None:`).
 - `any` / `Any` (including `[any]`) and erased access are allowed only inside
-  `unsafe:` and in script mode (a script entry file run by the interpreter).
+  `unsafe:` and in script mode (a script source file, not "run interpreted").
   Safe compiled code never uses or produces `any`: where a type cannot be
-  determined the result is a compile error, not a fallback. Staged: WARNING
-  now for existing sites, ERROR after migration (owner decision 2026-11-27).
+  determined the result is a compile error, not a fallback. Owner decision
+  2026-11-27, staged warning then error. **Not yet enforced in default
+  builds:** the self-hosted ban applies only at Robust/Critical strictness and
+  the seed has no such diagnostic.
 - `if`/`match` arms used as a value must have one type; different types are a
   compile error naming both arms. Int and float arms widen to float.
-- For mixed data use an `enum` (closed set) or a trait object (`dyn Trait` /
-  `interface`, open set) instead of `any`.
+- For mixed data use an `enum` (closed set) instead of `any`. Trait objects
+  (`dyn Trait`) are intended for open sets, but the self-hosted compiler
+  cannot yet dispatch a trait call with several implementors; do not migrate
+  onto `dyn Trait` yet.
 - Generics are erased; there is no monomorphization pass. How implicit-generic
   instances relate to this is an open owner question (design doc §6).
 - Non-exhaustive value match: WARNING now, ERROR after phase 3 (staged).

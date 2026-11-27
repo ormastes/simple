@@ -1,7 +1,7 @@
 # Plan: No `any` in Safe Code (Inference, Implicit Generics, Thin SFFI)
 
 **Design:** `doc/05_design/language/type_system/no_any_inference_generics.md`
-(owner-approved 2026-11-27). Section references (§n) and questions (Q1..Q6)
+(owner-approved 2026-11-27). Section references (§n) and questions (Q1..Q10)
 are to that file.
 **Status:** S1-A and S2-A are in flight in the seed. Everything else is not
 started.
@@ -10,7 +10,7 @@ started.
 
 ## How to read this plan
 
-- A **stage** (S1..S8) is a capability. A **lane** (S1-A, ...) is one PR-sized
+- A **stage** (S1..S9) is a capability. A **lane** (S1-A, ...) is one PR-sized
   unit one worker can own. Lanes in the same **parallel group** (G0..G6) do
   not depend on each other and can run at the same time.
 - **Size** is changed lines including tests: S under 300, M 300 to 1,000,
@@ -23,7 +23,8 @@ started.
   the checks. If the owner answers Q6 the other way, S2-C, S2-E, S3-A, S3-B
   and S5-A each gain a seed twin of the same size, and the seed's missing
   write-back of inferred types (large) becomes a prerequisite of all of them.
-- Lanes gated on an owner question say so. Q1 gates S3-C and S6-G only.
+- Lanes gated on an owner question say so; the questions are collected under
+  "Open owner decisions" below.
 
 ### Rules for every lane
 
@@ -73,10 +74,10 @@ started.
 | S4-C | Unsafe rule per Q5: grant wiring in the self-hosted driver; seed `@unsafe` functions set the unsafe depth | G1 | M | **Q5** |
 | S4-D | Self-hosted: `any` diagnostics in every profile as warnings, scope widened from `src/compiler/**` to all safe code | G2 | M | S4-A, S4-C |
 | S4-E | Self-hosted: unannotated `pub`/exported function and method diagnostic, with the inferred signature as a fix-it | G3 | M | S2-E |
-| S4-F | Seed: syntactic twins (written `any` outside unsafe; unannotated parameter in a non-script module) | G2 | M | S4-B, S4-C |
+| S4-F | Seed: syntactic twins (written `any` outside unsafe; unannotated parameter of an **exported** function in a non-script module) | G2 | M | S4-B, S4-C |
 | S4-G | Ratchets and baselines, per-directory severity, interface-digest invariance test | G4 | M | S4-D, S4-E, S4-F |
 | S5-A | Self-hosted: method-presence and unique-trait bound inference checked at instantiation; numeric bound; tuple index; field-on-generic error | G4 | L | S3-A |
-| S5-B | Interaction with `trait_static_dispatch` desugar and `dyn Trait` | G5 | S | S5-A |
+| S5-B | An inferred bound stays static: never silently becomes dynamic dispatch | G5 | S | S5-A |
 | S6-A | Zero-cost `Handle<T>` (establish the generic newtype over `i64`); migrate handle externs (53 + about 69 declarations) | G0 | M | none |
 | S6-B | Generic externs off the ABI (133): parameter becomes the runtime value word, `<T>` moves to the wrapper; guard against new generic externs | G0 | M | none |
 | S6-C | One generic `unsafe_addr_of<T>` (about 25 copies); callback wrappers `<D, R>` (4 `any` + 11 `fn(...)` externs) | G0 | S | none |
@@ -88,35 +89,76 @@ started.
 | S7-B | Twin conformance guard: same verdict, text and code for every check both compilers implement; cap constant and script predicate equal | G4 | S | S3-A, S4-F |
 | S7-C | Bootstrap-closure proof: seed builds the annotated closure without inferring; self-hosted rules clean on it | G4 | M | S8-A, S4-D, S2-E |
 | S8-A | Annotate the bootstrap closure: 12 unannotated-parameter functions and 25 `any` uses in `src/compiler`, plus the std prefixes it imports | G0 | S | none |
-| S8-B | JSON/YAML/SDN helper APIs take `JsonValue`/`SdnValue` instead of `any` (about 510 uses) | G0 | M | none |
+| S8-B | JSON/YAML/SDN helper APIs take `JsonValue`/`SdnValue` instead of `any` (about 510 uses) | G1 | M | S9-A |
 | S8-C | Explicit `any` to `<T>`: generic stand-ins (about 180) and callbacks / user data (about 55) | G1 | M | none |
-| S8-D | Spec helpers (about 145 in `src`, 618 in `test/`): `<T>` for `expect`, a sum type or `dyn Matcher` for mixed argument lists | G1 | M | none |
+| S8-D | Spec helpers (about 145 in `src`, 618 in `test/`): `<T>` for `expect`, a sum type for mixed argument lists (`dyn Matcher` only after S9-B) | G1 | M | none |
 | S8-E | Annotation codemod: about 600 exported functions and 230 methods, from the S4-E fix-it | G4 | L | S4-E |
 | S8-F | Rewrite genuinely dynamic bodies to enums/records (about 170 raw, about 60 unique) | G4 | M | S3-B |
 | S8-G | Seed std remainder (401 explicit uses, less what S6-D and S8-D take) | G2 | M | S6-D, S8-D |
 | S8-H | Residual untyped `[]` (1,963 sites), `nil` bindings (58), mixed containers (about 20) that inference does not resolve | G3 | S to M | S2-F |
 | S8-I | Unresolved names, types and imports stop becoming `ANY`: warn, then error | G5 | M | S4-G |
 | S8-J | Flip to error: per directory as its baseline empties, then global | G6 | S | all |
+| S9-A | Fix the enum bugs a sum-type migration hits: payload dict copied on return; `T?` match silent fall-through | G0 | M | none |
+| S9-B | Self-hosted: multi-implementor dynamic dispatch for `dyn Trait`; one object layout shared with the seed; object-safety check in the seed | G1 | L | **Q9** |
+| S9-C | First `dyn Trait` migration targets (open-set cases left on the baseline by S8) | G5 | M | S9-B |
 
 ### Parallel groups
 
 | Group | Lanes that run together | Opens when |
 |-------|-------------------------|------------|
-| G0 | S1-A, S1-C, S2-A, S2-B, S2-D, S4-A, S6-A, S6-B, S6-C, S8-A, S8-B | now |
-| G1 | S1-B, S1-D, S2-C, S2-F, S2-G, S4-B, S4-C, S6-D, S6-E, S7-A, S8-C, S8-D | their G0 inputs landed; Q4 for S1-B/S1-D, Q5 for S4-C |
+| G0 | S1-A, S1-C, S2-A, S2-B, S2-D, S4-A, S6-A, S6-B, S6-C, S8-A, S9-A | now |
+| G1 | S1-B, S1-D, S2-C, S2-F, S2-G, S4-B, S4-C, S6-D, S6-E, S7-A, S8-B, S8-C, S8-D, S9-B | their G0 inputs landed; Q4 for S1-B/S1-D, Q5 for S4-C, Q9 for S9-B |
 | G2 | S2-E, S4-D, S4-F, S8-G | S2-C, S2-D, S4-A..C landed |
 | G3 | S3-A, S3-B, S4-E, S6-F, S8-H | S2-E landed |
 | G4 | S4-G, S5-A, S7-B, S7-C, S8-E, S8-F | S3-A, S3-B, S4-D..F landed |
-| G5 | S3-C, S5-B, S6-G, S8-I | S4-G, S5-A landed; Q1 for S3-C and S6-G |
+| G5 | S3-C, S5-B, S6-G, S8-I, S9-C | S4-G, S5-A, S9-B landed; Q1 for S3-C and S6-G |
 | G6 | S8-J | everything else |
 
 Groups are a lower bound on waiting, not a schedule: a lane may start as soon
 as its own "Depends on" cell is satisfied. Three things are worth starting
 immediately because nothing blocks them and they shrink everything after:
 **S8-A** (after it the seed never has to infer to build the compiler),
-**S8-B** (47% of explicit `any`), and **S4-A** (no check is meaningful
+**S9-A** (it unblocks S8-B, which is 47% of explicit `any`),
+and **S4-A** (no check is meaningful
 without a script definition). The critical path is
 S2-B, S2-C, S2-E, S3-A, S5-A; S2-C (write-back) is its largest single item.
+
+## Open owner decisions
+
+None of these is settled. Each has a recommended answer that the plan
+assumes; a different answer changes the lanes named.
+
+| Decision | Recommended | If answered the other way |
+|----------|-------------|---------------------------|
+| **Q1** Erased bodies versus selective specialization | keep one erased body for now | S3-C and S6-G open; they are the only source of the zero-cost claims (inlined codec, unboxed `Array<f64>`) |
+| **Q5** Does any `unsafe` permit `any`, or only the `type_erasure` capability | owner to choose; the decision text says `unsafe` | changes S4-C and the size of every S8 lane that moves code into `unsafe` |
+| **Q7** Script mode by file kind or by execution mode | file kind | S4-A/S4-B shrink to documenting the existing proxy, and library code escapes the rule under `bin/simple test` |
+| **Q6** Seed scope: syntactic checks only, or full inference | syntactic only | S2-C, S2-E, S3-A, S3-B, S5-A gain seed twins; seed write-back (L) becomes a prerequisite |
+| **Q8** Enforce file privacy (386 of 553 non-exported unannotated functions have no same-file caller) | enforce, after S2-D classifies them | up to 386 functions move from T2 to T1 and S8-E grows |
+| **Q9** Trait objects: build multi-implementor dispatch in the self-hosted compiler | owner to choose | without it S9-B and S9-C do not run; open-set `any` sites migrate to enums or stay baselined |
+| Q2 cap value, Q3 uncalled private functions, Q4 `Option` joins, Q10 proposals | see design §13 | local to S3-A, S2-E, S1-B/S1-D |
+
+Ask Q5 and Q7 first: S4 cannot start without them and nothing else is
+enforceable until S4 exists.
+
+## Recommended order
+
+The census ranks the work by `any` removed per unit of cost. Lanes overlap as
+the groups allow; this is the order to staff when workers are scarce.
+
+| # | Work | Lanes |
+|---|------|-------|
+| 1 | Close the rule gaps: script kind, unsafe rule, enforcement in every profile, seed syntactic twins | S4-A, S4-B, S4-C, S4-D, S4-F |
+| 2 | Typed dynamic values (JSON/YAML/SDN enums), after the enum bug fixes | S9-A, S8-B |
+| 3 | HM stage 1: fresh variables, write-back, T2, arms, local forms, annotation diagnostic | S1-A..D, S2-A..G, S4-E, S8-A, S8-E |
+| 4 | Explicit `any` to `<T>` | S8-C, S8-D, S8-G |
+| 5 | Extern declarations off `any` and off generics | S6-A, S6-B, S6-C, S6-D |
+| 6 | Implicit generics over the erased body | S3-A, S3-B |
+| 7 | Rewrite tag-dispatching code to enums/records | S8-F, S8-H |
+| 8 | Constraint inference | S5-A, S5-B |
+| 9 | Registry, codec, ratchets, parity | S6-E, S6-F, S4-G, S7-A..C |
+| 10 | Flip warn to error | S8-I, S8-J |
+| 11 | Only if approved: specialization and trait objects | S3-C, S6-G (Q1); S9-B, S9-C (Q9) |
 
 ## S1: disagreeing-arm compile error
 
@@ -177,7 +219,7 @@ first, behind one definition of "safe code".
 | S4-C | self-hosted `80.driver/hir_semantic_consumer_v1.spl` (grant list is empty today), `35.semantics/any_escape/`; seed `hir/lower/context.rs` and `module_lowering/function.rs` (`FunctionDef::has_unsafe()` has no callers) | per Q5: the chosen unsafe forms exempt `any`, others do not; an `@unsafe` function body is unsafe in the seed |
 | S4-D | self-hosted `80.driver/driver_hir_pipeline_lowering.spl` (the Robust/Critical gate), `20.hir/hir_lowering/types.spl`, `35.semantics/any_escape/`, `scripts/check/any_warn_rules_scope.txt` | default profile warns on written `any`, `[any]`, `any`-valued dicts and on an expression whose inferred type is `Any` in safe code; nothing warns in unsafe/script; the rules run in the typecheck consumer with no extra process (time one file before and after) |
 | S4-E | self-hosted `type_infer/api_signature_projection_v1.spl`, `90.tools/lint/`, the suggestion code behind `W-ANY-DECL-001` | unannotated `pub`, `export`-listed functions and methods warn; the message contains a paste-able signature; private functions and trait `impl` methods do not warn |
-| S4-F | seed `hir/lower/error.rs` (`MissingParameterType`, `CannotInferType`, `EmptyArrayNeedsType` reachable as warnings in production), `pipeline/lowering.rs`, `compiler/src/lint/mod.rs` | written `any` outside unsafe and an unannotated parameter in a `Module` warn in the seed with the same text and code as the self-hosted compiler |
+| S4-F | seed `hir/lower/error.rs` (`MissingParameterType`, `CannotInferType`, `EmptyArrayNeedsType` reachable as warnings in production), `pipeline/lowering.rs`, `compiler/src/lint/mod.rs` | written `any` outside unsafe and an unannotated parameter of an **exported** function in a `Module` warn in the seed with the same text and code as the self-hosted compiler; a private unannotated function does **not** warn (the seed must never be stricter than the self-hosted rule, design §11) |
 | S4-G | `scripts/check/check-any-inventory-ratchet.shs`, `check-any-warn-rules-ratchet.shs`, `check-any-escape-census.shs` and baselines; a new baseline for unannotated exported functions; a per-directory severity table | a new site in a baselined directory fails; a stale baseline fails; a directory with an empty baseline reports errors; changing a private function's inferred type leaves the module's interface digest unchanged |
 
 The digest test in S4-G is the check behind the build-speed argument in §10.2
@@ -192,7 +234,7 @@ never wrong code.
 | Lane | Files | Acceptance |
 |------|-------|------------|
 | S5-A | self-hosted `type_infer/{traits,trait_collection}.spl`, `25.traits/trait_method_resolution.spl`, `25.traits/trait_solver.spl` | `pub fn pretty_print(value) -> text: value.to_text()` shape, made private and called at two types that both have the method, is accepted; a call site whose type lacks the method is refused at that call site; arithmetic on an unbounded `T` refused; `z.0` infers a tuple; `p.name` on a T3 parameter refused |
-| S5-B | `src/app/desugar/trait_static_dispatch.spl`; dyn-dispatch path | a parameter annotated with a trait name still becomes a static generic; `dyn Trait` stays dynamic; an inferred bound never silently becomes `dyn` |
+| S5-B | self-hosted `type_infer/traits.spl`, `25.traits/trait_solver.spl` | an inferred bound is resolved statically at each instantiation and never becomes dynamic dispatch; a written `dyn Trait` is unaffected |
 
 ## S6: SFFI thin ABI, `Handle<T>`, codec, unboxed collections
 
@@ -202,13 +244,13 @@ work is 131 + 133 + 23 declarations and the registry.
 
 | Lane | Files | Acceptance |
 |------|-------|------------|
-| S6-A | stdlib handle type; handle externs in the seed std (`collections/btreemap.spl` and peers) and `src/lib` | first, a written answer: does the language have a zero-cost generic newtype over `i64`? If not, that is the lane. Then: passing a `Handle<A>` where `Handle<B>` is expected is a compile error; generated code for a handle call has no wrapper object and no tag operation |
+| S6-A | stdlib handle type; handle externs in the seed std (`collections/btreemap.spl` and peers) and `src/lib` | first, a written answer: does the language have a zero-cost generic newtype over `i64`? If not, that is the lane. Then: passing a `Handle<A>` where `Handle<B>` is expected is a compile error; generated code for a handle call has no wrapper object and no tag operation; every wrapper is `@always_inline` |
 | S6-B | the 133 generic `extern fn` declarations (`rt_transient_heap_promote`, `rt_enum_discriminant`, `rt_array_free`, ...); a guard under `scripts/check/` | zero `extern fn name<...>` in `src`; each has a generic wrapper with the old call shape; the guard fails on a new generic extern; no runtime change (`check-rt-dual-implementation-ratchet.shs` delta zero) |
 | S6-C | `unsafe_addr_of` copies under `src/os`; `concurrency/threads.spl` and the callback externs | one definition of `unsafe_addr_of<T>`; callbacks typed `<D, R>` over `fn(D) -> R` |
 | S6-D | seed std `collections/` (`hashmap.spl`, `btreemap.spl`, ...) | no `any` in the public collection API; existing collection specs pass |
 | S6-E | registry rows and schema; generator beside `src/app/sffi_gen.templates/`; generated Simple externs, Rust signatures (`src/compiler_rust/runtime/`), C prototypes (`src/runtime/`); parity guard wired through `config/check/must_check_gates.sdn`; seed interpreter table `compiler/src/interpreter_extern/mod.rs` | for the hot symbols: deleting any one output fails the guard; changing a parameter type in one output fails the guard; regeneration is byte-stable; a row with `any` or a type parameter is rejected by the schema; a symbol missing from the interpreter table fails |
 | S6-F | self-hosted `50.mir/_MirLoweringExpr/expr_dispatch.spl` (`box_runtime_value` / `decode_runtime_value`); registry class `tagged`; `check-raw-sffi-unsafe-ratchet.shs`, `check-no-direct-rt.shs` | a generic wrapper call at a known scalar `T` emits the existing inline decode and no tag check in safe code; `[T]` indexing, `len`, `push` and text concat remain compiler intrinsics (no new call per element: compare IR before and after); a call to a `tagged` row from safe Simple fails the guard |
-| S6-G | both runtimes (`src/compiler_rust/runtime/src/value/heap.rs`, `collections.rs`; `src/runtime/runtime_native.c`), the interpreter, the inline packed reader in the LLVM backend; stdlib `FfiCodec<T>` | `Array<f64>` stores 8 bytes per element with no box; interpreter, JIT and native agree on a differential fixture; both runtimes define every new symbol; a scalar codec inlines to nothing |
+| S6-G | both runtimes (`src/compiler_rust/runtime/src/value/heap.rs`, `collections.rs`; `src/runtime/runtime_native.c`), the legacy boxed C array (`src/runtime/runtime.h`), the seed interpreter array value, the inline packed reader in the LLVM backend; stdlib `FfiCodec<T>` | `Array<f64>` stores 8 bytes per element with no box; interpreter, JIT and native agree on a differential fixture; both runtimes define every new symbol; a scalar codec inlines to nothing |
 
 `rt_sqlite_*` rows stay a mimic over the embedded engine (CLAUDE.md, "No
 external SQLite"); the registry does not change that.
@@ -258,8 +300,35 @@ Acceptance for each lane: its baseline rows are gone; the affected specs still
 pass; no new unsafe grant without a stated reason. S8-B and S8-D change public
 API signatures and say so in the PR. A lane over size L is split.
 
+## S9: readiness of elements 3 and 4
+
+**Goal (§8):** the decision text assumes sum types and trait objects already
+work. Sum types need bug fixes before the largest migration; trait objects
+need language work in the self-hosted compiler.
+
+| Lane | Files | Acceptance |
+|------|-------|------------|
+| S9-A | the code paths named in `doc/08_tracking/bug/enum_payload_dict_copied_on_function_return_2026-07-28.md` and `enum_pattern_match_optional_value_silent_fallthrough_2026-07-20.md`; regression specs | an enum variant carrying a dict returned from a function keeps its contents in interpreter and JIT; matching a `T?` against payload patterns matches; a `JsonValue.Object` round-trip fixture passes on both |
+| S9-B | self-hosted method-call lowering (the "several implementors" compile error), trait metadata and object layout; seed `compiler/src/codegen/llvm/functions/objects.rs` (layout agreement, object-safety check) | a `[dyn Trait]` array holding two implementors dispatches each call to the right one in the self-hosted compiler; seed and self-hosted agree on a differential fixture; a trait that is not object-safe is refused by both |
+| S9-C | the open-set sites S8 left on the baseline (spec matchers first) | those baseline rows are gone; no `any` |
+
+S9-A is a prerequisite of S8-B. The related open enum bugs (associated
+function on the JIT, bare-name variant collision, large-match build blocker,
+enum equality lowering, hashed versus positional discriminants) are outside
+S9-A but must be checked against each S8-B change; a migration that trips one
+stops and files it. `src/app/desugar/trait_static_dispatch.spl` is a source
+rewriter outside the compiler pipeline and is not part of S9-B.
+
 ## Risks to the plan itself
 
+- **The deployed compiler is the seed.** Under the recommended Q6 answer,
+  T2/T3, write-back and bound inference reach users only when a full-CLI
+  self-hosted binary is deployed. Until then `bin/simple` enforces the arm
+  join, stage-1 identity, the mis-typing fixes and the syntactic warnings.
+- **Enum bugs block the largest migration.** S8-B does not start before S9-A.
+- **Wrappers cost a call where nothing inlines** (bootstrap builds, the
+  interpreter). S6 lanes mark wrappers `@always_inline` and keep collection
+  access as intrinsics; an S6 lane is not accepted on a test pass alone.
 - **Q1 unanswered** stalls S3-C and S6-G only.
 - **Q5 unanswered** stalls S4-C and, through it, S4-D and S4-F. Ask first.
 - **Q6 answered the other way** roughly doubles S2, S3 and S5.

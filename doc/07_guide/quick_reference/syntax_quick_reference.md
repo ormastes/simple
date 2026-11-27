@@ -105,9 +105,12 @@ fn first(xs):                        # private, called with [i64] and [text]:
 | `any`, `[any]` | only inside `unsafe` and in script mode |
 
 An unannotated parameter is a type variable, **not** `any`. For mixed data use
-an `enum` (closed set of cases) or a trait object (`dyn Trait` / `interface`,
-open set). Script mode is a script entry file run by the interpreter; a module
-it imports is still checked as safe code.
+an `enum` (closed set of cases). Trait objects (`dyn Trait`) are the intended
+answer for an open set, but the self-hosted compiler cannot yet dispatch a
+trait call with several implementors, so do not migrate onto `dyn Trait` yet.
+A script is a `.shs` file or an `.spl` file with top-level statements and no
+`fn main`; a module it imports is still checked as safe code. These rules are
+not yet enforced in default builds.
 
 ---
 
