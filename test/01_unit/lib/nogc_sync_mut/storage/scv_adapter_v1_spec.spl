@@ -9,7 +9,8 @@ use std.common.hash.hash_policy_v1.{HASH_POLICY_V1_SHA256_LEGACY}
 use std.nogc_sync_mut.storage.immutable_store_v1.{immutable_store_v1_init, immutable_store_v1_collect,
     immutable_store_v1_ingest_pinned, immutable_store_v1_release_pin, StoreFlagV1}
 use std.nogc_sync_mut.storage.scv_adapter_v1.{scv_adapter_v1_store_root, scv_adapter_v1_import_chunk,
-    scv_adapter_v1_import_bytes, scv_adapter_v1_pin_reachable, scv_adapter_v1_open_projection,
+    scv_adapter_v1_import_bytes, scv_adapter_v1_pin_reachable, scv_adapter_v1_pin_write, scv_adapter_v1_pin_release_older,
+    scv_adapter_v1_run_owner, scv_adapter_v1_open_projection,
     scv_adapter_v1_enable}
 use std.nogc_sync_mut.io.file_ops.{file_write_bytes, secure_temp_dir_raw}
 use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_list, dir_remove_all, is_dir}
@@ -211,4 +212,53 @@ describe "scv_adapter_v1 corrupt legacy blob":
         expect(pinned.pinned.value).to_equal(0)
         expect(pinned.skipped.value).to_equal(1)
         expect(_count_objects(root)).to_equal(0)
+        _cleanup(repo)
+
+describe "scv_adapter_v1 concurrent gc runs":
+    it "keeps a concurrent run's fresh pin until that run completes":
+        val repo = _repo("race")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        val owner_a = scv_adapter_v1_run_owner(repo)
+        val owner_b = scv_adapter_v1_run_owner(repo)
+        expect(owner_a.starts_with("scv-gc:")).to_equal(true)
+        expect(owner_a == owner_b).to_equal(false)
+        # Seed generation 0 (older completed run).
+        expect(scv_adapter_v1_pin_reachable(repo, a + "\n", "scv").generation.value).to_equal(0)
+        # A writes generation 1 and B writes generation 2 before either releases.
+        val wa = scv_adapter_v1_pin_write(repo, a + "\n", owner_a)
+        expect(wa.generation.value).to_equal(1)
+        val wb = scv_adapter_v1_pin_write(repo, b + "\n", owner_b)
+        expect(wb.generation.value).to_equal(2)
+        # A releases: B's fresh pin survives, A's own older-than-newest pin goes.
+        expect(scv_adapter_v1_pin_release_older(repo, owner_a)).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-2-0")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(false)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(false)
+        # B finishes: only the newest generation remains.
+        expect(scv_adapter_v1_pin_release_older(repo, owner_b)).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-2-0")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-done-2")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(false)
+        expect(is_dir(root + "/pins/scv-gc-done-1")).to_equal(false)
+        _cleanup(repo)
+
+    it "never releases an older in-flight run's pin when a newer run completes":
+        val repo = _repo("race2")
+        val a = _put_chunk(repo, "chunk a".bytes())
+        val b = _put_chunk(repo, "chunk b".bytes())
+        val root = scv_adapter_v1_store_root(repo)
+        val owner_a = scv_adapter_v1_run_owner(repo)
+        val owner_b = scv_adapter_v1_run_owner(repo)
+        # A is generation 0 but B (generation 1) completes and releases first.
+        # A's pin has no marker yet only if A is mid-write: stage A's pin by hand.
+        val wa = scv_adapter_v1_pin_write(repo, a + "\n", owner_a)
+        expect(wa.generation.value).to_equal(0)
+        expect(immutable_store_v1_release_pin(root, "scv-gc-done-0", owner_a)).to_equal("")
+        val wb = scv_adapter_v1_pin_write(repo, b + "\n", owner_b)
+        expect(wb.generation.value).to_equal(1)
+        expect(scv_adapter_v1_pin_release_older(repo, owner_b)).to_equal("")
+        expect(is_dir(root + "/pins/scv-gc-0-0")).to_equal(true)
+        expect(is_dir(root + "/pins/scv-gc-1-0")).to_equal(true)
         _cleanup(repo)
