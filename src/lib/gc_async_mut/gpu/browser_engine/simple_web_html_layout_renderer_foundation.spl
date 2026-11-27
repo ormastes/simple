@@ -2916,3 +2916,78 @@ pub fn spaced_advances_milli(advances: [i32], cps: [i64], letter_milli: i32, wor
         out.push(a.to_i32())
         i = i + 1
     out
+
+# Parse a positive CSS `<number>` (integer or decimal, e.g. `0.7`, `.7`, `1`) into
+# micro-units (1_000_000 == 1.0). Returns 0 for non-positive or malformed tokens.
+fn grid_fr_number_micro(raw: text) -> i64:
+    val s = raw.trim()
+    val bs = s.bytes()
+    if bs.len() == 0:
+        return 0
+    var saw_dot = false
+    var saw_digit = false
+    var trailing_dot = false
+    var whole: i64 = 0
+    var frac: i64 = 0
+    var frac_scale: i64 = 100000
+    var i = 0
+    while i < bs.len():
+        val b = bs[i]
+        if b == 46u8:
+            if saw_dot:
+                return 0
+            saw_dot = true
+            trailing_dot = true
+        elif b >= 48u8 and b <= 57u8:
+            val d = (b - 48u8) as i64
+            saw_digit = true
+            trailing_dot = false
+            if not saw_dot:
+                if whole >= 100000:
+                    return 0
+                whole = whole * 10 + d
+            elif frac_scale >= 1:
+                frac = frac + d * frac_scale
+                frac_scale = frac_scale / 10
+        else:
+            return 0
+        i = i + 1
+    if not saw_digit or trailing_dot:
+        return 0
+    val micro = whole * 1000000 + frac
+    if micro <= 0: 0 else: micro
+
+fn grid_track_fr_micro(token: text) -> i64:
+    val lower = token.trim().lower()
+    val plus = find_from(lower, "+", 0)
+    if plus == 0:
+        return 0
+    if plus > 0:
+        val floor_bs = lower.substring(0, plus).bytes()
+        var fi = 0
+        while fi < floor_bs.len():
+            if floor_bs[fi] < 48u8 or floor_bs[fi] > 57u8:
+                return 0
+            fi = fi + 1
+    val stripped = if plus > 0:
+        lower.substring(plus + 1, lower.byte_len())
+    else:
+        lower
+    if not stripped.ends_with("fr") or stripped.byte_len() <= 2:
+        return 0
+    grid_fr_number_micro(stripped.substring(0, stripped.byte_len() - 2))
+
+fn grid_fr_format_micro(micro: i64) -> text:
+    val whole = micro / 1000000
+    val frac = micro % 1000000
+    if frac == 0:
+        return "{whole}fr"
+    var rem = frac
+    var scale: i64 = 100000
+    var frac_str = ""
+    while rem > 0 and scale > 0:
+        val digit = rem / scale
+        frac_str = frac_str + digit.to_string()
+        rem = rem % scale
+        scale = scale / 10
+    "{whole}.{frac_str}fr"

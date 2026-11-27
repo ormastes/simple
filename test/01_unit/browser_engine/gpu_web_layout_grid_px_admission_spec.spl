@@ -1,0 +1,37 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/adapter.spl 80%
+use std.spec.*
+use std.common.structural.layout.{layout_execution_profile, LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.adapter.{web_layout_adapt_cpu_oracle}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_result}
+
+fn px_grid_page(rows: text, columns: text) -> text:
+    val row_decl = if rows == "": "" else: ";grid-template-rows:" + rows
+    "<div style=\"display:grid;grid-template-columns:" + columns + row_decl + "\"><div style=\"width:40px;height:20px\">a</div><div style=\"width:40px;height:20px\">b</div></div>"
+
+fn px_grid_snapshot(rows: text, columns: text):
+    val browser = simple_web_layout_render_html_draw_ir_result(px_grid_page(rows, columns), 320, 240)
+    val execution = layout_execution_profile("serial_cpu", 50, 0, 0, 0, 0, 0, 0, 0)
+    web_layout_adapt_cpu_oracle(browser, 1, execution, 4).snapshot
+
+fn px_grid_unsupported_flag(snapshot) -> i64:
+    for node in snapshot.nodes:
+        if node.semantics.display == "grid":
+            return node.semantics.gpu_admission_flags & LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK
+    -1
+
+describe "gpu_web layout grid px track admission":
+    it "admits fixed px column grids with and without explicit px rows":
+        val cols_only = px_grid_snapshot("", "40px 40px")
+        expect(px_grid_unsupported_flag(cols_only)).to_equal(0)
+        expect(cols_only.grid_tracks).to_equal([40, 40])
+
+        val cols_and_rows = px_grid_snapshot("20px", "40px 40px")
+        expect(px_grid_unsupported_flag(cols_and_rows)).to_equal(0)
+        expect(cols_and_rows.grid_tracks).to_equal([40, 40, 20])
+
+    it "rejects fr and auto track lists with LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK":
+        expect(px_grid_unsupported_flag(px_grid_snapshot("", "40px 1fr"))).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
+        expect(px_grid_unsupported_flag(px_grid_snapshot("", "1fr 1fr"))).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
+        expect(px_grid_unsupported_flag(px_grid_snapshot("20px 20px", "40px 1fr"))).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
+        expect(px_grid_unsupported_flag(px_grid_snapshot("", "auto 40px"))).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
+        expect(px_grid_unsupported_flag(px_grid_snapshot("", "0px 40px"))).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
