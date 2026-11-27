@@ -37,10 +37,12 @@ struct ArrayRepeatAudit:
     repeat_calls: i64
     array_get_calls: i64
     load_globals: i64
+    unit_locals: i64
     unit_array_elems: i64
     i64_repeat_elems: i64
     unit_noted_elems: i64
     unit_ret_locals: i64
+    i64_ret_locals: i64
 
 fn is_unit_mir_type(ty: MirType) -> bool:
     match ty.kind:
@@ -76,10 +78,12 @@ fn audit_array_repeat_mir(source: text, target_fn: text) -> ArrayRepeatAudit:
     var repeat_calls = 0
     var array_get_calls = 0
     var load_globals = 0
+    var unit_locals = 0
     var unit_array_elems = 0
     var i64_repeat_elems = 0
     var unit_noted_elems = 0
     var unit_ret_locals = 0
+    var i64_ret_locals = 0
 
     for function in mir.functions.values():
         if function.name != target_fn and not function.name.ends_with("." + target_fn) and not function.name.ends_with("::" + target_fn):
@@ -87,6 +91,8 @@ fn audit_array_repeat_mir(source: text, target_fn: text) -> ArrayRepeatAudit:
         target_fns = target_fns + 1
 
         for loc in function.locals:
+            if is_unit_mir_type(loc.type_):
+                unit_locals = unit_locals + 1
             match loc.type_.kind:
                 case MirTypeKind.Array(elem, _) | MirTypeKind.Slice(elem):
                     if is_unit_mir_type(elem):
@@ -125,6 +131,8 @@ fn audit_array_repeat_mir(source: text, target_fn: text) -> ArrayRepeatAudit:
                                 if val rt = find_local_type(function.locals, id.id):
                                     if is_unit_mir_type(rt):
                                         unit_ret_locals = unit_ret_locals + 1
+                                    elif is_i64_mir_type(rt):
+                                        i64_ret_locals = i64_ret_locals + 1
                             case _: ()
                 case _: ()
 
@@ -134,10 +142,12 @@ fn audit_array_repeat_mir(source: text, target_fn: text) -> ArrayRepeatAudit:
         repeat_calls: repeat_calls,
         array_get_calls: array_get_calls,
         load_globals: load_globals,
+        unit_locals: unit_locals,
         unit_array_elems: unit_array_elems,
         i64_repeat_elems: i64_repeat_elems,
         unit_noted_elems: unit_noted_elems,
-        unit_ret_locals: unit_ret_locals
+        unit_ret_locals: unit_ret_locals,
+        i64_ret_locals: i64_ret_locals
     )
 
 describe "MIR array repeat Unit placeholder and index element guards":
@@ -152,9 +162,11 @@ describe "MIR array repeat Unit placeholder and index element guards":
         expect(a.repeat_calls).to_equal(1)
         expect(a.i64_repeat_elems).to_equal(1)
         expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
         expect(a.unit_array_elems).to_equal(0)
         expect(a.unit_noted_elems).to_equal(0)
         expect(a.unit_ret_locals).to_equal(0)
+        expect(a.i64_ret_locals).to_equal(1)
 
     it "lowers annotated `[u16; N] = [0; N]` and indexing without Unit element locals":
         val src =
@@ -166,6 +178,7 @@ describe "MIR array repeat Unit placeholder and index element guards":
         expect(a.target_fns).to_equal(1)
         expect(a.repeat_calls).to_equal(1)
         expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
         expect(a.unit_array_elems).to_equal(0)
         expect(a.unit_noted_elems).to_equal(0)
         expect(a.unit_ret_locals).to_equal(0)
@@ -180,6 +193,7 @@ describe "MIR array repeat Unit placeholder and index element guards":
         expect(a.target_fns).to_equal(1)
         expect(a.load_globals).to_equal(1)
         expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
         expect(a.unit_array_elems).to_equal(0)
         expect(a.unit_noted_elems).to_equal(0)
         expect(a.unit_ret_locals).to_equal(0)
@@ -194,6 +208,20 @@ describe "MIR array repeat Unit placeholder and index element guards":
         expect(a.target_fns).to_equal(1)
         expect(a.load_globals).to_equal(1)
         expect(a.array_get_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
         expect(a.unit_array_elems).to_equal(0)
         expect(a.unit_noted_elems).to_equal(0)
         expect(a.unit_ret_locals).to_equal(0)
+        expect(a.i64_ret_locals).to_equal(1)
+
+    it "preserves tuple field MIR type when indexing `(text, i64)`":
+        val src =
+            "fn read_tuple_second(pair: (text, i64)) -> i64:\n" +
+            "    pair.1\n"
+        val a = audit_array_repeat_mir(src, "read_tuple_second")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.array_get_calls).to_equal(0)
+        expect(a.unit_locals).to_equal(0)
+        expect(a.unit_ret_locals).to_equal(0)
+        expect(a.i64_ret_locals).to_equal(1)
