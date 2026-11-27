@@ -1,0 +1,448 @@
+# Entry point of the pure-Simple twin of scripts/check/run-item5-matched-app-performance.py.
+# Finite native matched-app measurements; never bootstrap or ISA qualification.
+#
+# Usage (Linux, p3+; cwd = repo root):
+#   bin/simple run src/app/item5_perf/main.spl --runner-sha256 HEX --manifest FILE
+#       --output FRESH_DIRECTORY [--samples 30|100] [--timeout-seconds N]
+#       [--cohort-timeout-seconds N] [--max-rss-kib N]
+#
+# The arguments, receipts and exit codes match the Python copy: a usage or
+# admission error exits 2, a measurement or evidence failure exits 1, and
+# success exits 0. The only addition is --runner-sha256. It is the trust
+# anchor that replaces the Python interpreter pin: the running, already
+# verified p2/stage binary must hash to that value, or the twin refuses
+# before any side effect.
+
+use std.nogc_sync_mut.io_runtime.{file_read, file_write, file_write_bytes, file_append_text, file_exists, is_file, is_dir, dir_create, list_dir, get_args, exit, time_now_monotonic_ms, file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_run_bounded_bytes}
+use std.nogc_sync_mut.spec.engine_probe.{self_exe_path}
+use std.common.json.value.{JsonValue, json_parse_value, json_value_get, json_value_as_text}
+use app.item5_perf.matched_perf.{
+    MpManifestBindings, MpSampleRecord, mp_percentile, mp_percentile_f64, mp_sample_record, mp_record_json,
+    mp_stage_provider, mp_functional_gate, mp_fields, mp_field, mp_parent, mp_runner_pin_check,
+    mp_py_json_compact, mp_py_json_indent2, mp_json_text_map, mp_splitlines, mp_py_int
+}
+
+val MP_PROG: text = "run-item5-matched-app-performance"
+val MP_USAGE: text = "usage: run-item5-matched-app-performance [-h] --manifest MANIFEST --output OUTPUT [--samples {{30,100}}] [--timeout-seconds TIMEOUT_SECONDS] [--cohort-timeout-seconds COHORT_TIMEOUT_SECONDS] [--max-rss-kib MAX_RSS_KIB] --runner-sha256 RUNNER_SHA256"
+val MP_INPUT_NAMES: [text] = ["db_scalar", "db_vector", "http_scalar", "http_vector", "provider", "compiler", "runtime", "watchdog", "functional_evidence"]
+
+fn mp_usage_error(message: text):
+    """argparse p.error: usage plus message on stderr, exit 2."""
+    eprint MP_USAGE
+    eprint MP_PROG + ": error: " + message
+    exit(2)
+
+fn mp_fail(message: text):
+    """An uncaught ValueError or RuntimeError in the Python copy: exit 1."""
+    eprint MP_PROG + ": " + message
+    exit(1)
+
+struct MpArgs:
+    script: text
+    manifest: text
+    output: text
+    samples: i64
+    timeout_seconds: i64
+    cohort_timeout_seconds: i64
+    max_rss_kib: i64
+    runner_sha256: text
+
+fn mp_int_arg(name: text, raw: text) -> i64:
+    match mp_py_int(raw):
+        case Some(v): v
+        case None:
+            mp_usage_error("argument " + name + ": invalid int value: '" + raw + "'")
+            0
+
+fn mp_parse_args() -> MpArgs:
+    val raw = get_args()
+    var start = 0
+    var script = ""
+    var i = 0
+    while i < raw.len():
+        if raw[i].ends_with(".spl"):
+            start = i + 1
+            script = raw[i]
+        i = i + 1
+    var manifest = ""
+    var output = ""
+    var samples = 30
+    var timeout_seconds = 1200
+    var cohort = 3600
+    var rss = 1048576
+    var pin = ""
+    var seen_runner = false
+    var k = start
+    while k < raw.len():
+        var key = raw[k]
+        var value = ""
+        var has_value = false
+        val eq = key.index_of("=")
+        if key.starts_with("--") and eq > 0:
+            value = key.substring(eq + 1, key.byte_len())
+            key = key.substring(0, eq)
+            has_value = true
+        if key == "-h" or key == "--help":
+            print MP_USAGE
+            exit(0)
+        if not has_value:
+            if k + 1 >= raw.len(): mp_usage_error("argument " + key + ": expected one argument")
+            value = raw[k + 1]
+            k = k + 1
+        if key == "--manifest": manifest = value
+        elif key == "--output": output = value
+        elif key == "--samples":
+            samples = mp_int_arg(key, value)
+            if samples != 30 and samples != 100:
+                mp_usage_error("argument --samples: invalid choice: {samples} (choose from 30, 100)")
+        elif key == "--timeout-seconds": timeout_seconds = mp_int_arg(key, value)
+        elif key == "--cohort-timeout-seconds": cohort = mp_int_arg(key, value)
+        elif key == "--max-rss-kib": rss = mp_int_arg(key, value)
+        elif key == "--runner-sha256":
+            pin = value
+            seen_runner = true
+        else: mp_usage_error("unrecognized arguments: " + key)
+        k = k + 1
+    var missing: [text] = []
+    if manifest == "": missing.push("--manifest")
+    if output == "": missing.push("--output")
+    if not seen_runner: missing.push("--runner-sha256")
+    if missing.len() > 0:
+        var names = ""
+        for m in missing:
+            names = if names == "": m else: names + ", " + m
+        mp_usage_error("the following arguments are required: " + names)
+    MpArgs(script: script, manifest: manifest, output: output, samples: samples, timeout_seconds: timeout_seconds,
+        cohort_timeout_seconds: cohort, max_rss_kib: rss, runner_sha256: pin)
+
+# ---------------------------------------------------------------- process helpers
+
+fn mp_capture(cmd: text, args: [text]) -> (text, i64):
+    val (out, _err, code) = process_run_bounded(cmd, args, 30000, 16777216)
+    (out, code)
+
+fn mp_checked(cmd: text, args: [text]) -> text:
+    """subprocess.run(check=True, capture_output=True, timeout=30).stdout."""
+    val (out, code) = mp_capture(cmd, args)
+    if code != 0: mp_fail("CalledProcessError: " + cmd + " exited {code}")
+    out
+
+fn mp_resolve_strict(path: text) -> text:
+    val (out, code) = mp_capture("realpath", ["-e", "--", path])
+    if code != 0: mp_fail("FileNotFoundError: " + path)
+    out.trim()
+
+fn mp_resolve(path: text) -> text:
+    val (out, code) = mp_capture("realpath", ["-m", "--", path])
+    if code != 0: mp_fail("cannot resolve " + path)
+    out.trim()
+
+fn mp_which(name: text) -> text:
+    val (out, code) = mp_capture("which", [name])
+    if code != 0: mp_fail("TypeError: " + name + " is not on PATH")
+    mp_resolve_strict(out.trim())
+
+# ---------------------------------------------------------------- JSON access
+
+fn mp_json_text(value: JsonValue, key: text) -> text:
+    match json_value_get(value, key):
+        case Some(v):
+            match json_value_as_text(v):
+                case Some(t): t
+                case None: ""
+        case None: ""
+
+fn mp_json_required(value: JsonValue, key: text) -> JsonValue:
+    match json_value_get(value, key):
+        case Some(v): v
+        case None:
+            mp_fail("KeyError: '" + key + "'")
+            JsonValue.Null
+
+fn mp_json_scalar_text(value: JsonValue) -> text:
+    """str(value) for the int or str identities the manifest carries."""
+    match value:
+        case Int(i): "{i}"
+        case Str(s): s
+        case _: mp_py_json_compact(value)
+
+# ---------------------------------------------------------------- host metadata
+
+fn mp_read_or_unavailable(path: text) -> text:
+    if not is_file(path): return "unavailable: [Errno 2] No such file or directory: '" + path + "'"
+    file_read(path).trim()
+
+fn mp_uname(flag: text) -> text:
+    val (out, code) = mp_capture("uname", [flag])
+    if code != 0: return ""
+    out.trim()
+
+fn mp_host_metadata() -> JsonValue:
+    var processor = mp_uname("-p")
+    if processor == "unknown": processor = ""
+    val kernel = JsonValue.Object(keys: ["system", "node", "release", "version", "machine", "processor"],
+        values: [JsonValue.Str(mp_uname("-s")), JsonValue.Str(mp_uname("-n")), JsonValue.Str(mp_uname("-r")),
+            JsonValue.Str(mp_uname("-v")), JsonValue.Str(mp_uname("-m")), JsonValue.Str(processor)])
+    var governor_pairs: [(text, text)] = []
+    val base = "/sys/devices/system/cpu/cpufreq"
+    if is_dir(base):
+        var names: [text] = []
+        for name in list_dir(base):
+            if name.starts_with("policy"): names.push(name)
+        names.sort()
+        for name in names:
+            val g = base + "/" + name + "/scaling_governor"
+            if file_exists(g): governor_pairs.push((g, mp_read_or_unavailable(g)))
+    val scope = if governor_pairs.len() == 0: "unavailable" else: "reported sysfs policies"
+    JsonValue.Object(keys: ["kernel", "cpuinfo", "loadavg", "meminfo", "governors", "governor_scope"],
+        values: [kernel, JsonValue.Str(mp_read_or_unavailable("/proc/cpuinfo")), JsonValue.Str(mp_read_or_unavailable("/proc/loadavg")),
+            JsonValue.Str(mp_read_or_unavailable("/proc/meminfo")), mp_json_text_map(governor_pairs), JsonValue.Str(scope)])
+
+fn mp_write_json(path: text, value: JsonValue):
+    file_write(path, mp_py_json_indent2(value) + "\n")
+
+# ---------------------------------------------------------------- environment
+
+fn mp_env_unset_args() -> [text]:
+    """`env -u` arguments that drop LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH and every SIMPLE_VECTOR_TEST_* name."""
+    var out: [text] = ["-u", "LD_PRELOAD", "-u", "LD_AUDIT", "-u", "LD_LIBRARY_PATH"]
+    val (listing, code) = mp_capture("env", [])
+    if code != 0: mp_fail("cannot list the environment")
+    for line in mp_splitlines(listing):
+        val eq = line.index_of("=")
+        if eq > 0:
+            val name = line.substring(0, eq)
+            if name.starts_with("SIMPLE_VECTOR_TEST_"):
+                out.push("-u")
+                out.push(name)
+    out
+
+# ---------------------------------------------------------------- cohort
+
+struct MpSample:
+    kind: text
+    size: i64
+    lane: text
+    pair: i64
+    ns: i64
+    rss_kib: i64
+
+fn mp_pad3(n: i64) -> text:
+    if n < 10: return "00{n}"
+    if n < 100: return "0{n}"
+    "{n}"
+
+fn mp_terminal(status: text, completed: i64, evidence: bool, wall: f64) -> JsonValue:
+    var keys: [text] = ["status", "completed_samples"]
+    var values: [JsonValue] = [JsonValue.Str(status), JsonValue.Int(completed)]
+    if evidence:
+        keys.push("provider_call_evidence")
+        values.push(JsonValue.Str("Simple owner reports; independent instrumented ISA proof required"))
+    keys.push("wall_seconds_including_setup")
+    values.push(JsonValue.Float(wall))
+    JsonValue.Object(keys: keys, values: values)
+
+fn mp_record_field(record: MpSampleRecord, key: text) -> text:
+    if key == "checksum": return "{record.checksum}"
+    if key == "results": return "{record.results}"
+    if key == "operations": return "{record.operations}"
+    if record.has_wire: return record.wire_hex
+    "<absent>"
+
+fn main():
+    val a = mp_parse_args()
+    # The trust anchor comes first, before any side effect.
+    val runner = self_exe_path() ?? ""
+    if runner == "": mp_usage_error("cannot resolve the running stage binary; refusing unpinned execution")
+    match mp_runner_pin_check(runner, a.runner_sha256):
+        case Ok(_): pass
+        case Err(e): mp_usage_error(e)
+    if a.timeout_seconds < 1 or a.timeout_seconds > 1800 or a.max_rss_kib < 1 or a.max_rss_kib > 5859375 or
+            a.cohort_timeout_seconds < 1 or a.cohort_timeout_seconds > 21600:
+        mp_usage_error("invalid finite resource limit")
+    if not is_file(a.manifest): mp_fail("FileNotFoundError: " + a.manifest)
+    val m = match json_parse_value(file_read(a.manifest)):
+        case Ok(v): v
+        case Err(e):
+            mp_fail("JSONDecodeError: " + e)
+            JsonValue.Null
+    if mp_json_text(m, "schema") != "item5-matched-app-performance-v1" or mp_json_text(m, "mode") != "production":
+        mp_usage_error("production benchmark manifest required; observer runs are separate")
+    for key in ["app_source_commit", "app_source_tree", "producer_source_commit", "functional_app_source_commit"]:
+        val value = mp_json_text(m, key)
+        var ok = value.byte_len() == 40
+        var c = 0
+        while ok and c < value.byte_len():
+            val b = value.byte_at(c)
+            if not ((b >= 48 and b <= 57) or (b >= 97 and b <= 102)): ok = false
+            c = c + 1
+        if not ok: mp_usage_error("invalid source identity: " + key)
+    val repository = mp_resolve_strict(mp_json_scalar_text(mp_json_required(m, "source_repository")))
+    val app_commit = mp_json_text(m, "app_source_commit")
+    if mp_checked("git", ["-C", repository, "rev-parse", app_commit + "^{{tree}}"]).trim() != mp_json_text(m, "app_source_tree"):
+        mp_usage_error("benchmark source tree does not match the actual commit")
+    if mp_checked("git", ["-C", repository, "rev-parse", app_commit + ":src"]).trim() !=
+            mp_checked("git", ["-C", repository, "rev-parse", mp_json_text(m, "functional_app_source_commit") + ":src"]).trim():
+        mp_usage_error("functional gate and benchmark must share identical production src tree")
+    # Paths and hashes come from actual build provenance, never synthesized here.
+    var inputs: {text: text} = {}
+    var expected: {text: text} = {}
+    for name in MP_INPUT_NAMES:
+        val entry = mp_json_required(m, name)
+        val path = mp_resolve_strict(mp_json_scalar_text(mp_json_required(entry, "path")))
+        val sha = mp_json_scalar_text(mp_json_required(entry, "sha256"))
+        if not is_file(path) or file_hash_sha256_or_empty(path) != sha: mp_usage_error("input hash mismatch: " + name)
+        inputs[name] = path
+        expected[name] = sha
+    val provider_id = mp_json_scalar_text(mp_json_required(m, "provider_id"))
+    val implementation_id = mp_json_scalar_text(mp_json_required(m, "implementation_id"))
+    val bindings = MpManifestBindings(compiler_sha256: expected["compiler"], runtime_sha256: expected["runtime"],
+        producer_source_commit: mp_json_text(m, "producer_source_commit"),
+        functional_app_source_commit: mp_json_text(m, "functional_app_source_commit"),
+        provider_id: provider_id, implementation_id: implementation_id)
+    val functional_hashes = match mp_functional_gate(inputs["functional_evidence"], bindings):
+        case Ok(pairs): pairs
+        case Err(e):
+            mp_fail("ValueError: " + e)
+            []
+    val symbols = mp_checked("nm", ["-D", "--undefined-only", inputs["provider"]])
+    if symbols.contains("simple_vector_test_"): mp_usage_error("instrumented provider is not a production timing artifact")
+    val out = mp_resolve(a.output)
+    if file_exists(out): mp_fail("FileExistsError: " + out)
+    if not dir_create(out, false): mp_fail("FileNotFoundError: " + out)
+    val (provider_argument, staged_provider) = match mp_stage_provider(inputs["provider"], out, expected["provider"]):
+        case Ok(pair): pair
+        case Err(e):
+            mp_fail("ValueError: " + e)
+            ("", "")
+    mp_write_json(out + "/manifest.json", m)
+    file_write(out + "/scope.txt", "Matched native application timings; no ISA, release or bootstrap admission.\n")
+    mp_write_json(out + "/host-before.json", mp_host_metadata())
+    var tool_paths: [text] = [mp_resolve_strict(a.script), runner, inputs["watchdog"]]
+    for tool in ["perl", "nm", "git"]: tool_paths.push(mp_which(tool))
+    var tool_hashes: [(text, text)] = []
+    for path in tool_paths: tool_hashes.push((path, file_hash_sha256_or_empty(path)))
+    mp_write_json(out + "/tools.json", mp_json_text_map(tool_hashes))
+    mp_write_json(out + "/functional-evidence.json", mp_json_text_map(functional_hashes))
+    val env_args = mp_env_unset_args()
+    val started = time_now_monotonic_ms()
+    var completed = 0
+    var samples: [MpSample] = []
+    val cohorts: [(text, i64)] = [("db", 1025), ("db", 65536), ("http", 128)]
+    var failure = ""
+    for cohort in cohorts:
+        val kind = cohort.0
+        val size = cohort.1
+        var pair = 0
+        while failure == "" and pair < a.samples:
+            val order: [text] = if pair % 2 == 0: ["scalar", "vector"] else: ["vector", "scalar"]
+            var compared_scalar: MpSampleRecord? = None
+            var compared_vector: MpSampleRecord? = None
+            for lane in order:
+                if failure == "":
+                    val remaining = a.cohort_timeout_seconds - (time_now_monotonic_ms() - started) / 1000
+                    if remaining <= 0:
+                        failure = "finite cohort time budget exhausted; partial samples retained"
+                    else:
+                        val role = kind + "_" + lane
+                        val run = out + "/" + kind + "-{size}-" + mp_pad3(pair) + "-" + lane
+                        if is_dir(run) or not dir_create(run, false):
+                            failure = "FileExistsError: " + run
+                        var app: [text] = [inputs[role]]
+                        if kind == "db": app.push("{size}")
+                        if lane == "vector":
+                            app.push(provider_argument)
+                            app.push(expected["provider"])
+                            if kind == "db":
+                                app.push(provider_id)
+                                app.push(implementation_id)
+                        val limit = if a.timeout_seconds < remaining: a.timeout_seconds else: remaining
+                        var cmd: [text] = ["perl", inputs["watchdog"], "--max-rss-kib={a.max_rss_kib}",
+                            "--rss-cap-mode=enforce", "--timeout-seconds={limit}", "--receipt=" + run + "/rss.env", "--"]
+                        for part in app: cmd.push(part)
+                        var cmd_json: [JsonValue] = []
+                        for part in cmd: cmd_json.push(JsonValue.Str(part))
+                        file_write(run + "/command.json", mp_py_json_compact(JsonValue.Array(cmd_json)) + "\n")
+                        var env_cmd: [text] = ["-C", out]
+                        for part in env_args: env_cmd.push(part)
+                        for part in cmd: env_cmd.push(part)
+                        val (stdout_bytes, stderr_bytes, code) = process_run_bounded_bytes("env", env_cmd, (limit + 120) * 1000, 16777216)
+                        file_write_bytes(run + "/stdout", stdout_bytes)
+                        file_write_bytes(run + "/stderr", stderr_bytes)
+                        val receipt = mp_fields(run + "/rss.env")
+                        val quiescent = (mp_field(receipt, "quiescent") ?? "") == "1"
+                        val exit_ok = (mp_field(receipt, "exit_status") ?? "") == "0"
+                        val complete = (mp_field(receipt, "status") ?? "") == "complete"
+                        if code != 0 or not quiescent or not exit_ok or not complete:
+                            failure = "sample failed or watchdog not quiescent: " + run
+                        else:
+                            match mp_sample_record(run + "/stdout", kind, size, lane == "vector"):
+                                case Ok(record):
+                                    val rss = mp_py_int(mp_field(receipt, "peak_rss_kib") ?? "") ?? -1
+                                    if rss < 0:
+                                        failure = "ValueError: invalid peak_rss_kib in " + run
+                                    else:
+                                        samples.push(MpSample(kind: kind, size: size, lane: lane, pair: pair, ns: record.ns, rss_kib: rss))
+                                        if lane == "scalar": compared_scalar = Some(record)
+                                        else: compared_vector = Some(record)
+                                        file_append_text(out + "/samples.jsonl", mp_py_json_compact(mp_record_json(record, lane, pair, order, rss)) + "\n")
+                                        completed = completed + 1
+                                case Err(e): failure = "ValueError: " + e
+            if failure == "":
+                val scalar_record = compared_scalar ?? MpSampleRecord(keys: [], kind: "", size: 0, operations: 0, ns: 0, checksum: 0, results: 0, provider_calls: 0, warmups: 0, wire_hex: "", has_wire: false)
+                val vector_record = compared_vector ?? scalar_record
+                for key in ["checksum", "results", "operations", "wire_hex"]:
+                    if failure == "" and mp_record_field(scalar_record, key) != mp_record_field(vector_record, key):
+                        failure = "matched workload result mismatch: " + key
+            pair = pair + 1
+    if failure == "":
+        for name in MP_INPUT_NAMES:
+            if failure == "" and file_hash_sha256_or_empty(inputs[name]) != expected[name]:
+                failure = "input changed during cohort: " + name
+    if failure == "" and file_hash_sha256_or_empty(staged_provider) != expected["provider"]:
+        failure = "staged production provider changed during cohort"
+    if failure == "":
+        for pair in tool_hashes:
+            if failure == "" and file_hash_sha256_or_empty(pair.0) != pair.1:
+                failure = "tool or functional evidence changed during cohort: " + pair.0
+        for pair in functional_hashes:
+            if failure == "" and file_hash_sha256_or_empty(pair.0) != pair.1:
+                failure = "tool or functional evidence changed during cohort: " + pair.0
+    var status = "failed"
+    if failure == "":
+        var summaries: [JsonValue] = []
+        for cohort in cohorts:
+            var lane_values: [JsonValue] = []
+            for lane in ["scalar", "vector"]:
+                var ns_values: [i64] = []
+                var max_rss = 0
+                for s in samples:
+                    if s.kind == cohort.0 and s.size == cohort.1 and s.lane == lane:
+                        ns_values.push(s.ns)
+                        if s.rss_kib > max_rss: max_rss = s.rss_kib
+                lane_values.push(JsonValue.Object(keys: ["samples", "p50_ns", "p95_ns", "max_startup_inclusive_process_rss_kib"],
+                    values: [JsonValue.Int(ns_values.len()), JsonValue.Int(mp_percentile(ns_values, 50)),
+                        JsonValue.Int(mp_percentile(ns_values, 95)), JsonValue.Int(max_rss)]))
+            var ratios: [f64] = []
+            var p = 0
+            while p < a.samples:
+                var scalar_ns = 0
+                var vector_ns = 0
+                for s in samples:
+                    if s.kind == cohort.0 and s.size == cohort.1 and s.pair == p:
+                        if s.lane == "scalar": scalar_ns = s.ns
+                        else: vector_ns = s.ns
+                ratios.push((vector_ns as f64) / (scalar_ns as f64))
+                p = p + 1
+            summaries.push(JsonValue.Object(keys: ["kind", "size", "lanes", "paired_vector_over_scalar_p50", "paired_vector_over_scalar_p95"],
+                values: [JsonValue.Str(cohort.0), JsonValue.Int(cohort.1),
+                    JsonValue.Object(keys: ["scalar", "vector"], values: lane_values),
+                    JsonValue.Float(mp_percentile_f64(ratios, 50)), JsonValue.Float(mp_percentile_f64(ratios, 95))]))
+        mp_write_json(out + "/summary.json", JsonValue.Array(summaries))
+        status = "measurements-complete"
+    mp_write_json(out + "/host-after.json", mp_host_metadata())
+    val wall = ((time_now_monotonic_ms() - started) as f64) / 1000.0
+    mp_write_json(out + "/terminal.json", mp_terminal(status, completed, status == "measurements-complete", wall))
+    if failure != "": mp_fail(failure)
+    exit(0)
