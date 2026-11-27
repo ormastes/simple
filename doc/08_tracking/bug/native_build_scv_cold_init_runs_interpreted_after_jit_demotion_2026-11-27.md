@@ -297,3 +297,14 @@ after cuda fix 0 / 0 / 0 (jit4.log). Remaining: `hybrid-interp-splice` for rt_* 
 `--help` JIT wall 2m50. Spec stage3_explicit_owner_types_spec.spl 2/2 on seed r.
 The `[engine-demotion]` lines are printed by the Rust seed (src/compiler_rust/common/src/engine_receipt.rs
 and the driver), so teeing them into SIMPLE_BUILD_TRACE_FILE from Simple source is not possible; skipped.
+
+### d29-f correction (2026-11-27): "0/0/0" was vacuous
+
+The earlier "after cuda fix 0 / 0 / 0" run hard-failed before main with 140 `semantic: private fn ... is not
+visible` errors (the demotion counters were zero only because it never got that far). Fixed by making the
+cross-module-used fns `pub`: all `fn llvm_*` in src/lib/nogc_sync_mut/sffi/{llvm_types,llvm_codegen,
+llvm_target,llvm_loader}.spl, plus 16 compiler fns (auto_vectorize_codegen/analysis, module_lowering
+hir_module_surface_index, mir_lowering_stmts, mir_instruction_support, feature_caps_types). Genuine result
+(jit6.log): `SIMPLE_EXECUTION_MODE=jit run native_build_worker.spl --help` -> rc=1, last line
+`error: native_build_worker.spl is an internal entrypoint`, 0 "is not visible", 0 jit-compile-error /
+JIT compilation failed / CODEGEN-AMBIGUOUS; only `hybrid-interp-splice` (rt_* externs) remains.
