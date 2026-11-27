@@ -1,6 +1,6 @@
 # Stage 2 test-runner build: `00.common/simple.sdn: project.name is missing` (2026-11-27)
 
-**Status:** root cause found and worked around in source (`str_slice`, below); not yet confirmed by a rebuilt Stage 2. The compiler-side fix in the Rust seed is open. Owner: bootstrap lane.
+**Status:** root cause found; worked around in source (`str_slice`, below) and fixed in the Rust seed resolver (2026-11-27, this section's "Seed fix" under Open). Not yet confirmed by a rebuilt Stage 2. Owner: bootstrap lane.
 
 ## Root cause (2026-11-27, proven with the exact Stage 2 producer)
 
@@ -44,7 +44,23 @@ The manifest reorder `a17add1a2c0` also avoids the failure, but only incidentall
 
 ## Open
 
-- **Seed fix.** `resolve_name_variants` must not rebind a builtin-receiver method (`str`, `text`, `Array`, ...) to a same-spelled user function through the lowercase-joined lookup. The blast radius is unmeasured: other text methods may currently depend on that rebinding. The Cranelift ladders carry the same spelling (`codegen/instr/calls.rs:4966`, `closures_structs.rs:1594`); a Cranelift seed build did not reproduce on the minimal shape.
+- **Seed fix — IMPLEMENTED 2026-11-27, lane validation pending.** Both
+  lowercase-joined lookups in `resolve_name_variants`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/imports.rs`) are now
+  gated by `is_builtin_receiver_type`, so a builtin-receiver method
+  (`str.slice`, `str.len`, `Array.is_empty`, ...) can no longer rebind to a
+  same-spelled user free function through `str_slice` / `strslice` spellings;
+  resolution returns `None` and codegen takes the builtin lowering, the same
+  behavior every small probe (no `str_slice` in closure) already showed.
+  User-type factory resolution through the same lookup is unchanged (positive
+  control in the new tests). Regression coverage: three new tests in
+  `numeric_receiver_resolution_tests` (`cargo test -p simple-compiler --lib
+  numeric_receiver_resolution_tests`). Still open: a rebuilt Stage 2 running
+  `test_runner_build` end-to-end; until that passes, keep the `str_slice`
+  source workaround below. The Cranelift ladders carry the same spelling
+  (`codegen/instr/calls.rs:4966`, `closures_structs.rs:1594`) and are NOT
+  gated — a Cranelift seed build did not reproduce on the minimal shape, so
+  they were left alone; revisit if a Cranelift lane ever shows the symptom.
 - **Sibling rebindings, same mechanism (proven).** With the same producer, a closure defining sentinel `str_len`, `str_char_at`, `str_index_of`, `str_starts_with`, `str_contains`, `str_ends_with` and `str_replace` has `s.len()`, `s.char_at(1)`, `s.index_of(..)`, `s.starts_with(..)`, `s.contains(..)`, `s.ends_with(..)` and `s.replace(..)` all return the sentinels (`len=-111 char_at=HIJACK_CHAR_AT index_of=-222 ...`); the seed interpreter runs the builtins. Calls into `compiler.frontend.core.types` from outside the core package in the Stage 2 binary (direct source calls not separated out): `str_starts_with` 1747, `str_len` 1457, `str_contains` 1016, `str_ends_with` 555, `str_replace` 525, `str_index_of` 187, `str_slice` 62, `str_char_at` 30. The one with a visible unit difference is `str_len`: it is `rt_string_len`, which returned the byte count (2489) for the em-dash manifest, while the interpreter's `.len()` counts code points (7 for an 11-byte text). Consequences were not examined.
 - No rebuilt Stage 2 has run `test_runner_build` with the workaround yet.
 - The `compiler_cli_build` failure in the same verification (`FILE-WORKER-E-CLOSURE-INCOMPLETE`, `failed_modules=3347`) is a separate problem.
