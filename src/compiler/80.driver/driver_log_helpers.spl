@@ -5,6 +5,7 @@
 
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_append}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.build_progress.{publish_build_progress}
 use std.common.build_progress.{BUILD_PROGRESS_SCHEMA_V1, BuildProgressSnapshot,
     BuildProgressState, BuildLinkState, build_progress_state_text}
@@ -36,9 +37,22 @@ pub fn driver_phase_trace_enabled() -> bool:
 # per-receipt MIR/AST tracing and is neither bounded nor cheap. The gate is
 # read once per process; callers on per-module paths test
 # `build_trace_enabled()` before interpolating so an OFF build builds no text.
-# Format: `[build-trace] +<ms>ms <site> key=value ...`, stdout only (the
-# worker's stderr is dropped by the parent's relay chain), flushed per line.
+# Format: `[build-trace] +<ms>ms <site> key=value ...`, stdout (the
+# worker's stderr is dropped by the parent's relay chain), flushed per line, and
+# also teed to `<SIMPLE_BUILD_TRACE_FILE>.<pid>` when that variable is set.
 var _g_build_trace_state: i64 = -1
+var _g_build_trace_file: text = ""
+var _g_build_trace_file_set: bool = false
+
+# Per-process file: file_append is size+positioned write, not O_APPEND, so
+# processes sharing one path (parse shards inherit the env) would overwrite
+# each other.
+fn _build_trace_file_path() -> text:
+    if not _g_build_trace_file_set:
+        val base = env_get("SIMPLE_BUILD_TRACE_FILE") ?? ""
+        _g_build_trace_file = if base == "": "" else: base + "." + "{getpid()}"
+        _g_build_trace_file_set = true
+    _g_build_trace_file
 
 pub fn build_trace_enabled() -> bool:
     if _g_build_trace_state < 0:
@@ -76,8 +90,8 @@ pub fn log_build_trace(msg: text):
         rt_stdout_flush()
         # Windows relays the worker's stdout only at exit, and drops it when the
         # timeout kills the worker. SIMPLE_BUILD_TRACE_FILE tees each line to a
-        # file (appended per line) so a stuck worker's phase is observable live.
-        val trace_file = env_get("SIMPLE_BUILD_TRACE_FILE") ?? ""
+        # per-process file (appended per line) so a stuck worker's phase is observable live.
+        val trace_file = _build_trace_file_path()
         if trace_file != "":
             val _ = file_append(trace_file, line + "\n")
 

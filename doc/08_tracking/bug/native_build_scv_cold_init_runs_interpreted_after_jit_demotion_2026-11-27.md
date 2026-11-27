@@ -200,3 +200,9 @@ Phase breakdown of the smoke (`SIMPLE_MIR_SHARDING=0`, JIT children), wall secon
 
 Smoke NOT completed (stopped at ~14 min of worker time to honour the time box); todo 478 and the plan-doc "STILL OWED" stay open.
 Next: rerun with the new `stage_parse/stage_lower_hir` trace points (cold init is now cached, so ~80 s to worker start).
+
+Review follow-ups: the trace sink is now one file per process, `<SIMPLE_BUILD_TRACE_FILE>.<pid>` (`file_append` is size +
+positioned write, not O_APPEND, so shards sharing one path could overwrite each other). Note a set
+`SIMPLE_BUILD_TRACE_FILE` value folds into the `native_noop_request_v1` identity: reuse the same path across reruns or expect a
+no-op cache miss. The same `Ok(None)`/`Ok(Some(ev))` pattern in `compiler_inventory_event_push_cost_v1` got the same rewrite.
+Miscompile record: `native_build_jit_nested_option_result_match_exhausted_2026-11-27.md`.
