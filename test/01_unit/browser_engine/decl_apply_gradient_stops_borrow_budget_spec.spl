@@ -1,0 +1,175 @@
+"""
+## Purpose and audience
+Purpose: Verify the gradient-stop helper extraction in
+`simple_web_html_layout_renderer_decl_apply.spl` keeps gradient cascade output
+identical while removing all mutable `.push()` borrows from
+`_apply_decls_without_grid_inner` (preventing NLL borrow-budget exhaustion at
+`nll_loan_work_budget=1000000` during isolated Phase 4 MIR compilation).
+Audience: compiler and browser-engine maintainers.
+"""
+
+# @tag: unit, browser_engine
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.{
+    _decl_gradient_stop_colors,
+    _decl_gradient_stop_positions
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{apply_decls}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{GradientStopSpec}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{
+    renderer_default_style, Style
+}
+
+fn count_substr(haystack: text, needle: text) -> i64:
+    """Count non-overlapping occurrences of `needle` inside `haystack`."""
+    if needle == "":
+        return 0
+    haystack.split(needle).len() - 1
+
+fn slice_between(src: text, start_marker: text, end_marker: text) -> text:
+    """Return substring starting at `start_marker` and stopping before `end_marker`."""
+    val start_idx = src.index_of(start_marker)
+    if start_idx < 0:
+        return ""
+    val tail = src.substring(start_idx, src.len())
+    val end_idx = tail.index_of(end_marker)
+    if end_idx < 0:
+        return tail
+    tail.substring(0, end_idx)
+
+fn apply_full_probe(decls: text) -> Style:
+    """Apply CSS declarations through `apply_decls` (reaching `_apply_decls_without_grid_inner`)."""
+    apply_decls(renderer_default_style(), decls, 16)
+
+describe "decl_apply gradient stop helper extraction":
+    it "extracts stop colors and permille positions in order for empty and multi-stop lists":
+        val empty_stops: [GradientStopSpec] = []
+        expect(_decl_gradient_stop_colors(empty_stops)).to_equal([])
+        expect(_decl_gradient_stop_positions(empty_stops)).to_equal([])
+
+        val stops: [GradientStopSpec] = [
+            GradientStopSpec(color: 0xFFFF0000u32, pos_permille: -150),
+            GradientStopSpec(color: 0xFF00FF00u32, pos_permille: 400),
+            GradientStopSpec(color: 0xFF0000FFu32, pos_permille: 1200)
+        ]
+        expect(_decl_gradient_stop_colors(stops)).to_equal([
+            0xFFFF0000u32,
+            0xFF00FF00u32,
+            0xFF0000FFu32
+        ])
+        expect(_decl_gradient_stop_positions(stops)).to_equal([-150, 400, 1200])
+
+    it "applies single-layer linear-gradient via background-image and background shorthand":
+        val img = apply_full_probe(
+            "background-image:linear-gradient(120deg, #ff0000, #00ff00 40%, #0000ff)"
+        )
+        expect(img.background_gradient_is_radial).to_equal(false)
+        expect(img.background_gradient_angle_deg).to_equal(120)
+        expect(img.background_gradient_from).to_equal(0xFFFF0000u32)
+        expect(img.background_gradient_to).to_equal(0xFF00FF00u32)
+        expect(img.background_gradient_stop_colors).to_equal([
+            0xFFFF0000u32,
+            0xFF00FF00u32,
+            0xFF0000FFu32
+        ])
+        expect(img.background_gradient_stop_positions).to_equal([0, 400, 1000])
+        expect(img.bg_layers_raw).to_equal("")
+
+        val sh = apply_full_probe(
+            "background:linear-gradient(90deg, #112233 10%, #445566, #778899 90%)"
+        )
+        expect(sh.background_gradient_is_radial).to_equal(false)
+        expect(sh.background_gradient_angle_deg).to_equal(90)
+        expect(sh.background_gradient_from).to_equal(0xFF112233u32)
+        expect(sh.background_gradient_to).to_equal(0xFF445566u32)
+        expect(sh.background_gradient_stop_colors).to_equal([
+            0xFF112233u32,
+            0xFF445566u32,
+            0xFF778899u32
+        ])
+        expect(sh.background_gradient_stop_positions).to_equal([100, 500, 900])
+        expect(sh.bg_layers_raw).to_equal("")
+
+    it "applies single-layer radial-gradient via background-image keeping raw rejection witness":
+        val decl = "radial-gradient(#ff0000, #00ff00 25%, #0000ff)"
+        val st = apply_full_probe("background-image:" + decl)
+        expect(st.background_gradient_is_radial).to_equal(true)
+        expect(st.background_gradient_angle_deg).to_equal(180)
+        expect(st.background_gradient_from).to_equal(0u32)
+        expect(st.background_gradient_to).to_equal(0u32)
+        expect(st.background_gradient_stop_colors).to_equal([
+            0xFFFF0000u32,
+            0xFF00FF00u32,
+            0xFF0000FFu32
+        ])
+        expect(st.background_gradient_stop_positions).to_equal([0, 250, 1000])
+        expect(st.bg_layers_raw).to_equal(decl)
+
+    it "applies overlaid gradient + base color declarations for linear and radial shorthands":
+        val lin_over = apply_full_probe(
+            "background:linear-gradient(45deg, #ff0000, #00ff00 35%, #0000ff), #112233"
+        )
+        expect(lin_over.bg).to_equal(0xFF112233u32)
+        expect(lin_over.background_gradient_is_radial).to_equal(false)
+        expect(lin_over.background_gradient_angle_deg).to_equal(45)
+        expect(lin_over.background_gradient_from).to_equal(0xFFFF0000u32)
+        expect(lin_over.background_gradient_to).to_equal(0xFF00FF00u32)
+        expect(lin_over.background_gradient_stop_colors).to_equal([
+            0xFFFF0000u32,
+            0xFF00FF00u32,
+            0xFF0000FFu32
+        ])
+        expect(lin_over.background_gradient_stop_positions).to_equal([0, 350, 1000])
+        expect(lin_over.bg_layers_raw).to_equal("")
+
+        val rad_over_decl = "radial-gradient(#ff0000, #00ff00 60%, #0000ff), #112233"
+        val rad_over = apply_full_probe("background:" + rad_over_decl)
+        expect(rad_over.bg).to_equal(0xFF112233u32)
+        expect(rad_over.background_gradient_is_radial).to_equal(true)
+        expect(rad_over.background_gradient_angle_deg).to_equal(180)
+        expect(rad_over.background_gradient_from).to_equal(0u32)
+        expect(rad_over.background_gradient_to).to_equal(0u32)
+        expect(rad_over.background_gradient_stop_colors).to_equal([
+            0xFFFF0000u32,
+            0xFF00FF00u32,
+            0xFF0000FFu32
+        ])
+        expect(rad_over.background_gradient_stop_positions).to_equal([0, 600, 1000])
+        expect(rad_over.bg_layers_raw).to_equal(rad_over_decl)
+
+    it "keeps multi-layer gradient lists raw with empty typed stops and preserves stops on later background-color":
+        val multi = apply_full_probe(
+            "background:linear-gradient(#ff0000, #0000ff), linear-gradient(#00ff00, #ffffff)"
+        )
+        expect(multi.background_gradient_from).to_equal(0u32)
+        expect(multi.background_gradient_to).to_equal(0u32)
+        expect(multi.background_gradient_stop_colors).to_equal([])
+        expect(multi.background_gradient_stop_positions).to_equal([])
+        expect(multi.bg_layers_raw).to_contain("linear-gradient")
+
+        val override_bg = apply_full_probe(
+            "background:linear-gradient(90deg, #ff0000, #0000ff);background-color:#223344"
+        )
+        expect(override_bg.bg).to_equal(0xFF223344u32)
+        expect(override_bg.background_gradient_stop_colors).to_equal([0xFFFF0000u32, 0xFF0000FFu32])
+        expect(override_bg.background_gradient_stop_positions).to_equal([0, 1000])
+
+    it "delegates gradient stop extraction cleanly with zero mutable .push() borrows in _apply_decls_without_grid_inner":
+        val src = file_read(
+            "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl"
+        )
+        expect(src).to_contain("fn _decl_gradient_stop_colors(stops: [GradientStopSpec]) -> [u32]:")
+        expect(src).to_contain("fn _decl_gradient_stop_positions(stops: [GradientStopSpec]) -> [i32]:")
+
+        val inner = slice_between(
+            src,
+            "fn _apply_decls_without_grid_inner(",
+            "val CSS_LENGTH_NONE: i64 ="
+        )
+        expect(inner.len() > 0).to_equal(true)
+        expect(count_substr(inner, ".push(")).to_equal(0)
+        expect(count_substr(inner, "_decl_gradient_stop_colors(")).to_equal(3)
+        expect(count_substr(inner, "_decl_gradient_stop_positions(")).to_equal(3)
