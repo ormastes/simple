@@ -41,7 +41,44 @@ struct CensusResult:
     findings: [text]
     error: text
 
-fn census(paths: [text], contents: [text], names: [text]) -> CensusResult:
+fn parse_uint(s: text) -> i64:
+    if s.len() == 0:
+        return -1
+    var n = 0
+    var i = 0
+    while i < s.len():
+        val ch = s[i:i + 1]
+        val d = match ch:
+            "0": 0
+            "1": 1
+            "2": 2
+            "3": 3
+            "4": 4
+            "5": 5
+            "6": 6
+            "7": 7
+            "8": 8
+            "9": 9
+            _: -1
+        if d < 0:
+            return -1
+        n = n * 10 + d
+        i = i + 1
+    n
+
+fn matches_lower_filters(path: text, idx: i64, prefixes: [text], shard_idx: i64, shard_total: i64) -> bool:
+    if prefixes.len() > 0:
+        var matched = false
+        for pfx in prefixes:
+            if path.starts_with(pfx):
+                matched = true
+        if not matched:
+            return false
+    if shard_total > 1:
+        return (idx % shard_total) == shard_idx
+    true
+
+fn census(paths: [text], contents: [text], names: [text], prefixes: [text], shard_idx: i64, shard_total: i64) -> CensusResult:
     val log = Logger(level: 0)
     var modules: Dict<text, ParserModule> = {}
     var sources: [SourceFile] = []
@@ -52,18 +89,19 @@ fn census(paths: [text], contents: [text], names: [text]) -> CensusResult:
         i = i + 1
     val surfaces_result = module_surfaces_from_modules(modules, sources)
     if surfaces_result.is_err():
-        return CensusResult(lowered: 0, findings: [], error: "module surfaces failed")
+        return CensusResult(lowered: 0, findings: [], error: "module surfaces failed: {surfaces_result.unwrap_err()}")
     val surfaces = surfaces_result.unwrap()
     var findings: [text] = []
     var lowered = 0
     i = 0
     while i < paths.len():
-        var lowering = hirlowering_for_module(names[i], surfaces)
-        lowering.lower_module(modules[names[i]])
-        lowered = lowered + 1
-        for e in lowering.errors:
-            if (e.message.contains(FIELD_ERROR_PREFIX) and e.message.contains(FIELD_ERROR_SUFFIX)) or e.message.contains(FIELD_WARN_CODE):
-                findings.push("{paths[i]}:{e.span.line}: {e.message}")
+        if matches_lower_filters(paths[i], i, prefixes, shard_idx, shard_total):
+            var lowering = hirlowering_for_module(names[i], surfaces)
+            lowering.lower_module(modules[names[i]])
+            lowered = lowered + 1
+            for e in lowering.errors:
+                if (e.message.contains(FIELD_ERROR_PREFIX) and e.message.contains(FIELD_ERROR_SUFFIX)) or e.message.contains(FIELD_WARN_CODE):
+                    findings.push("{paths[i]}:{e.span.line}: {e.message}")
         i = i + 1
     CensusResult(lowered: lowered, findings: findings, error: "")
 
@@ -74,12 +112,15 @@ fn selftest() -> bool:
     val head = 'use app.cfa.{CfPoint}' + "\n"
     val bad = head + "fn read(p: CfPoint) -> i64:\n    p.nope\n"
     val good = head + "fn read(p: CfPoint) -> i64:\n    p.x\n"
-    val r = census(["app/cfa.spl", "app/cfb.spl"], [a, bad], ["app.cfa", "app.cfb"])
-    val n = census(["app/cfa.spl", "app/cfb.spl"], [a, good], ["app.cfa", "app.cfb"])
-    r.error == "" and r.lowered == 2 and r.findings.len() >= 1 and n.error == "" and n.findings.len() == 0
+    val r = census(["app/cfa.spl", "app/cfb.spl"], [a, bad], ["app.cfa", "app.cfb"], [], 0, 1)
+    val n = census(["app/cfa.spl", "app/cfb.spl"], [a, good], ["app.cfa", "app.cfb"], [], 0, 1)
+    val p = census(["app/cfa.spl", "app/cfb.spl"], [a, bad], ["app.cfa", "app.cfb"], ["app/cfb.spl"], 0, 1)
+    val s1 = census(["app/cfa.spl", "app/cfb.spl"], [a, bad], ["app.cfa", "app.cfb"], [], 1, 2)
+    r.error == "" and r.lowered == 2 and r.findings.len() >= 1 and n.error == "" and n.findings.len() == 0 and p.error == "" and p.lowered == 1 and p.findings.len() >= 1 and s1.error == "" and s1.lowered == 1 and s1.findings.len() >= 1
 
 fn should_scan(path: text) -> bool:
-    path.ends_with(".spl") and not path.contains("/vendor/") and not path.contains("/generated/")
+    val norm = path.replace("\\", "/")
+    norm.ends_with(".spl") and not norm.contains("/vendor/") and not norm.contains("/generated/") and not norm.contains("/testdata/")
 
 fn main() -> i64:
     if not selftest():
@@ -87,12 +128,30 @@ fn main() -> i64:
         exit(2)
     val args = get_args()
     var roots: [text] = []
+    var prefixes: [text] = []
+    var shard_idx: i64 = 0
+    var shard_total: i64 = 1
     var selftest_only = false
     var ai = 1
     while ai < args.len():
         val a = args[ai]
         if a == "--selftest":
             selftest_only = true
+        elif a == "--lower-prefix" and ai + 1 < args.len():
+            prefixes.push(args[ai + 1].replace("\\", "/"))
+            ai = ai + 1
+        elif a == "--shard" and ai + 1 < args.len():
+            val spec = args[ai + 1]
+            val parts = spec.split("/")
+            if parts.len() != 2:
+                print("ERROR -- invalid --shard spec: {spec}")
+                exit(2)
+            shard_idx = parse_uint(parts[0])
+            shard_total = parse_uint(parts[1])
+            if shard_total < 1 or shard_idx < 0 or shard_idx >= shard_total:
+                print("ERROR -- invalid --shard range: {spec}")
+                exit(2)
+            ai = ai + 1
         elif not a.ends_with(".spl"):
             roots.push(a)
         ai = ai + 1
@@ -104,17 +163,22 @@ fn main() -> i64:
     var paths: [text] = []
     var contents: [text] = []
     var names: [text] = []
+    var seen_names: Dict<text, bool> = {}
     for root in roots:
         if dir_exists(root):
             for p in dir_walk(root):
                 if should_scan(p):
-                    paths.push(p)
-                    contents.push(file_read(p))
-                    names.push(_driver_module_name_from_path(p))
+                    val norm = p.replace("\\", "/")
+                    val mod_name = _driver_module_name_from_path(norm)
+                    if not seen_names.contains_key(mod_name):
+                        seen_names[mod_name] = true
+                        paths.push(norm)
+                        contents.push(file_read(p))
+                        names.push(mod_name)
     if paths.len() == 0:
         print("ERROR -- nothing was lowered")
         exit(2)
-    val r = census(paths, contents, names)
+    val r = census(paths, contents, names, prefixes, shard_idx, shard_total)
     if r.error != "" or r.lowered == 0:
         print("ERROR -- nothing was lowered ({r.error})")
         exit(2)
