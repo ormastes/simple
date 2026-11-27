@@ -1,0 +1,48 @@
+"""`simple run` import resolution must not pay one `stat` per candidate path.
+
+The seed resolver probes a large candidate set per import (search roots x
+stdlib variant roots x numbered/`__init__`/`mod` forms); nearly all of them do
+not exist. On Windows a failed `metadata` costs ~90 us, so a 79-module closure
+(`scripts/tool/riscv64-unknown-elf-tool-wrapper.spl`) spent 504 ms of a 1.55 s
+run in 5,396 failed stats (measured 2026-11-28, in-process, seed built from
+release/1.0.0). `fs_probe::path_kind` now answers Windows misses from the
+parent's cached directory listing; off Windows every miss is still a `stat`.
+
+Deterministic guard (counts, not wall time -- the shared host is too noisy for
+a wall budget): `SIMPLE_PROFILE=1` prints
+`[resolve-stats] ... stat_misses=N stat_syscalls=M probe_dir_listings=L`.
+Fails closed when the line is missing or the closure is implausibly small.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, host_os}
+
+val FIXTURE: text = "test/05_perf/startup/run_import_probe_fixture.spl"
+
+fn field(report: text, key: text) -> i64:
+    for line in report.split("\n"):
+        if line.starts_with("[resolve-stats]"):
+            for tok in line.split(" "):
+                if tok.starts_with(key + "="):
+                    return tok.substring(key.len() + 1, tok.len()).trim().to_i64()
+    -1
+
+describe "run import resolution filesystem probes":
+    it "answers most candidate misses without a stat syscall on Windows":
+        val r = process_run("sh", ["-c", "SIMPLE_PROFILE=1 \"${SIMPLE_BIN:-bin/simple}\" run " + FIXTURE + " 2>&1"])
+        val out = r.0
+        expect(out.contains("probe-ok")).to_equal(true)
+        val misses = field(out, "stat_misses")
+        val syscalls = field(out, "stat_syscalls")
+        val listings = field(out, "probe_dir_listings")
+        print "[perf] run import probes: misses={misses} syscalls={syscalls} listings={listings}"
+        # Non-vacuity: the stats line exists and the closure really was probed.
+        expect(misses > 500).to_equal(true)
+        expect(syscalls >= 0).to_equal(true)
+        if host_os() == "windows":
+            # Measured after the fix: a small fraction of misses reach metadata.
+            expect(syscalls * 4 < misses).to_equal(true)
+            expect(listings > 0).to_equal(true)
+        else:
+            expect(syscalls).to_equal(misses)
+            expect(listings).to_equal(0)

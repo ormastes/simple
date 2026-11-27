@@ -1,0 +1,38 @@
+# Device-free fixture for
+# test/02_integration/compiler/backend/interp_cstr_termination_abi_spec.spl
+#
+# Regression fixture for
+# doc/08_tracking/bug/rt_interp_cstr_built_name_unterminated_runtime_path_2026-11-26.md
+# The Rust `rt_interp_cstr` returned `rt_string_data` verbatim: RuntimeString
+# storage is exactly `len` bytes with no trailing NUL, so any C-string
+# consumer (rt_cuda_module_get_function, dlopen/dlsym twins, collection
+# capture) read heap slack past the end of a run-time-built name whenever the
+# Rust definition wins the link. The C runtime twin returns a terminated
+# buffer; the Rust one must too.
+#
+# The fixture declares the same `rt_interp_cstr(v: text) -> i64` extern the
+# native codegen emits for an unlisted text argument (the single tagged word),
+# reads the returned pointer with the C `strlen` consumer, and reports both
+# lengths. Output is byte-exact; the spec asserts it in full:
+#   strlen(rt_interp_cstr(name)) == name.byte_len()
+# on the built-at-run-time name (the bug doc's shape) and on an interned
+# literal name. An unpatched Rust owner over-reads (strlen > len); the C
+# owner and the patched Rust owner both terminate (strlen == len).
+
+extern fn rt_interp_cstr(v: text) -> i64
+extern fn strlen(s: i64) -> i64
+
+fn report(label: text, name: text):
+    # `name` crosses a text parameter boundary, so it is a live heap string
+    # here rather than a constant-pool literal at the call site.
+    print(label + " len=" + name.byte_len().to_text() + " strlen=" + strlen(rt_interp_cstr(name)).to_text())
+
+fn main():
+    # (a) a name built at run time (rt_string_concat of two pieces)
+    val built = "interp_cstr_" + "built_name_probe"
+    report("built", built)
+
+    # (b) an interned literal name
+    report("literal", "interp_cstr_literal_probe")
+
+    print("INTERP-CSTR OK")

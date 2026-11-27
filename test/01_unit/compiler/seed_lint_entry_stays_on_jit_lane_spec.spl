@@ -1,0 +1,153 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: pin that the self-hosted `simple lint` command's whole-program closure
+compiles and runs on the seed Cranelift JIT lane — no whole-module de-JIT — on
+the current compiler/stdlib surface, using the same target as the pinned shell
+gate `scripts/check/check-lint-runs-on-jit.shs`
+(`src/compiler/80.driver/driver_types.spl`). The oracle is the non-forgeable
+`[engine-receipt]` line: the `lint` child forced onto the JIT lane must receipt
+`engine=cranelift-jit demoted=no`, exit 0, and print a zero-error lint
+verdict.
+Audience: compiler engineers maintaining the seed JIT lane and the lint CLI
+import surface.
+
+Bug: doc/08_tracking/bug/seed_jit_coverage_self_hosted_compiler_2026-08-21.md —
+the pinned acceptance gate was RED on the refreshed seed with
+`unresolved external symbol 'check_short_grammar_refactor' (cross-module Simple
+function; per-module JIT does not link imported Simple functions)`. The lint
+CLI callers imported the wrapper through the package re-export chain
+(`use lazy compiler.tools.fix.rules.{check_short_grammar_refactor}`), whose
+body never reached the JIT unit, so the whole program silently dropped to the
+interpreter. Fix: the callers import the owning module file directly
+(`use lazy compiler.tools.fix.rules.impl_.lint_short_grammar.{check_short_grammar_refactor}`,
+src/app/io/cli_lint_commands.spl, src/app/io/_CliCommands/run_commands.spl),
+which the JIT lane flattens into the closure. The gate's verdict grep also had
+to accept the honest-receipt summary form (`Lint completed with 0 error(s)`),
+replacing the pre-rework unconditional `Lint passed` trailer.
+
+## Operator workflow (re-verification recipe)
+
+The test runner refuses a SIMPLE_BINARY that differs from the binary running
+the spec, so each run below uses the binary under test as both runner and
+child. Isolation knobs used throughout:
+`SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/jitcov/hir-cache` and
+`TMPDIR=$PWD/build/p3cache/jitcov/tmp`.
+
+1. RED: restore the pre-fix import path in both lint CLI callers
+   (`use lazy compiler.tools.fix.rules.{check_short_grammar_refactor}` in
+   src/app/io/cli_lint_commands.spl and
+   src/app/io/_CliCommands/run_commands.spl) and run:
+     SIMPLE_LIB=src SIMPLE_BINARY=$PWD/build/p3cache/fresh-seed/simple.exe \
+       build/p3cache/fresh-seed/simple.exe test \
+       test/01_unit/compiler/seed_lint_entry_stays_on_jit_lane_spec.spl
+   The example FAILS: the receipt records
+   `engine=interpreter demoted=yes reason=jit-compile-error` with the
+   unresolved 'check_short_grammar_refactor' import.
+2. GREEN: current tree (module-file import path), same command. The example
+   passes. Pre-fix evidence: build/p3cache/jitcov/logs/gate-fresh-seed.log and
+   build/p3cache/jitcov/logs/direct-lint-flipped.log; post-fix gate:
+   build/p3cache/jitcov/logs/gate-final.log (`PASS — JIT lane taken, 0 de-JIT`,
+   ~36 s vs ~3 m 18 s on the interpreter lane for the same lint).
+3. Cross-check with the pinned shell gate over the same binary:
+     SIMPLE_LIB=src SIMPLE_BIN=$PWD/build/p3cache/fresh-seed/simple.exe \
+       sh scripts/check/check-lint-runs-on-jit.shs
+
+## Compatibility and limitations
+
+Each example shells out to the seed binary (`SIMPLE_BIN` / `SIMPLE_BINARY` /
+`SIMPLE_RUNTIME` / `SIMPLE_TEST_BINARY`, default `bin/simple`) via
+`std.io_runtime.process_run`, forcing `SIMPLE_EXECUTION_MODE=jit` and setting
+`SIMPLE_ENGINE_RECEIPT=1` for the child through a shell env prefix on
+`sh -c`: the test runner's child-env scrub
+(`SIMPLE_TEST_CHILD_ENV_SCRUB=1`, test_runner_mode_env_leak_2026_11_12) strips
+mode pins from every direct `process_run` spawn, and its documented escape
+hatch is exactly such a prefix. Forcing the lane is required: the default lane
+deliberately keeps lint on the interpreter (`reason=lint-jit-parity-unproven`,
+the gate-1 divert measured in
+build/p3cache/jitcov/logs/census-default.log), so an unforced child would
+receipt the interpreter by design, not by defect.
+
+The lint target is the shell gate's pinned target
+(src/compiler/80.driver/driver_types.spl), not a synthetic probe: the closure
+under test is the lint command itself, and a clean zero-finding target
+currently trips a separate, fail-closed seed-JIT defect in the lint clean-path
+(`error: called unwrap on None`, rc 127 — reproduced on the fixed tree with
+`SIMPLE_EXECUTION_MODE=jit <seed> lint` on any warning-free file; masked
+pre-fix because every forced-JIT lint de-JITted before reaching it). That
+defect is the row's next recorded blocker and is deliberately NOT asserted
+here. Each child run JIT-compiles the whole lint closure and takes ~35 s wall;
+this spec is a lane contract, not a hot-path test.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run, env_get}
+
+fn simple_binary() -> text:
+    var configured = env_get("SIMPLE_BIN") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_RUNTIME") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_TEST_BINARY") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+# Same target as scripts/check/check-lint-runs-on-jit.shs: the closure under
+# test is the lint command itself, so the target must lint warning-bearing on
+# the JIT lane (a clean target hits the separate recorded unwrap blocker).
+fn lint_target() -> text:
+    "src/compiler/80.driver/driver_types.spl"
+
+# The spec runs under the test runner's child-env scrub
+# (SIMPLE_TEST_CHILD_ENV_SCRUB=1, test_runner_mode_env_leak_2026_11_12): the
+# process facades strip SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE around every
+# spawn, so an env_set cannot force the child's lane. The scrub's documented
+# escape hatch is a shell env prefix ("a shell set/env prefix lands after the
+# scrub and wins"), so the child goes through `sh -c` with the pins prefixed.
+# SIMPLE_ENGINE_RECEIPT travels in the same prefix.
+fn run_lint_child(target: text) -> (text, text, i64):
+    val script = "SIMPLE_EXECUTION_MODE=jit SIMPLE_ENGINE_RECEIPT=1 \"{simple_binary()}\" lint \"{target}\""
+    process_run("sh", ["-c", script])
+
+fn receipt_line(combined: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if line.contains("[engine-receipt]"):
+            return line
+    ""
+
+fn receipt_field(line: text, key: text) -> text:
+    val marker = key + "="
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val rest = line.substring(start + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+describe "self-hosted lint command stays on the seed JIT lane":
+    # @manual scenario evidence
+
+    it "lint of the pinned gate target receipts cranelift-jit with no demotion":
+        # @req: REQ-SSPEC-UNIT
+        step("Lint the pinned gate target with the child forced onto the JIT lane")
+        val (stdout, stderr, code) = run_lint_child(lint_target())
+        expect(code).to_equal(0)
+        val line = receipt_line(stdout + stderr)
+        step("The engine receipt names the compiled JIT engine, not the interpreter")
+        expect(line == "").to_equal(false)
+        expect(receipt_field(line, "engine")).to_equal("cranelift-jit")
+        expect(receipt_field(line, "demoted")).to_equal("no")
+        step("Lint completed with a zero-error verdict")
+        val passed = stdout.contains("Lint passed") or stdout.contains("Lint completed with 0 error")
+        expect(passed).to_equal(true)

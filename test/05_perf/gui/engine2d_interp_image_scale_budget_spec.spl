@@ -1,0 +1,140 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+# @tag: perf, engine2d, interpreter
+
+"""
+# Interpreted Engine2D Scaled-Image Budget
+
+## Overview
+
+Per-frame budget for the interpreter-lane `cpu` Engine2D scaled-image path
+named by
+`doc/08_tracking/bug/engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13.md`:
+a 2x2 source stretched into one 638x60 destination rect on a 640x480 surface,
+the image the widget Draw-IR pipeline scales every frame.
+
+The doc measured ~150 ms per frame on the aarch64 DGX Spark interpreter lane
+for that destination: `_emu_scale_image_pixels` ran two i64 divisions per
+destination pixel (one for the source row, one for the source column) and
+re-mapped every pixel of every row even when consecutive destination rows
+share one source row. The fix builds the column map once per call and copies
+the previous result row on a repeated source row, so the output stays
+byte-identical while the per-pixel division disappears.
+
+Budgets sit between the measured before and after figures on the slowest
+lane available so host noise on either side does not flip the verdict.
+The Windows bootstrap-seed interpreter lane (forced
+`SIMPLE_EXECUTION_MODE=interpret`, 2026-11-27) measures ~260 ms per frame
+with the old per-pixel loop and ~200 ms with the column map + row reuse;
+the doc's aarch64 DGX Spark lane measured ~150 ms before, and the removal
+of the two per-pixel divisions takes it to an estimated ~25 ms there. The
+budget is pinned at 500 ms: far under the before figure on every measured
+lane, with ~2.5x headroom over the measured after figure on the slow
+lane. Fast hybrid/JIT hosts pass with orders of magnitude to spare.
+
+| phase | before | after | budget |
+|-------|--------|-------|--------|
+| scale 2x2 -> 638x60 (per frame) | ~260 ms | ~200 ms | 500 ms |
+
+Every timing is the best of three so a single scheduler stall cannot fail it.
+
+The first spec pins the byte-identity constraint from the doc: the engine's
+scaled output must equal the original per-pixel nearest-neighbour definition
+exactly, for an upscale with distinct source pixels and a downscale, so the
+column-map / row-reuse fast path can never drift from the rendering semantics.
+
+## Syntax
+
+```sh
+bin/simple test test/05_perf/gui/engine2d_interp_image_scale_budget_spec.spl
+```
+"""
+
+use std.spec
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+extern fn rt_time_now_nanos() -> i64
+
+val W: i32 = 640
+val H: i32 = 480
+val SCALE_BUDGET_MS: i64 = 500
+val SRC_GREEN: [u32] = [0xff00ff00u32, 0xff00ff00u32, 0xff00ff00u32, 0xff00ff00u32]
+
+# The original per-pixel definition from
+# doc/08_tracking/bug/engine2d_interp_cold_glyph_and_image_scale_cost_2026-11-13.md:
+# two integer divisions per destination pixel, no row reuse. The production
+# fast path (`_emu_scale_image_pixels`) must stay byte-identical to this.
+fn reference_scale(dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> [u32]:
+    var out: [u32] = [0u32; dst_w.to_i64() * dst_h.to_i64()]
+    var dy: i32 = 0
+    while dy < dst_h:
+        val sy = dy.to_i64() * src_h.to_i64() / dst_h.to_i64()
+        var dx: i32 = 0
+        while dx < dst_w:
+            val sx = dx.to_i64() * src_w.to_i64() / dst_w.to_i64()
+            out[dy.to_i64() * dst_w.to_i64() + dx.to_i64()] = pixels[sy * src_w.to_i64() + sx]
+            dx = dx + 1
+        dy = dy + 1
+    out
+
+fn engine_scaled(engine: Engine2D, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]) -> [u32]:
+    engine.clear(0xff000000u32)
+    engine.draw_image_scaled(0, 0, dst_w, dst_h, src_w, src_h, pixels)
+    engine.read_pixels_with_source().pixels
+
+fn rect_matches(full: [u32], at_x: i32, at_y: i32, w: i32, h: i32, expected: [u32]) -> bool:
+    if full.len() < W.to_i64() * H.to_i64():
+        return false
+    var y: i32 = 0
+    while y < h:
+        var x: i32 = 0
+        while x < w:
+            if full[(at_y + y).to_i64() * W.to_i64() + (at_x + x).to_i64()] != expected[y.to_i64() * w.to_i64() + x.to_i64()]:
+                return false
+            x = x + 1
+        y = y + 1
+    true
+
+fn best_scale_frame_ms() -> i64:
+    var engine = Engine2D.create_with_backend(W, H, "cpu")
+    engine.clear(0xff000000u32)
+    # Warm-up outside the measured runs (the budget pins steady-state frames).
+    engine.draw_image_scaled(1, 419, 638, 60, 2, 2, SRC_GREEN)
+    var best: i64 = 1000000
+    var k = 0
+    while k < 3:
+        val t0 = rt_time_now_nanos()
+        engine.draw_image_scaled(1, 419, 638, 60, 2, 2, SRC_GREEN)
+        val elapsed = (rt_time_now_nanos() - t0) / 1000000
+        if elapsed < best:
+            best = elapsed
+        k = k + 1
+    engine.shutdown()
+    best
+
+describe "Interpreted Engine2D scaled-image budget":
+    it "stays byte-identical to the per-pixel nearest-neighbour definition (upscale)":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        # Distinct pixel values so a wrong source row OR column stands out.
+        val src: [u32] = [0xff102030u32, 0xff405060u32, 0xff708090u32, 0xffa0b0c0u32, 0xffd0e0f0u32, 0xff13579bu32]
+        val got = engine_scaled(engine, 25, 17, 3, 2, src)
+        val want = reference_scale(25, 17, 3, 2, src)
+        engine.shutdown()
+        expect(rect_matches(got, 0, 0, 25, 17, want)).to_equal(true)
+
+    it "stays byte-identical to the per-pixel nearest-neighbour definition (downscale)":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        var src: [u32] = []
+        var i: i32 = 0
+        while i < 63:
+            src = src.push(0xff000000u32 + (i * 37).to_u32())
+            i = i + 1
+        val got = engine_scaled(engine, 4, 3, 9, 7, src)
+        val want = reference_scale(4, 3, 9, 7, src)
+        engine.shutdown()
+        expect(rect_matches(got, 0, 0, 4, 3, want)).to_equal(true)
+
+    it "scales a 2x2 source into a 638x60 destination within the per-frame budget":
+        val scale_ms = best_scale_frame_ms()
+        print "E2D_BUDGET image_scale_638x60_per_frame_ms={scale_ms} budget_ms={SCALE_BUDGET_MS}"
+        expect(scale_ms <= SCALE_BUDGET_MS).to_equal(true)

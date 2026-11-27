@@ -31,6 +31,8 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 - Shared-memory measurement: per-container commit with vs without a shared base. File-backed read-only pages share the page cache and are not commit-charged.
 - The capability report claims only measured fields; `filesystem_confinement` stays `false`.
 - Acceptance: a spec plus a transcript showing create/stop/remove leaves no residue, hardlink share verified (same file id), commit-charge numbers for both cases, capability report diffed against measurements.
+- **A1 delivered (2026-11-28, branch `work/container-inc4-jobobject-20261128`):** the plan's `SimpleContainerOwnerV2.PureSimple` is the existing `SimpleContainerOwnerV2.Pure` (P4) owner; no second enum case was added. `PureContainerOwnerPolicyV1.hold_running` (default off, one-shot behaviour unchanged) makes `create` prepare the container's storage view, `start` launch the child in the Lane E job (memory cap from `limits.memory`) and return while it runs, `stop` cancel and collect the job (tree proven empty, handle closed), and `destroy` stop a still-running job first, then remove view and scratch. `pure_runtime_v1` is split at the lease (`_begin_v1` / `_stop_v1` / `_finish_v1`; `_execute_v1` = begin + wait + finish). `windows_process_memory_limit_v1` reads the limit back from the live job. Spec: `test/03_system/app/container/feature/pure_job_container_v1_spec.spl` (3/3). `filesystem_confinement` stays `false` (asserted). A2 seam: `store`, `view_root`, `base_root`, `quota` in the policy flow untouched into `_prepare_v1` (view create / `rootfs_materialize_v1`); hardlink/clone base and commit measurement plug in there.
+  A1 limits (documented, not fixed): (a) a crash between `_begin_v1` and `_finish_v1` strands the job's view and scratch; a retry hits attempt-exists and `recover` is unsupported, so the attempt dirs must be removed by hand. (b) The wall limit is enforced only inside the owner's poll, so a held job is killed at its deadline when inspect/wait/stop next polls, not asynchronously. (c) `close` refuses (`container-api-pure-container-resources-held`) while any record owns a job, view or scratch; stop then destroy first. (d) An exited child is observed by inspect/wait (RUNNING to EXITED); the view stays until destroy.
 
 ### 2. Windows Docker process-isolation lane (Windows host, admin)
 - Native Windows Docker Engine (no WSL, no Docker Desktop), installed by the elevated script `C:/dev/keep/container-inc2/install-windows-docker.ps1` (needs admin and the Containers feature; may need a reboot).
@@ -44,8 +46,10 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 - Acceptance: engine transcript showing the bound view is writable, saved on stop and destroyed on remove.
 
 ### 4. Windows AppContainer filesystem confinement (Windows host)
-- New FFI surface; needs a C boundary with a Simple twin per `doc/07_guide/os/hal/pure_simple_hal.md` (dual-run gate `scripts/check/check-dual-run-shadow.shs`).
-- Acceptance: a confined process cannot open a path outside its view (negative test), then `filesystem_confinement` may flip to `true`.
+- Built on the existing pure-Simple SOSIX variant `sosix_app_sandbox_run_v1`; no new FFI and no new `rt_*` (an earlier C/Rust runtime attempt was dropped).
+- **Evidence only, flag NOT flipped (2026-11-28).** `src/lib/nogc_sync_mut/sosix/windows/app_container_confinement_probe_v1.spl` runs both sandbox runs itself from (view dir, inside path, outside path): host read of the outside file before and after, inside child read exits 0, outside child read exits 5 ("not readable": missing, empty or any read error; NOT proof of ERROR_ACCESS_DENIED, the host reads rule out a missing file), paths must be disjoint, both runs clean. Spec `test/01_unit/lib/nogc_sync_mut/sosix/app_container_confinement_probe_v1_spec.spl` 5/5 on Windows (confined, missing outside file, mispaired paths refused, AAP-readable system file reported as readable, no ACE or profile left); off Windows it prints SKIP.
+- The probe sets no capability flag: the Windows engine launch path is job + restricted token with `read_confinement: no` (`sosix/windows/containment_launch_v1.spl`), so `filesystem_confinement` must not be asserted from an AppContainer run it does not use.
+- **A real flip needs:** (1) the engine launch goes through the app sandbox; (2) `PureContainerEvidenceV1` gains a read-confinement-observed field fed by this verdict (like `memory_cap_enforced`); (3) the single builder `src/lib/common/contracts/container/pure_backend_v1.spl:70` ANDs it with the support flags.
 
 ### 5. Other hosts (blocked from this Windows host)
 - Linux namespaces/cgroups + Podman, macOS Seatbelt, FreeBSD jail: run on those hosts or the repo QEMU lanes (untried from here).
@@ -61,9 +65,9 @@ Tracked in `doc/08_tracking/todo/todo_db.sdn` (rows 468-480).
 Carried by reference, not duplicated: see the "Open (P2, next increment)" list in `doc/03_plan/platform/container/simple_container_improvement.md`.
 
 ### 8. Open at session close (2026-11-27)
-Landed this run on `release/1.0.0`: #12115-#12143 (store hardening, view conflicts, GC quarantine restore, `rt_dir_sync`, root claim compaction, SCV gc per-run owner). Still open, each tracked in `doc/08_tracking/todo/todo_db.sdn`:
-- Keep-marked pin tombs (`pin-owner-changed-unrestored`) and `pins/<id>.r<n>` restored pins are not surfaced to their owner or reclaimed (todo 476).
-- SCV gc keeps unmarked `scv-gc:` pins forever; ageing them out needs a liveness signal, not a timeout (todo 477).
+Landed this run on `release/1.0.0`: #12115-#12143 (store hardening, view conflicts, GC quarantine restore, `rt_dir_sync`, root claim compaction, SCV gc per-run owner). Items below marked DONE are closed; the rest are tracked in `doc/08_tracking/todo/todo_db.sdn`:
+- DONE (2026-11-28, todo 476 closed, 951bdc66a8e): keep-marked pin tombs and `pins/<id>.r<n>` restored pins are listed and reclaimed by their owner.
+- DONE (2026-11-28, todo 477 closed, 6c590d005e9 + 64a2eb08ce6): unmarked `scv-gc:` pins of dead runs are reclaimed via a per-run liveness record, not pin age.
 - DONE (2026-11-28, todo 478 closed): Windows native-build smoke of `dir_sync` links and prints `true` then `false` (root cause: `type Codegen` alias, see `doc/08_tracking/bug/seed_jit_type_alias_captures_same_named_trait_dispatch_2026-11-28.md`).
-- Storage view junction TOCTOU between parent walk and open; needs handle-relative opens (todo 479).
-- 18 undefined-but-used strict-use imports block flipping `SIMPLE_STRICT_USE` on by default; see `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` (todo 480).
+- DONE (2026-11-28, todo 479 closed, af7af5e8918): storage view read/write use handle-relative under-root I/O that refuses links at open time.
+- 7 undefined-but-used strict-use imports block flipping `SIMPLE_STRICT_USE` on by default; see `doc/08_tracking/bug/strict_use_default_blocked_by_unprovided_imports_2026-11-27.md` (todo 480).
