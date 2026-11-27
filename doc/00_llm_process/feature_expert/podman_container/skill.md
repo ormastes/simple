@@ -261,7 +261,55 @@ Traps hit while doing it:
   latched). The transfer `close_v2` attempts the same settle, so cleanup can
   settle after a refused `destroy`. Measured on this host (own uid): conmon,
   `podman container cleanup` and runc last seen 143 to 169 ms after `start`
-  returned for `/bin/true`; the rootless pause process (`catatonit`) never
-  leaves, and such a process keeps the census refusing by design.
+  returned for `/bin/true`. The developer's own rootless pause process
+  (`catatonit`, in its `podman-pause-*.scope`) never leaves; the route's does,
+  see the next item.
+- The rootless pause process does not block the exited-start census, and nothing
+  is excluded for it. `catatonit -P` runs as the service uid (not a subuid), pid
+  in `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid`. Without a user bus podman cannot
+  move it into a `podman-pause-*.scope`, so it stays in the cgroup of the helper
+  that created it, and that group is killed (`cgroup.kill`) when the helper
+  leader is reaped. Each later helper makes a new one. Pinned by
+  `machine_fresh_engine_residue_containment_v3_spec.spl`; if helper containment
+  changes, revisit the census decision first.
+- The same kill removes `conmon`: rootless cgroupfs podman cannot move conmon to
+  `<cgroup-parent>/conmon` (`open /sys/fs/cgroup/cgroup.subtree_control:
+  permission denied`, logged at info level only). A workload still running when
+  its start helper is reaped then breaks every later engine command with
+  `invalid internal status, try resetting the pause process`. Decided, **not
+  built**: at the Start leader's reap, freeze the helper group and move its
+  members into an owner-held `<delegatedCgroup>/simple-engine-<identity>`; kill
+  that group only after the owner's Stop, Remove and Absence, at all three
+  settle sites. Measurements, the rejected options and the build order:
+  `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
+- Measured there (podman 4.9.3): `--cgroups=split` is refused with a cgroup
+  parent; `no-conmon` and the systemd manager leave conmon in the helper group;
+  conmon and the pause process keep `/dev/null` on fd 1 and 2, so a surviving
+  conmon does not hold the helper's pipes. Killing conmon while the store says
+  `running` poisons the store for every later command, `rm -f` and `create`
+  included. A pause process made by the start helper stays with conmon and never
+  leaves by itself.
+- Engine helpers get `HOME=<run root>`
+  (`linux_fresh_epoch_helper_environment_v1`), not an empty environment. With no
+  `HOME` podman lstats the account home, and custody requires that to be the
+  absent `/nonexistent`. `HOME=/nonexistent` is the broker's inherited-environment
+  rule, a different thing. The guest unit's account home and `SIMPLE_*`
+  environment do not meet custody's rules yet:
+  `container_fresh_route_helper_home_2026-11-27.md`.
+- Emulating helper containment with real podman: a `systemd-run --user --scope
+  -p Delegate=yes` shell, move the shell into a child group first, enable
+  `+cpu +memory +pids` on the scope and on the engine's parent, one group per
+  command, `cgroup.kill` after it returns. Use a separate store per scenario: one
+  poisoned store fails everything after it.
+- To emulate the route's engine on a developer host: private `--root`,
+  `--runroot` (50 characters at most) and `--tmpdir`, `XDG_RUNTIME_DIR` set to
+  the run root, and an unusable `DBUS_SESSION_BUS_ADDRESS`. `env -i` alone is
+  not "no user bus": podman finds `/run/user/<uid>/bus` by uid. `HOME` must
+  exist; `/nonexistent` makes podman exit 1 (`cannot resolve /nonexistent`).
+- `simple_container_fresh_cleanup_v2` reports a refusal (a stage that kept its
+  owner) for that attempt only; it keeps, first one wins, only the error of a
+  stage that gave up its owner, and the open's own error. Decided per stage by
+  the pure `container_fresh_cleanup_stage_v2`. A closed cleanup with a non-empty
+  error is therefore a real failure.
 - `host_agent_workspace_extraction_v2_spec.spl` pins two lines of the transfer
   `close_v2` and exactly one `close_native_v2()` in it; add lines around them.

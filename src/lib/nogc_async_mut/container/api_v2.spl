@@ -21,6 +21,7 @@ use std.nogc_sync_mut.io.time_ops.time_sample_monotonic_nanos_or_failure
 use std.common.contracts.container.execution_evidence_v2.*
 use std.common.contracts.container.effect_deadline_v1.ContainerEffectDeadlineV1
 use std.common.contracts.container.control_deadline_v1.ContainerControlDeadlineV1
+use std.common.contracts.container.fresh_cleanup_stage_v2.container_fresh_cleanup_stage_v2
 use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeOperationV1, RuntimeIntentV1, runtime_operation_empty}
 use std.common.contracts.container.backend_identity_v1.*
 use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
@@ -199,23 +200,28 @@ pub fn simple_container_close_v2(owner: SimpleContainerOwnerV2) -> SimpleContain
             val unproven = adapter.unproven_cleanup_reason()
             if unproven != "": SimpleContainerCloseV2(Some(owner), false, "container-api-" + unproven) else: SimpleContainerCloseV2(nil, true, "")
 
+# Error reporting is decided per stage by container_fresh_cleanup_stage_v2: a refusal (owner kept) is
+# reported by that attempt only; a failure of a stage that gave up its owner is kept and still returned.
 pub fn simple_container_fresh_cleanup_v2(original: SimpleContainerFreshOpenV2) -> SimpleContainerFreshCleanupV2:
     var retained = original
     if val owner = retained.owner:
         val closed = simple_container_close_v2(owner)
         retained.owner = closed.owner
-        if retained.error == "" and closed.error != "": retained.error = closed.error
-        if not closed.closed or closed.owner.is_some(): return SimpleContainerFreshCleanupV2(Some(retained), false, retained.error)
+        val stage = container_fresh_cleanup_stage_v2(retained.error, closed.closed, closed.owner.is_some(), closed.error)
+        retained.error = stage.kept
+        if not stage.released: return SimpleContainerFreshCleanupV2(Some(retained), false, stage.reported)
     if val fresh = retained.fresh_cleanup:
         val closed = fresh.close_v2()
         retained.fresh_cleanup = closed.owner
-        if retained.error == "" and closed.error != "": retained.error = closed.error
-        if not closed.closed or closed.owner.is_some(): return SimpleContainerFreshCleanupV2(Some(retained), false, retained.error)
+        val stage = container_fresh_cleanup_stage_v2(retained.error, closed.closed, closed.owner.is_some(), closed.error)
+        retained.error = stage.kept
+        if not stage.released: return SimpleContainerFreshCleanupV2(Some(retained), false, stage.reported)
     if val admission = retained.admission_cleanup:
         val closed = machine_fresh_epoch_admission_turn_close_v1(admission)
         retained.admission_cleanup = closed.retained
-        if retained.error == "" and closed.error != "": retained.error = closed.error
-        if not closed.closed or closed.retained.is_some(): return SimpleContainerFreshCleanupV2(Some(retained), false, retained.error)
+        val stage = container_fresh_cleanup_stage_v2(retained.error, closed.closed, closed.retained.is_some(), closed.error)
+        retained.error = stage.kept
+        if not stage.released: return SimpleContainerFreshCleanupV2(Some(retained), false, stage.reported)
     SimpleContainerFreshCleanupV2(nil, true, retained.error)
 
 pub struct ContainerOperationTurnV2:

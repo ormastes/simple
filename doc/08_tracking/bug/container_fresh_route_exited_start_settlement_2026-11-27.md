@@ -4,6 +4,8 @@
   has no installed machine policy. The two edge cases left open by that fix (the census refusing on
   lingering engine helpers, and an exit during association) were decided and fixed in source the same
   day; see the last two sections. What is still open is listed at the end.
+  Two follow-ups were decided later the same day: the rootless pause process (Edge 3, no source
+  change, pinned) and the cleanup error text (Edge 4, fixed in source).
 - **Component:** Simple Container shared API, Linux Podman fresh install route
   (`src/lib/nogc_sync_mut/container/machine_fresh_workload_effects_v3.spl`,
   `machine_fresh_workload_settlement_v2.spl`,
@@ -169,6 +171,7 @@ does not cover.
 **Limit.** A process that never leaves keeps blocking, correctly. If the service-uid route keeps a
 rootless pause process the way this host does, every exited-start settle ends in the retryable
 state and never settles; the bounded repeat cannot fix that. Not known until a live run.
+Answered from source and a host measurement in Edge 3: the service-uid route does not keep one.
 
 ## Edge 2 (decided and fixed in source 2026-11-27): the workload exits during association
 
@@ -217,16 +220,136 @@ reducer (three accepted forms, every named refusal), the held-subject mapping an
 callers. The lifecycle, effects and transfer changes need installed custody; they were loaded by the
 seed but not executed.
 
+## Edge 3 (decided 2026-11-27): the rootless pause process
+
+**Host facts** (podman 4.9.3 rootless, developer uid 1000, subuid 100000:65536, cgroup v2).
+- The pause process is `catatonit -P`, real and effective uid 1000 (uid 0 of its own user namespace,
+  map `0 1000 1` + `1 100000 65536`), parent 1. It runs as the user's uid, not a subuid.
+- Its pid is in `$XDG_RUNTIME_DIR/libpod/tmp/pause.pid` (`/run/user/1000/libpod/tmp/pause.pid`; under
+  the route, where `XDG_RUNTIME_DIR` is the run root, `<runRoot>/libpod/tmp/pause.pid`).
+- With a user bus, podman moves it into its own `user@1000.service/user.slice/podman-pause-<hex>.scope`.
+  That happened even under `env -i`: podman finds `/run/user/<uid>/bus` by uid.
+- Without a user bus (emulated with an unusable `DBUS_SESSION_BUS_ADDRESS`), the move fails
+  (`Failed to add pause process to systemd sandbox cgroup: dial unix ...`) and the pause process stays
+  in the cgroup of the podman command that created it.
+- There is no engine setting that runs rootless podman 4.9 without it: `containers.conf(5)` only knows
+  the pod infra "pause" image, and `podman --help` has no such option.
+- A dead pause process is replaced by the next podman command, which also rewrites `pause.pid`.
+
+**The guest unit.** `simple-orchestrator-host.service` runs as the static `simple-host` user with
+`Delegate=yes`; `user@950.service` is masked, and custody refuses an epoch when `/run/user/<uid>/bus`
+exists (`epoch_native_no_user_bus_v1`). So the engine can never move the pause process: it stays where
+the helper that created it runs.
+
+**Where a helper runs.** Every engine helper is cloned straight into its own group cgroup
+(`CLONE_PIDFD | CLONE_INTO_CGROUP`, `src/runtime/runtime_linux_group_owner_impl.h`). When the helper
+leader is reaped and the group is still populated, `rt_lg_poll` writes `cgroup.kill`; the group is
+collected only once `cgroup.events` says it is empty. The fresh route reaches this through its broker:
+the owner's `group_process_stream_poll_v2` is a probe of the broker, the broker's monitor loop
+(`native_linux_group_monitor_lease_v1`) calls `linux_process_poll_v1` -> `rt_linux_group_poll_v1`, and a
+helper is terminal for the owner only through `broker.tree.sdn`, which the broker writes after
+`linux_process_collect_v1`. The exited-start settle refuses while a helper is not retired
+(`machine-fresh-workload-exited-settlement-helper-active`).
+
+**Measured** with real podman on this host, each podman command in its own cgroup that was killed after
+the command exited, same global flags as the route (`--cgroup-manager=cgroupfs`, private root, run root
+and tmpdir, vfs), `--network=none`, no usable bus, `busybox /bin/true`, two runs:
+after every one of create, start, inspect, stop, rm and the absence inspect the only process left in the
+command's cgroup was `catatonit` (after start also `conmon` and one `podman` process); all were
+gone after `cgroup.kill`; every later command made a new pause process and exited 0 (`inspect` said
+`stopped`; absence was checked with `podman container exists`, exit 1, not the route's
+`container inspect`); at the end no process of the run was left anywhere. A third run with
+`INVOCATION_ID` set, which the route's broker environment allows, gave the same result.
+
+**Chosen: no exclusion, no engine setting, no unit change.** The pause process is already placed in a
+cgroup that the kernel empties before the census can run: the helper's own group. It is dead before the
+settle samples the cohort, so the census has nothing to exclude and the absence proof is unchanged. The
+chain is pinned by `test/01_unit/lib/container/machine_fresh_engine_residue_containment_v3_spec.spl`
+(4 cases): helper cloned into its group, group killed after the leader is reaped and collected only when
+empty, the owner-probe to broker to runtime-poll path, no user bus, cgroupfs manager on every engine
+command line, settle only after helper retirement, and exactly one census exemption (the service's own
+pid). The pins were green when written; they guard the premises, they are not a fix.
+
+**Why not the others.**
+- *A census exclusion keyed on cgroup membership.* The census matches on uid over all of procfs; a cgroup
+  rule would excuse every process in that cgroup, which is a class, not a process. That weakens the
+  proof for unknown processes.
+- *A pidfd the owner holds.* The pause process is a grandchild of a helper, created by the engine. The
+  owner can only learn its pid from `pause.pid` (engine text). Taking a pidfd with proof would need a
+  dedicated engine no-op in a dedicated cgroup before any workload exists, a retained descriptor per
+  epoch and an exemption in both the uid census and the partition population. That is new native
+  authority to keep alive a process that the existing containment already removes.
+- *A unit setting.* None can help while the census matches on uid, and none is needed.
+- *Keeping the pause process alive on purpose.* It would then block the census by design.
+
+**Limit.** This rests on the helper group being killed. The same kill also removes `conmon`
+(`container_fresh_route_start_helper_kills_conmon_2026-11-27.md`); revisit this decision, as the pin
+spec says, if helper containment changes to fix that.
+`pause.pid` can name a dead pid between two helpers; podman replaces it, but a reused pid is a
+theoretical hazard that was not observed. The broker is itself a service-uid process; it exits after
+publishing its receipt. If the census samples before that, it refuses and the bounded repeat of Edge 1
+applies. How long the broker lingers was not measured.
+
+## Edge 4 (decided and fixed in source 2026-11-27): the cleanup error text
+
+`simple_container_fresh_cleanup_v2` wrote the first non-empty stage error onto the retained open value
+and returned that text from every later call. So a cleanup that was refused with the retryable state
+and then succeeded returned `closed` with the old refusal, and a second, different refusal was hidden
+behind the first one.
+
+**Chosen:** a refusal is reported by its own attempt and not kept; a failure is kept.
+- A stage that keeps its owner has refused. The same stage runs again on the next call, so its text
+  describes that attempt only. It is returned by that attempt and never written to the open value.
+- A stage that gave up its owner and still answered with an error, or that neither closed nor kept an
+  owner, is a failure nothing will retry. Its text is kept (first one wins) and a cleanup that later
+  closes still returns it. The error an open already carried is kept the same way.
+- A refused attempt reports its refusal; kept failures stay readable on `retained.error` and are
+  returned once the cleanup closes.
+- Two answers that used to be silent are named: `container-fresh-cleanup-stage-retained` (owner kept, no
+  reason, nothing kept) and `container-fresh-cleanup-stage-unclosed` (not closed, no owner, no reason).
+
+**Why not plain "last attempt wins".** Stage 1 closes with a consumed error, stage 2 refuses; the retry
+has no stage 1 left to run and would return clean. That hides a real failure.
+
+**Why not a history field.** Nothing reads one. The refusal is returned to the caller at the time; the
+kept failure is the only text that must outlive the attempt.
+
+**Shape.** The pure reducer `container_fresh_cleanup_stage_v2`
+(`src/lib/common/contracts/container/fresh_cleanup_stage_v2.spl`), called once per stage by
+`simple_container_fresh_cleanup_v2`. No struct changed.
+
+**Below the API (read, not changed).**
+- The adapter `close_fresh_v2` and the owner `close_v2` return the transfer's answer per call.
+- The transfer `close_v2` returns the settle or native refusal per call without storing it. What it does
+  keep, first one wins, is the lifecycle diagnostic (native state error, writer and custody close
+  errors); it returns that on every later call and on the final close. Those are failures, and the rule
+  above keeps them.
+- `machine_fresh_epoch_admission_turn_close_v1` keeps the first error of its own custody owner close
+  even when that close only refused. A refused and later successful close of that owner therefore still
+  returns the old text from this lower layer. The exited-start retryable state does not pass through it;
+  not changed here.
+- None of the three stage closes can answer "not closed, no owner": each returns its owner whenever it
+  is not closed. `container-fresh-cleanup-stage-unclosed` is a guard for a shape that does not occur
+  today.
+
+**Tested.** `test/01_unit/lib/container/fresh_cleanup_stage_v2_spec.spl` (7 cases): refusal then clean,
+latest refusal reported, kept failure through a refusal and a success, the open error, the two named
+answers, the shape of the API function, and the API function itself on an open value with no owner.
+The three stages need installed custody and were not executed.
+
 ## Still open
 
 1. **Live guest run.** None of this was run against installed custody.
-2. **Whether the service-uid route keeps a pause process** (Edge 1, Limit).
+2. **The pause process in the guest.** Edge 3 says it cannot outlive its helper. That is from source
+   and a host emulation, not from a guest run.
 3. **What a retained containment descriptor answers after its subject exits.** On this host the
    capture itself is refused (`containment-capture-refused:-95`), so it could not be observed. The
    classification does not depend on the answer unless it is `populated`.
 4. **Subject-closure settles are not attempted by cleanup.** Only the exited-start settle is.
-5. **The cleanup error text is first-wins.** `simple_container_fresh_cleanup_v2` keeps the first
-   error on the retained open value (it did the same with `machine-fresh-workload-charge-retained`).
-   A cleanup that was refused with the retryable state and then succeeds returns closed with that
-   old text, and the live spec treats a non-empty error on a closed cleanup as a failure. Not
-   changed here; it needs its own decision in `api_v2`.
+5. **The start helper's group kill also kills `conmon`.** A workload that is still running when the
+   start helper is reaped loses its monitor and the next engine command fails. Separate record:
+   `container_fresh_route_start_helper_kills_conmon_2026-11-27.md`.
+6. **`HOME=/nonexistent`.** Checked 2026-11-27: that value is a rule for the broker's inherited
+   environment only. The helpers got an empty environment, so the engine fell back to the account home,
+   which custody requires to be the absent `/nonexistent`. Helpers now get `HOME=<run root>`. Record,
+   measurements and the open guest unit question: `container_fresh_route_helper_home_2026-11-27.md`.
