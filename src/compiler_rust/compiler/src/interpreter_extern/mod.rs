@@ -1181,6 +1181,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_memcpy_htod_array", gpu::rt_cuda_memcpy_htod_array_fn);
     insert_simple!("rt_cuda_mem_free", gpu::rt_cuda_mem_free_fn);
     insert_simple!("rt_cuda_memset", gpu::rt_cuda_memset_fn);
+    insert_simple!("rt_cuda_stream_create", gpu::rt_cuda_stream_create_fn);
+    insert_simple!("rt_cuda_stream_destroy", gpu::rt_cuda_stream_destroy_fn);
     insert_simple!("rt_cuda_memset_d32", gpu::rt_cuda_memset_d32_fn);
     insert_simple!("rt_cuda_module_get_function", gpu::rt_cuda_module_get_function_fn);
     insert_simple!("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn);
@@ -3880,6 +3882,29 @@ mod extern_drift_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Extern return-shape canonicalisation, GPU batch: the registry must hand
+    /// back the declared shape (bool availability probes, i64 CUDA status).
+    #[test]
+    fn gpu_batch_externs_dispatch_canonical_shapes() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let mut call = |name: &str, args: Vec<Value>| {
+            let handler = EXTERN_DISPATCH.get(name).unwrap_or_else(|| panic!("{name} must be registered"));
+            handler(&args, &mut env, &mut functions, &mut classes, &enums, &impl_methods).unwrap()
+        };
+        assert!(matches!(call("rt_webgpu_is_available", vec![]), Value::Bool(false)));
+        assert!(matches!(call("rt_opencl_is_available", vec![]), Value::Bool(_)));
+        assert!(matches!(call("rt_cuda_stream_destroy", vec![Value::Int(0)]), Value::Int(0)));
+        let Value::Int(bad) = call("rt_cuda_stream_destroy", vec![Value::Int(-5)]) else {
+            panic!("rt_cuda_stream_destroy must return an i64 status")
+        };
+        assert!(bad < 0, "negative stream handle must be rejected, got {bad}");
+        assert!(matches!(call("rt_vulkan_fence_submission_supported", vec![]), Value::Int(_)));
+    }
 
     #[test]
     fn host_capacity_externs_dispatch_typed_snapshots() {
