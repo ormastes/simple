@@ -1,0 +1,374 @@
+# @tag:in-development
+# Tracks: seed_typed_f64_option_some_heap_allocates_per_some_never_released_2026-11-27
+# Tracks: seed_jit_f64_option_unwrap_or_expect_try_readers_lossy_2026-11-27
+# FIXED in source 2026-11-27 (mir/float_option_inline.rs: typed `f64?` locals are
+# an inline (tag, bits) pair; rt_option_float_tag / rt_option_float_pack in the
+# Rust runtime value/objects.rs and src/runtime/runtime_native.c); stays tagged
+# until a seed carrying it is deployed.
+#
+# Owner decision 2026-11-27: a typed `f64?` is an inline tag plus the exact f64
+# bits, with no heap allocation per `Some`. Each case runs one fixture through
+# the compiler binary (`SIMPLE_BINARY` or `bin/simple`) in strict JIT mode (the
+# sspec runner itself forces the interpreter):
+# - carriers: exact bits through locals, copies, returns, params, struct fields,
+#   `[f64?]` elements, closure captures and an erased generic, including NaN
+#   payloads, None vs Some(NaN) and the double whose bits equal the nil word (3);
+# - readers: `unwrap_or`, `expect` and `?`;
+# - erased: round trips through `any` and dict values (hit, stored nil, miss);
+# - escapes: a loop-invariant local passed to a function 2e7 times is boxed
+#   once (the one-word form is cached per assignment) and `.unwrap_or(d)` on a
+#   typed local allocates nothing;
+# - scope: that box is built at the assignment, so it is not freed with a
+#   transient scope that happens to be open at the first escaping read;
+# - memory: peak RSS after 4e7 `Some` + `??` + `.unwrap()` iterations must not
+#   exceed the peak after 2e6 by 64 MB (it grew by 1.85 GB before the fix).
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val CARRIERS = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+struct Holder:
+    a: f64?
+
+fn bit(ok: bool, k: i64) -> i64:
+    if ok:
+        return 0
+    k
+
+fn mk(x: f64) -> f64?:
+    return Some(x)
+
+fn flat(x: f64) -> f64?:
+    return x
+
+fn none_f() -> f64?:
+    return nil
+
+fn thru(c: f64?) -> f64?:
+    c
+
+fn param_bits(c: f64?) -> i64:
+    spl_f64_to_bits(c ?? 9.0)
+
+fn param_none(c: f64?) -> bool:
+    c == nil
+
+fn ident<T>(o: T?) -> T?:
+    o
+
+fn erased(a: any) -> any:
+    a
+
+fn chk(bits: i64) -> i64:
+    val x = spl_bits_to_f64(bits)
+    val c: f64? = Some(x)
+    var r = 0
+    # typed local readers
+    r = r + bit(spl_f64_to_bits(c ?? 9.0) == bits, 1)
+    r = r + bit(spl_f64_to_bits(c.unwrap()) == bits, 2)
+    var iv = 9.0
+    if val v = c:
+        iv = v
+    r = r + bit(spl_f64_to_bits(iv) == bits, 4)
+    var mv = 9.0
+    match c:
+        Some(v): mv = v
+        None: mv = 8.0
+    r = r + bit(spl_f64_to_bits(mv) == bits, 8)
+    r = r + bit(c != nil, 16)
+    # local to local, reassignment
+    var d: f64? = None
+    r = r + bit(d == nil, 32)
+    d = c
+    r = r + bit(spl_f64_to_bits(d ?? 9.0) == bits, 64)
+    d = nil
+    r = r + bit(spl_f64_to_bits(d ?? 9.0) == spl_f64_to_bits(9.0), 128)
+    # return and param
+    val m: f64? = mk(x)
+    r = r + bit(spl_f64_to_bits(m ?? 9.0) == bits, 256)
+    r = r + bit(spl_f64_to_bits(mk(x) ?? 9.0) == bits, 512)
+    r = r + bit(param_bits(c) == bits, 1024)
+    val p: f64? = thru(c)
+    r = r + bit(spl_f64_to_bits(p ?? 9.0) == bits, 2048)
+    val fl: f64? = flat(x)
+    r = r + bit(spl_f64_to_bits(fl ?? 9.0) == bits, 4096)
+    val nn: f64? = none_f()
+    r = r + bit(nn == nil and param_none(nn), 8192)
+    # struct field
+    val h = Holder(a: c)
+    r = r + bit(spl_f64_to_bits(h.a ?? 9.0) == bits, 16384)
+    val hf: f64? = h.a
+    r = r + bit(spl_f64_to_bits(hf.unwrap()) == bits, 32768)
+    # array element
+    val xs: [f64?] = [c, None]
+    r = r + bit(spl_f64_to_bits(xs[0] ?? 9.0) == bits, 65536)
+    val e1: f64? = xs[1]
+    r = r + bit(e1 == nil, 131072)
+    # closure capture
+    val f = \y: spl_f64_to_bits(c ?? 9.0)
+    r = r + bit(f(0) == bits, 262144)
+    # erased boundaries: generic and any, then back into a typed local
+    val g: f64? = ident(c)
+    r = r + bit(spl_f64_to_bits(g ?? 9.0) == bits, 524288)
+    val gn: f64? = ident(d)
+    r = r + bit(gn == nil, 1048576)
+    r
+
+fn main():
+    # NaN payload, negative NaN, heap-tag 0b001, TAG_FLOAT 0b010, 9, the nil word 3, -0.0, 0.1
+    val total = chk(9221120237041090565) + chk(-2251799813685243) + chk(1) + chk(2) + chk(9) + chk(-9223372036854775808) + chk(4591870180066957722)
+    val nilword = chk(3)
+    print("mismatch {total} nilword {nilword}")
+"""
+
+val READERS = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+fn bit(ok: bool, k: i64) -> i64:
+    if ok:
+        return 0
+    k
+
+fn tryq(c: f64?) -> f64?:
+    val v = c?
+    Some(v)
+
+fn tryl(x: f64) -> f64?:
+    val c: f64? = Some(x)
+    val v = c?
+    Some(v)
+
+fn tryn() -> f64?:
+    val c: f64? = nil
+    val v = c?
+    Some(v)
+
+fn chk(bits: i64) -> i64:
+    val x = spl_bits_to_f64(bits)
+    val c: f64? = Some(x)
+    var r = 0
+    val u: f64 = c.unwrap_or(9.0)
+    r = r + bit(spl_f64_to_bits(u) == bits, 1)
+    val n: f64? = nil
+    val un: f64 = n.unwrap_or(9.0)
+    r = r + bit(un == 9.0, 2)
+    val e: f64 = c.expect("m")
+    r = r + bit(spl_f64_to_bits(e) == bits, 4)
+    val t: f64? = tryq(c)
+    r = r + bit(spl_f64_to_bits(t ?? 9.0) == bits, 8)
+    val tl: f64? = tryl(x)
+    r = r + bit(spl_f64_to_bits(tl ?? 9.0) == bits, 16)
+    val tn: f64? = tryn()
+    r = r + bit(tn == nil, 32)
+    r
+
+fn main():
+    val a = chk(4591870180066957722)
+    val b = chk(9221120237041090565)
+    val c = chk(3)
+    val d = chk(1)
+    print("readers {a + b + c + d}")
+"""
+
+val MEMORY = """use std.io_runtime.{file_read}
+
+fn hwm_kb() -> i64:
+    val s = file_read("/proc/self/status")
+    for line in s.split("\n"):
+        if line.starts_with("VmHWM:"):
+            val digits = line.replace("VmHWM:", "").replace("kB", "").trim()
+            return digits.to_int()
+    0 - 1
+
+fn run(n: i64) -> f64:
+    var acc = 0.0
+    var i = 0
+    while i < n:
+        val x = i.to_f64() * 0.5
+        val c: f64? = Some(x)
+        var d: f64? = nil
+        if i % 2 == 0:
+            d = c
+        acc = acc + (c ?? 9.0) + c.unwrap() + (d ?? 1.0)
+        i = i + 1
+    acc
+
+fn main():
+    val a = run(2000000)
+    val h1 = hwm_kb()
+    val b = run(40000000)
+    val h2 = hwm_kb()
+    print("flat {h2 - h1 < 65536} ok {h1 > 0 and a + b > 0.0}")
+"""
+
+val ERASED = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+fn bit(ok: bool, k: i64) -> i64:
+    if ok:
+        return 0
+    k
+
+fn erased(a: any) -> any:
+    a
+
+fn back(a: any) -> f64?:
+    a
+
+fn chk(bits: i64) -> i64:
+    val x = spl_bits_to_f64(bits)
+    val c: f64? = Some(x)
+    var r = 0
+    val e: f64? = back(erased(c))
+    r = r + bit(spl_f64_to_bits(e ?? 9.0) == bits, 1)
+    val n: f64? = nil
+    val en: f64? = back(erased(n))
+    r = r + bit(en == nil, 2)
+    var d: Dict<text, f64?> = {}
+    d["k"] = c
+    d["n"] = n
+    val dv: f64? = d["k"]
+    r = r + bit(spl_f64_to_bits(dv ?? 9.0) == bits, 4)
+    val dn: f64? = d["n"]
+    r = r + bit(dn == nil, 8)
+    val dm: f64? = d.get("missing")
+    r = r + bit(dm == nil, 16)
+    r
+
+fn main():
+    val a = chk(4591870180066957722)
+    val b = chk(9221120237041090565)
+    val c = chk(3)
+    val d = chk(1)
+    print("erased {a + b + c + d}")
+"""
+
+val ESCAPES = """use std.io_runtime.{file_read}
+
+fn hwm_kb() -> i64:
+    val s = file_read("/proc/self/status")
+    for line in s.split("\n"):
+        if line.starts_with("VmHWM:"):
+            val digits = line.replace("VmHWM:", "").replace("kB", "").trim()
+            return digits.to_int()
+    0 - 1
+
+fn param(c: f64?) -> f64:
+    c ?? 9.0
+
+fn escape_loop(n: i64) -> f64:
+    val c: f64? = Some(1.5)
+    var acc = 0.0
+    var i = 0
+    while i < n:
+        acc = acc + param(c)
+        i = i + 1
+    acc
+
+fn unwrap_or_loop(n: i64) -> f64:
+    val c: f64? = Some(1.5)
+    var acc = 0.0
+    var i = 0
+    while i < n:
+        val u: f64 = c.unwrap_or(9.0)
+        acc = acc + u
+        i = i + 1
+    acc
+
+fn main():
+    val a = escape_loop(1000000) + unwrap_or_loop(1000000)
+    val h0 = hwm_kb()
+    val b = escape_loop(20000000)
+    val h1 = hwm_kb()
+    val c = unwrap_or_loop(20000000)
+    val h2 = hwm_kb()
+    print("escape_flat {h1 - h0 < 65536} unwrap_or_flat {h2 - h1 < 65536} ok {h0 > 0 and a + b + c > 0.0}")
+"""
+
+val SCOPE = """extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn id(o: f64?) -> f64?:
+    o
+
+fn rd(o: f64?) -> f64:
+    o ?? -1.0
+
+fn churn(n: i64) -> f64:
+    var t = 0.0
+    var xs: [f64?] = []
+    var i = 0
+    while i < n:
+        xs.push(Some(i.to_f64() + 1000.0))
+        i = i + 1
+    for x in xs:
+        t = t + (x ?? 0.0)
+    t
+
+fn main():
+    val c: f64? = Some(1.25)
+    rt_transient_array_scope_begin()
+    val a = rd(id(c))
+    rt_transient_array_scope_end()
+    val t = churn(2000)
+    val b = rd(id(c))
+    val k = id(c)
+    print("scope a={a} b={b} k={k ?? -2.0} t={t}")
+"""
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-f64-option-inline"
+    dir_create_all(dir)
+    dir
+
+fn run_fixture(name: text, source: text, mode: text) -> (text, i64):
+    val path = work_dir() + "/" + name + "_" + mode + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", mode)
+    if mode == "jit":
+        env_set("SIMPLE_JIT_STRICT", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[2])
+
+describe "typed f64? inline (tag, bits) layout":
+    it "keeps exact bits through every carrier on the JIT, including the nil-word denormal":
+        val (out, rc) = run_fixture("carriers", CARRIERS, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "mismatch 0 nilword 0")
+
+    it "keeps exact bits through every carrier in the interpreter":
+        val (out, rc) = run_fixture("carriers", CARRIERS, "interpret")
+        assert_equal(rc, 0)
+        assert_equal(out, "mismatch 0 nilword 0")
+
+    it "reads unwrap_or, expect and ? exactly on the JIT":
+        val (out, rc) = run_fixture("readers", READERS, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "readers 0")
+
+    it "does not grow peak RSS with the number of Some values on the JIT":
+        val (out, rc) = run_fixture("memory", MEMORY, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "flat true ok true")
+
+    it "round-trips exactly through any and dict values on the JIT":
+        val (out, rc) = run_fixture("erased", ERASED, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "erased 0")
+
+    it "boxes an escaping local once, not once per read, and unwrap_or not at all":
+        val (out, rc) = run_fixture("escapes", ESCAPES, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "escape_flat true unwrap_or_flat true ok true")
+
+    it "keeps an escaping local's box alive past the transient scope of its first read":
+        val (out, rc) = run_fixture("scope", SCOPE, "jit")
+        assert_equal(rc, 0)
+        assert_equal(out, "scope a=1.25 b=1.25 k=1.25 t=3999000.0")

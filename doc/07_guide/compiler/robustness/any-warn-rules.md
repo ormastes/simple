@@ -111,3 +111,16 @@ raise a count. Set `SIMPLE_BIN` to the binary to measure with.
 - When opted in under the seed interpreter the rules cost one extra `check` per compiler
   file: measured 62 s against 24 s with `SIMPLE_ANY_RULES=off` on
   `10.frontend/core/collection_feedback.spl`.
+
+## Direction (2026-11-27)
+
+Owner decision: `any` is allowed only in `unsafe` code and script mode, in
+**all** safe compiled code, not only under `src/compiler/**`; a type that
+cannot be determined becomes a compile error instead of a fallback. These
+families are the warn-first half of that rollout and their scope widens under
+stage S4 of `doc/03_plan/language/type_system/no_any_inference_plan.md`.
+Two things in this guide change with it: any `unsafe` block or function
+admits `any` (the `type_erasure` capability named by `E-ANY-COMPILE-001` is
+no longer required), and "script" is the source mode of the unit (file kind
+plus config), not interpreted execution.
+Design: `doc/05_design/language/type_system/no_any_inference_generics.md`.

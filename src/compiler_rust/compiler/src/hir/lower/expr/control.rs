@@ -45,7 +45,7 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
 /// Its default element/key type is not evidence about the join type, so a
 /// concrete sibling must win (same rule `lower_if` applies to `[]`).
 /// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
-fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+pub(super) fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
     weak_expr(expr) == Some(true)
 }
 
@@ -59,6 +59,10 @@ fn weak_expr(expr: &HirExpr) -> Option<bool> {
         HirExprKind::Dict(pairs) => Some(pairs.is_empty()),
         HirExprKind::Block(stmts) => weak_stmts(stmts),
         HirExprKind::LetIn { body, .. } => weak_expr(body),
+        // `Some([])` is as weak as `[]`: the Option wrapper adds no element evidence.
+        HirExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "Some") => {
+            weak_expr(&args[0])
+        }
         HirExprKind::If {
             then_branch,
             else_branch: Some(else_branch),
@@ -85,6 +89,27 @@ fn join_weak(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     match (a, b) {
         (None, other) | (other, None) => other,
         (Some(x), Some(y)) => Some(x && y),
+    }
+}
+
+/// Some(true) when the weak literal reached through `Some(..)`/blocks/ifs is a `{}`, Some(false)
+/// for `[]`.
+fn weak_literal_is_dict(expr: &HirExpr) -> Option<bool> {
+    match &expr.kind {
+        HirExprKind::Array(_) => Some(false),
+        HirExprKind::Dict(_) => Some(true),
+        HirExprKind::Call { func, args } if args.len() == 1 && matches!(&func.kind, HirExprKind::Global(n) if n == "Some") => {
+            weak_literal_is_dict(&args[0])
+        }
+        HirExprKind::LetIn { body, .. } => weak_literal_is_dict(body),
+        HirExprKind::Block(stmts) => match stmts.last() {
+            Some(HirStmt::Expr(e)) => weak_literal_is_dict(e),
+            _ => None,
+        },
+        HirExprKind::If { then_branch, else_branch: Some(else_branch), .. } => {
+            weak_literal_is_dict(then_branch).or_else(|| weak_literal_is_dict(else_branch))
+        }
+        _ => None,
     }
 }
 
@@ -138,6 +163,10 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
 fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayRepeat { .. } => true,
+        // `Some([x; 0])` keeps the repeat evidence through the Option wrapper.
+        Expr::Call { callee, args, .. } if args.len() == 1 && matches!(callee.as_ref(), Expr::Identifier(n) if n == "Some") => {
+            ast_expr_tail_is_array_repeat(&args[0].value)
+        }
         Expr::DoBlock(stmts) => ast_stmts_tail_is_array_repeat(stmts),
         Expr::If {
             then_branch,
@@ -279,6 +308,19 @@ impl Lowerer {
         }
     }
 
+    /// Payload type of an `Option` enum (only `Option`, never `Result`).
+    pub(crate) fn option_enum_payload(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, .. }) if name == "Option" => variants
+                .iter()
+                .find(|(variant, _)| variant == "Some")
+                .and_then(|(_, payload)| payload.as_ref())
+                .and_then(|fields| fields.first())
+                .copied(),
+            _ => None,
+        }
+    }
+
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Enum { name, variants, .. }) if name == "Result" => {
@@ -307,11 +349,33 @@ impl Lowerer {
     /// Both types are arrays, or both are dicts: only then may a weak empty
     /// literal defer to its sibling (an unrelated aggregate keeps the default).
     fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
+        // Option vs Option (or the ANY-typed `Some([])` vs an Option): compare payloads.
+        // Only Option enums are looked through, never Result.
+        match (self.option_enum_payload(a), self.option_enum_payload(b)) {
+            (Some(pa), Some(pb)) => return self.same_collection_kind(pa, pb),
+            _ => {}
+        }
         matches!(
             (self.module.types.get(a), self.module.types.get(b)),
             (Some(HirType::Array { .. } | HirType::Any), Some(HirType::Array { .. }))
                 | (Some(HirType::Dict { .. } | HirType::Any), Some(HirType::Dict { .. }))
         )
+    }
+
+    /// `same_collection_kind` for a weak arm `weak` of type `a`. An erased (ANY) `Some([])` /
+    /// `Some({})` carries its kind only in the literal, so derive array-vs-dict from it and
+    /// require the sibling Option payload to match.
+    fn weak_arm_matches_sibling(&self, weak: &HirExpr, a: TypeId, b: TypeId) -> bool {
+        if a == TypeId::ANY {
+            if let Some(payload) = self.option_enum_payload(b) {
+                return match weak_literal_is_dict(weak) {
+                    Some(true) => matches!(self.module.types.get(payload), Some(HirType::Dict { .. })),
+                    Some(false) => matches!(self.module.types.get(payload), Some(HirType::Array { .. })),
+                    None => false,
+                };
+            }
+        }
+        self.same_collection_kind(a, b)
     }
 
     /// Lower an if expression to HIR
@@ -367,7 +431,7 @@ impl Lowerer {
             if hir_value_is_weak_empty(&then_hir)
                 && hir_value_is_concrete(other)
                 && other.ty != TypeId::ANY
-                && self.same_collection_kind(then_hir.ty, other.ty)
+                && self.weak_arm_matches_sibling(&then_hir, then_hir.ty, other.ty)
                 && !ast_expr_tail_is_array_repeat(then_branch)
             {
                 ty = other.ty;
@@ -403,6 +467,7 @@ impl Lowerer {
                 }
             }
         }
+        self.reject_uninferred_join(&then_hir, else_hir.as_deref(), ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::If {
@@ -606,6 +671,7 @@ impl Lowerer {
 
         // Restore context; lambda-local variables must not leak to the outer function.
         ctx.locals.truncate(saved_locals_len);
+        ctx.uninferred_locals.retain(|index, _| *index < saved_locals_len);
         ctx.local_map = saved_local_map;
 
         Ok(HirExpr {
@@ -748,6 +814,7 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Lower the subject once and store in a local variable to avoid re-evaluation
         let subject_hir = self.lower_subject_for_patterns(subject, arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value
@@ -853,9 +920,10 @@ impl Lowerer {
             && hir_value_is_weak_empty(&then_branch)
             && hir_value_is_concrete(&else_branch)
             && else_branch.ty != TypeId::ANY
-            && self.same_collection_kind(then_ty, else_branch.ty)
+            && self.weak_arm_matches_sibling(&then_branch, then_ty, else_branch.ty)
             && !ast_stmts_tail_is_array_repeat(&arm.body.statements);
         let result_ty = if then_is_bottom || then_is_weak_vs_concrete { else_branch.ty } else { then_ty };
+        self.reject_uninferred_join(&then_branch, Some(&else_branch), ctx)?;
 
         Ok(HirExpr {
             kind: HirExprKind::If {

@@ -1,0 +1,244 @@
+"""Regression specs for cold HIR public constant & interface type inference."""
+
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1,
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.abi_interface.{hir_abi_interface_encoded_v1}
+use compiler.hir.hir_codec.{hir_codec_abi_interface_encoded_v1}
+use compiler.hir.hir_types.{HirTypeKind, HirModule}
+use compiler.driver.cache.cold_hir_semantic_seed_v1.{
+    cold_hir_typed_receipt_from_admitted_entry_v1}
+use compiler.driver.cache.cold_hir_abi_smf_section_v1.{cold_hir_abi_smf_section_v1}
+
+fn lower_standalone_src(path: text, mod_name: text, src: text) -> HirModule:
+    val logger = Logger(level: 0)
+    val parsed = parse_full_frontend(src, path, mod_name, logger)
+    var hl = HirLowering.with_filename(path)
+    hl.lower_module(parsed)
+
+fn lower_with_surfaces(paths: [text], mod_names: [text], sources: [text], target_idx: i64) -> HirModule:
+    val logger = Logger(level: 0)
+    var modules: Dict<text, ParserModule> = {}
+    var source_files: [SourceFile] = []
+    var i = 0
+    while i < paths.len():
+        modules[mod_names[i]] = parse_full_frontend(sources[i], paths[i], mod_names[i], logger)
+        source_files = source_files.push(SourceFile(path: paths[i], content: sources[i], module_name: mod_names[i]))
+        i = i + 1
+    val surfaces = module_surfaces_from_modules(modules, source_files).unwrap()
+    var hl = hirlowering_for_module(paths[target_idx], surfaces)
+    hl.lower_module(modules[mod_names[target_idx]])
+
+fn encode_both(hir: HirModule) -> text:
+    val a1 = hir_abi_interface_encoded_v1(hir)
+    val a2 = hir_codec_abi_interface_encoded_v1(hir)
+    val s1 = if a1.is_ok(): "OK" else: "ERR(" + a1.unwrap_err() + ")"
+    val s2 = if a2.is_ok(): "OK" else: "ERR(" + a2.unwrap_err() + ")"
+    if s1 == s2:
+        s1
+    else:
+        "MISMATCH:" + s1 + "|" + s2
+
+fn const_type_tag(hir: HirModule, name: text) -> text:
+    for constant in hir.constants.values():
+        if constant.name == name:
+            match constant.type_.kind:
+                case HirTypeKind.Str: return "text"
+                case HirTypeKind.Int(bits, signed):
+                    return if signed: "i{bits}" else: "u{bits}"
+                case HirTypeKind.Float(bits): return "f{bits}"
+                case HirTypeKind.Bool: return "bool"
+                case HirTypeKind.Array(elem, _):
+                    match elem.kind:
+                        case HirTypeKind.Str: return "[text]"
+                        case HirTypeKind.Int(bits, _): return "[i{bits}]"
+                        case HirTypeKind.Array(_, _): return "[array]"
+                        case _: return "[other]"
+                case HirTypeKind.Tuple(_): return "tuple"
+                case HirTypeKind.Dict(_, _): return "dict"
+                case HirTypeKind.Infer(_, _): return "infer"
+                case _: return "other"
+    "missing"
+
+fn receipt_status(hir: HirModule, root: text, rel_path: text, content: text) -> text:
+    val empty = sha256_text("")
+    val entry = CompileSourceInventoryEntryV1(
+        rel_path, sha256_text(content), empty, empty, empty, empty, content.len())
+    val inventory = CompileSourceInventoryV1(1, 1, [entry])
+    val digest = compile_source_inventory_digest_v1(inventory)
+    val r = cold_hir_typed_receipt_from_admitted_entry_v1(hir, root, rel_path, content, digest, entry)
+    if r.is_ok(): "OK:" + r.unwrap().seed.abi_digest else: "ERR:" + r.unwrap_err()
+
+describe "cold HIR public constant and declaration inference":
+    it "infers real pure_backend_v1 unannotated imported constants and unannotated allocator array":
+        val p1 = "src/lib/common/contracts/container/backend_identity_v1.spl"
+        val p2 = "src/lib/common/contracts/container/pure_backend_v1.spl"
+        val s1 = file_read(p1)
+        val s2 = file_read(p2).replace("PURE_CONTAINER_BACKEND_V1: text =", "PURE_CONTAINER_BACKEND_V1 =").replace("PURE_CONTAINER_ENGINE_V1: text =", "PURE_CONTAINER_ENGINE_V1 =")
+        val hir2 = lower_with_surfaces(
+            [p1, p2],
+            ["std.common.contracts.container.backend_identity_v1", "std.common.contracts.container.pure_backend_v1"],
+            [s1, s2], 1)
+        expect(const_type_tag(hir2, "PURE_CONTAINER_BACKEND_V1")).to_equal("text")
+        expect(const_type_tag(hir2, "PURE_CONTAINER_ENGINE_V1")).to_equal("text")
+        expect(const_type_tag(hir2, "PURE_CONTAINER_ROOT_VIEW_SPLIT_V1")).to_equal("text")
+
+        val p4 = "src/compiler/70.backend/verify/allocator_symbol_scan.spl"
+        val s4_unann = file_read(p4).replace("pub val FORBIDDEN_ALLOCATOR_SYMBOLS: [text] =", "pub val FORBIDDEN_ALLOCATOR_SYMBOLS =")
+        val hir4 = lower_standalone_src(p4, "compiler.backend.verify.allocator_symbol_scan", s4_unann)
+        expect(const_type_tag(hir4, "FORBIDDEN_ALLOCATOR_SYMBOLS")).to_equal("[text]")
+        expect(encode_both(hir4)).to_equal("OK")
+
+        val pe = "src/compiler/00.common/cache_contract/errors_v1.spl"
+        val ps = "src/compiler/00.common/cache_contract/snapshot_contract_v1.spl"
+        val pv = "src/compiler/00.common/cache_contract/virtual_source_store_v1.spl"
+        val hir_vss = lower_with_surfaces(
+            [pe, ps, pv],
+            ["compiler.common.cache_contract.errors_v1",
+             "compiler.common.cache_contract.snapshot_contract_v1",
+             "compiler.common.cache_contract.virtual_source_store_v1"],
+            [file_read(pe), file_read(ps), file_read(pv)], 2)
+        expect(encode_both(hir_vss)).to_equal("OK")
+
+    it "infers imported constants across single-hop, multi-hop, alias, and facade re-export chains":
+        val mod_a = """
+pub const A_STR = "simple-pure-process"
+pub const A_INT = 42
+pub const A_ARR = ["x", "y"]
+"""
+        val mod_facade = """
+export use pkg.a.{A_STR}
+"""
+        val mod_b = """
+use pkg.facade.{A_STR}
+use pkg.a.{A_INT, A_ARR}
+pub const B_STR = A_STR
+pub const B_INT = A_INT
+pub const B_ARR = A_ARR
+pub const B_MIX_ARR = [A_STR, "local"]
+"""
+        val mod_c_unann = """
+use pkg.b.{B_STR, B_INT, B_ARR, B_MIX_ARR}
+pub const C_STR = B_STR
+pub const C_INT = B_INT
+pub const C_ARR = B_ARR
+pub const C_MIX = B_MIX_ARR
+"""
+        val mod_c_ann = """
+use pkg.b.{B_STR, B_INT, B_ARR, B_MIX_ARR}
+pub const C_STR: text = B_STR
+pub const C_INT: i64 = B_INT
+pub const C_ARR: [text] = B_ARR
+pub const C_MIX: [text] = B_MIX_ARR
+"""
+        val hir_c = lower_with_surfaces(
+            ["/repo/pkg/a.spl", "/repo/pkg/facade.spl", "/repo/pkg/b.spl", "/repo/pkg/c.spl"],
+            ["pkg.a", "pkg.facade", "pkg.b", "pkg.c"],
+            [mod_a, mod_facade, mod_b, mod_c_unann], 3)
+        val hir_c_ann = lower_with_surfaces(
+            ["/repo/pkg/a.spl", "/repo/pkg/facade.spl", "/repo/pkg/b.spl", "/repo/pkg/c.spl"],
+            ["pkg.a", "pkg.facade", "pkg.b", "pkg.c"],
+            [mod_a, mod_facade, mod_b, mod_c_ann], 3)
+        expect(const_type_tag(hir_c, "C_STR")).to_equal("text")
+        expect(const_type_tag(hir_c, "C_INT")).to_equal("i64")
+        expect(const_type_tag(hir_c, "C_ARR")).to_equal("[text]")
+        expect(const_type_tag(hir_c, "C_MIX")).to_equal("[text]")
+        expect(encode_both(hir_c)).to_equal("OK")
+        expect(hir_codec_abi_interface_encoded_v1(hir_c).unwrap()).to_equal(
+            hir_codec_abi_interface_encoded_v1(hir_c_ann).unwrap())
+        val rc = receipt_status(hir_c, "/repo", "pkg/c.spl", mod_c_unann)
+        expect(rc.starts_with("OK:")).to_equal(true)
+        expect(rc).to_equal(
+            receipt_status(hir_c_ann, "/repo", "pkg/c.spl", mod_c_ann))
+
+    it "infers unannotated public homogeneous array, tuple, dict, repeat, and forward consts with ABI roundtrip":
+        val unann_src = """
+pub const ARR_STR = ["a", "b"]
+pub const ARR_INT = [1, 2]
+pub const ARR_NEG = [-1, 2]
+pub const ARR_NEST = [[1, 2], [3, 4]]
+pub const ARR_REP = [0; 4]
+pub const TUP = (1, "a")
+pub const DICT = {"k": 1, "m": 2}
+pub const FWD_REF = BACK_VAL
+pub const ARR_FWD = [BACK_VAL, "world"]
+pub const BACK_VAL = "hello"
+"""
+        val ann_src = """
+pub const ARR_STR: [text] = ["a", "b"]
+pub const ARR_INT: [i64] = [1, 2]
+pub const ARR_NEG: [i64] = [-1, 2]
+pub const ARR_NEST: [[i64]] = [[1, 2], [3, 4]]
+pub const ARR_REP: [i64] = [0; 4]
+pub const TUP: (i64, text) = (1, "a")
+pub const DICT: Dict<text, i64> = {"k": 1, "m": 2}
+pub const FWD_REF: text = BACK_VAL
+pub const ARR_FWD: [text] = [BACK_VAL, "world"]
+pub const BACK_VAL: text = "hello"
+"""
+        val hir = lower_standalone_src("/repo/pkg/arr.spl", "pkg.arr", unann_src)
+        val hir_ann = lower_standalone_src("/repo/pkg/arr.spl", "pkg.arr", ann_src)
+        expect(const_type_tag(hir, "ARR_STR")).to_equal("[text]")
+        expect(const_type_tag(hir, "ARR_INT")).to_equal("[i64]")
+        expect(const_type_tag(hir, "ARR_NEG")).to_equal("[i64]")
+        expect(const_type_tag(hir, "ARR_NEST")).to_equal("[array]")
+        expect(const_type_tag(hir, "ARR_REP")).to_equal("[i64]")
+        expect(const_type_tag(hir, "TUP")).to_equal("tuple")
+        expect(const_type_tag(hir, "DICT")).to_equal("dict")
+        expect(const_type_tag(hir, "FWD_REF")).to_equal("text")
+        expect(const_type_tag(hir, "ARR_FWD")).to_equal("[text]")
+        val abi_unann = hir_abi_interface_encoded_v1(hir)
+        val abi_ann = hir_abi_interface_encoded_v1(hir_ann)
+        val codec_unann = hir_codec_abi_interface_encoded_v1(hir)
+        expect(abi_unann.is_ok()).to_equal(true)
+        expect(codec_unann.is_ok()).to_equal(true)
+        expect(abi_unann.unwrap()).to_equal(abi_ann.unwrap())
+        expect(codec_unann.unwrap()).to_equal(abi_unann.unwrap())
+        expect(cold_hir_abi_smf_section_v1(hir).is_ok()).to_equal(true)
+        val receipt = receipt_status(hir, "/repo", "pkg/arr.spl", unann_src)
+        expect(receipt.starts_with("OK:")).to_equal(true)
+        expect(receipt).to_equal(receipt_status(hir_ann, "/repo", "pkg/arr.spl", ann_src))
+
+    it "fails closed without Any fallbacks on genuinely ambiguous public declarations":
+        val empty_arr = "pub const E = []\n"
+        val empty_dict = """
+pub const ED = {}
+"""
+        val mixed_arr = "pub const M = [1, \"a\"]\n"
+        val unk_ref = "pub const U = MISSING_CONST\n"
+        val cyc_ref = "pub const CA = CB\npub const CB = CA\n"
+        val generic_ctor = "struct Box<T>:\n    value: T\npub const R = Box(value: 1)\n"
+        val loose_fn = "fn loose():\n    []\npub const RL = loose()\n"
+        val bad_a = """
+pub const A_STR = "ok"
+"""
+        val bad_b = """
+use pkg.a.{A_STR}
+pub const BAD_MIX = [A_STR, 1]
+"""
+        val bad_cross_mix = lower_with_surfaces(
+            ["/repo/pkg/a.spl", "/repo/pkg/bad.spl"],
+            ["pkg.a", "pkg.bad"],
+            [bad_a, bad_b], 1)
+
+        val hir_empty = lower_standalone_src("/repo/pkg/e.spl", "pkg.e", empty_arr)
+        expect(encode_both(hir_empty)).to_equal("ERR(unresolved-inference:0:0:declaration=constant:E)")
+        expect(encode_both(lower_standalone_src("/repo/pkg/ed.spl", "pkg.ed", empty_dict))).to_equal("ERR(unresolved-inference:0:0:declaration=constant:ED)")
+        expect(encode_both(lower_standalone_src("/repo/pkg/m.spl", "pkg.m", mixed_arr))).to_equal("ERR(unresolved-inference:0:0:declaration=constant:M)")
+        expect(encode_both(lower_standalone_src("/repo/pkg/u.spl", "pkg.u", unk_ref))).to_equal("ERR(unresolved-inference:0:0:declaration=constant:U)")
+        val cyc_hir = lower_standalone_src("/repo/pkg/c.spl", "pkg.c", cyc_ref)
+        expect(hir_codec_abi_interface_encoded_v1(cyc_hir).unwrap_err().starts_with("unresolved-inference:0:0:declaration=constant:")).to_equal(true)
+        expect(encode_both(lower_standalone_src("/repo/pkg/r.spl", "pkg.r", generic_ctor))).to_equal("ERR(unresolved-inference:0:0:declaration=constant:R)")
+        expect(encode_both(lower_standalone_src("/repo/pkg/rl.spl", "pkg.rl", loose_fn))).to_equal("ERR(unresolved-inference:0:0:declaration=constant:RL)")
+        expect(encode_both(bad_cross_mix)).to_equal("ERR(unresolved-inference:0:0:declaration=constant:BAD_MIX)")
+        val r_empty = receipt_status(hir_empty, "/repo", "pkg/e.spl", empty_arr)
+        expect(r_empty).to_equal("ERR:cold-hir-abi-unresolved:unresolved-inference:0:0:declaration=constant:E:module=/repo/pkg/e.spl:source=pkg/e.spl")

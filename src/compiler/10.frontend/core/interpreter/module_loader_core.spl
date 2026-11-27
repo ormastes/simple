@@ -15,7 +15,7 @@
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{DECL_CLASS}
-use compiler.core.interpreter.eval.{eval_had_error}
+use compiler.core.interpreter.eval.{eval_had_error, eval_toplevel_owner}
 use compiler.core.frontend.{core_frontend_parse_isolated, core_frontend_parse_append}
 use compiler.core.ast.{
     decl_fn,
@@ -36,7 +36,7 @@ use compiler.core.interpreter.eval_tables.{
     func_table_register_owned, func_import_binding_register, func_import_binding_lookup,
     func_import_binding_names, func_resolve_for_caller,
     func_module_namespace_register, func_module_namespace_lookup,
-    struct_table_lookup, struct_table_register,
+    struct_table_lookup, struct_table_register, struct_table_register_owned,
     decl_owner_file_set
 }
 use compiler.core.interpreter.interp_resource_tracker.{
@@ -382,12 +382,27 @@ fn extract_module_exports(decls: [i64]) -> [text]:
             if tag == DECL_FN:
                 val name = decl_get_name(did)
                 exports.push(name)
+            # Classes too: a glob/whole-module import binds each class name
+            # to this owner, so a same-named class of a later module cannot
+            # take the caller's bare name (owner decision 2026-11-27).
+            if tag == DECL_STRUCT:
+                exports.push(decl_get_name(did))
 
     exports
 
 fn register_module_functions(decls: [i64], mod_path: text):
     # Register all module functions in interpreter's function table
     # This makes them available for calls
+
+    # Classes first: a module's `Type__method` registration must already see
+    # whether `Type` is a class name several modules declare (owner-keyed
+    # dispatch, see _ftr_is_shared_class_method), whatever the decl order.
+    for did in decls:
+        if decl_get_tag(did) == DECL_STRUCT:
+            val name = decl_get_name(did)
+            struct_table_register(name, did)
+            struct_table_register_owned(mod_path, name, did)
+            irt_track_struct_owned(mod_path, name, did)
 
     for did in decls:
         val tag = decl_get_tag(did)
@@ -413,11 +428,6 @@ fn register_module_functions(decls: [i64], mod_path: text):
             val ret_type = decl_get_ret_type(did)
             func_register_return_type(name, ret_type)
             irt_track_func_owned(mod_path, name, did)
-
-        if tag == DECL_STRUCT:
-            val name = decl_get_name(did)
-            struct_table_register(name, did)
-            irt_track_struct_owned(mod_path, name, did)
 
         if tag == DECL_IMPL:
             for method_id in decl_get_body(did):
@@ -612,14 +622,20 @@ fn load_module(module_name: text, current_file: text) -> i64:
     # insufficient: their functions immediately read val/var state (the SPipe
     # owner begins with suite_stack/current_suite), so initialize those owners
     # once the dependency graph is registered.
+    # Their initializers run as top-level code of THIS module (not of the
+    # importer, and not of whatever module loaded last).
+    val init_saved_owner = eval_toplevel_owner
+    eval_toplevel_owner = resolved_path
     for init_did in appended_decls:
         val init_tag = decl_get_tag(init_did)
         if init_tag == DECL_VAL or init_tag == DECL_VAR or init_tag == DECL_ENUM or init_tag == DECL_IMPL or init_tag == DECL_CLI:
             val _ = eval_decl(init_did)
             if eval_had_error:
+                eval_toplevel_owner = init_saved_owner
                 print "error: module initialization failed: {module_name} ({resolved_path})"
                 _module_load_depth = _module_load_depth - 1
                 return 0
+    eval_toplevel_owner = init_saved_owner
 
     _module_load_depth = _module_load_depth - 1
     1

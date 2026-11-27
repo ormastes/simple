@@ -14,8 +14,8 @@ use compiler.frontend.core.parser_preprocessor.{pp_declared_target, pp_ensure_ma
 # Import them explicitly rather than converting either hop to `export use`,
 # which would widen two already-wide surfaces (and lint forbids `export use *`).
 # See doc/08_tracking/bug/hir_unresolved_type_owner_missing_import_2026-08-22.md
-use compiler.frontend.parser_types_expr.{parser_type_kind_named_name, parser_type_kind_array_element_name}
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceDeclarationAuthorityIndex, ModuleSurfaceEnum, ModuleSurfaceExportOriginIndex, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_declaration_authority_index_empty, module_surface_declaration_authority_index_put, module_surface_export_origin_index_empty, module_surface_export_origin_index_put}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, Expr, ExprKind, UnaryOp, BinOp, parser_type_kind_named_name, parser_type_kind_array_element_name}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceCallable, ModuleSurfaceComposite, ModuleSurfaceCompositeIndex, ModuleSurfaceConst, ModuleSurfaceDeclarationAuthorityIndex, ModuleSurfaceEnum, ModuleSurfaceExportOriginIndex, ModuleSurfaceField, ModuleSurfaceImpl, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceTypeAlias, module_surface_declaration_authority_index_empty, module_surface_declaration_authority_index_put, module_surface_export_origin_index_empty, module_surface_export_origin_index_put, module_surface_parser_types_equal}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_projection, module_surface_semantic_hex_limb}
 use compiler.common.attributes.{parse_function_attrs, parse_export_attrs}
@@ -29,6 +29,265 @@ fn module_surface_attributes_have_unmangled_abi(attributes: [Attribute]) -> bool
         return true
     val fn_attr = parse_function_attrs(attributes)
     fn_attr.is_global or fn_attr.is_entry
+
+fn _surface_const_named_type(name: text, span: Span) -> Type:
+    Type(kind: TypeKind.Named(name, []), span: span)
+
+fn _surface_parser_type_list_settled(types: [Type]) -> bool:
+    for item in types:
+        if not _surface_parser_type_settled(item):
+            return false
+    true
+
+fn _surface_parser_type_settled(type_: Type) -> bool:
+    """True when `type_` is a concrete syntax type carrying no AST expressions."""
+    match type_.kind:
+        case TypeKind.Named(name, arguments):
+            if name == "Any" or name == "any":
+                return false
+            _surface_parser_type_list_settled(arguments)
+        case TypeKind.Tuple(elements) | TypeKind.Union(elements):
+            if elements.len() == 0:
+                return false
+            _surface_parser_type_list_settled(elements)
+        case TypeKind.Array(element, size):
+            if size.is_some():
+                return false
+            _surface_parser_type_settled(element)
+        case TypeKind.Optional(inner) | TypeKind.Reference(inner, _) | TypeKind.Atomic(inner) | TypeKind.Isolated(inner) | TypeKind.Pointer(inner, _) | TypeKind.Weak(inner) | TypeKind.Unique(inner) | TypeKind.Shared(inner):
+            _surface_parser_type_settled(inner)
+        case TypeKind.Function(params, ret):
+            _surface_parser_type_list_settled(params) and _surface_parser_type_settled(ret)
+        case TypeKind.Projection(_, _) | TypeKind.Infer | TypeKind.Error:
+            false
+
+fn _surface_const_type_simple_name(type_: Type) -> text:
+    match type_.kind:
+        case TypeKind.Named(name, arguments):
+            if arguments.len() == 0: name else: ""
+        case _: ""
+
+fn _surface_const_local_decl_type(name: text, span: Span, module_local: ParserModule, visiting: [text]) -> Type?:
+    if not module_local.constants.contains_key(name):
+        return None
+    if visiting.contains(name):
+        return None
+    val target: ParserConst = module_local.constants[name]
+    if target.has_type_:
+        if _surface_parser_type_settled(target.type_):
+            return Some(target.type_)
+        return None
+    var next_visiting = visiting
+    next_visiting.push(name)
+    _surface_infer_const_type(target.value, span, module_local, next_visiting)
+
+fn _surface_const_nongeneric_record(name: text, module_local: ParserModule) -> bool:
+    if module_local.structs.contains_key(name):
+        val st: ParserStruct = module_local.structs[name]
+        return st.type_params.len() == 0
+    if module_local.classes.contains_key(name):
+        val cls: ParserClass = module_local.classes[name]
+        return cls.type_params.len() == 0
+    false
+
+fn _surface_infer_const_type(expr: Expr, span: Span, module_local: ParserModule, visiting: [text]) -> Type?:
+    """Infer syntax type for an unannotated module constant without retaining AST expressions."""
+    match expr.kind:
+        case ExprKind.IntLit(_):
+            Some(_surface_const_named_type("i64", span))
+        case ExprKind.FloatLit(_) | ExprKind.FloatLexeme(_):
+            Some(_surface_const_named_type("f64", span))
+        case ExprKind.StringLit(_, _):
+            Some(_surface_const_named_type("text", span))
+        case ExprKind.BoolLit(_):
+            Some(_surface_const_named_type("bool", span))
+        case ExprKind.Unary(op, operand):
+            val un_op: UnaryOp = op
+            val un_operand: Expr = operand
+            val operand_t = _surface_infer_const_type(un_operand, span, module_local, visiting)
+            if operand_t.is_none():
+                return None
+            val inner_name = _surface_const_type_simple_name(operand_t.unwrap())
+            match un_op:
+                case UnaryOp.Neg:
+                    if inner_name == "i64" or inner_name == "f64": operand_t else: None
+                case UnaryOp.BitNot:
+                    if inner_name == "i64": operand_t else: None
+                case _: None
+        case ExprKind.Binary(op, left, right):
+            val bin_op: BinOp = op
+            val bin_left: Expr = left
+            val bin_right: Expr = right
+            val left_opt = _surface_infer_const_type(bin_left, span, module_local, visiting)
+            val right_opt = _surface_infer_const_type(bin_right, span, module_local, visiting)
+            if left_opt.is_none() or right_opt.is_none():
+                return None
+            val lt = left_opt.unwrap()
+            val rt = right_opt.unwrap()
+            val folds_int = match bin_op:
+                case BinOp.Add | BinOp.Sub | BinOp.Mul | BinOp.Div | BinOp.Mod: true
+                case BinOp.Shl | BinOp.Shr | BinOp.BitAnd | BinOp.BitOr | BinOp.BitXor: true
+                case _: false
+            if folds_int and _surface_const_type_simple_name(lt) == "i64" and _surface_const_type_simple_name(rt) == "i64":
+                return Some(_surface_const_named_type("i64", span))
+            match bin_op:
+                case BinOp.Add:
+                    match lt.kind:
+                        case TypeKind.Array(_, _):
+                            if module_surface_parser_types_equal(lt, rt): return Some(lt)
+                        case _: ()
+                case _: ()
+            None
+        case ExprKind.ArrayLit(elements):
+            val array_elems: [Expr] = elements
+            if array_elems.len() == 0:
+                return None
+            val first_opt = _surface_infer_const_type(array_elems[0], span, module_local, visiting)
+            if first_opt.is_none():
+                return None
+            val first_t = first_opt.unwrap()
+            var idx = 1
+            while idx < array_elems.len():
+                val elem_opt = _surface_infer_const_type(array_elems[idx], span, module_local, visiting)
+                if elem_opt.is_none() or not module_surface_parser_types_equal(first_t, elem_opt.unwrap()):
+                    return None
+                idx = idx + 1
+            Some(Type(kind: TypeKind.Array(first_t, None), span: span))
+        case ExprKind.ArrayRepeat(elem, _):
+            val rep_elem: Expr = elem
+            if val elem_t = _surface_infer_const_type(rep_elem, span, module_local, visiting):
+                return Some(Type(kind: TypeKind.Array(elem_t, None), span: span))
+            None
+        case ExprKind.TupleLit(elements):
+            val tuple_elems: [Expr] = elements
+            if tuple_elems.len() == 0:
+                return None
+            var elem_types: [Type] = []
+            var idx = 0
+            while idx < tuple_elems.len():
+                val elem_opt = _surface_infer_const_type(tuple_elems[idx], span, module_local, visiting)
+                if elem_opt.is_none():
+                    return None
+                elem_types = elem_types.push(elem_opt.unwrap())
+                idx = idx + 1
+            Some(Type(kind: TypeKind.Tuple(elem_types), span: span))
+        case ExprKind.DictLit(pairs):
+            val dict_pairs: [(Expr, Expr)] = pairs
+            if dict_pairs.len() == 0:
+                return None
+            val first_k = _surface_infer_const_type(dict_pairs[0].0, span, module_local, visiting)
+            val first_v = _surface_infer_const_type(dict_pairs[0].1, span, module_local, visiting)
+            if first_k.is_none() or first_v.is_none():
+                return None
+            val kt = first_k.unwrap()
+            val vt = first_v.unwrap()
+            var idx = 1
+            while idx < dict_pairs.len():
+                val k_opt = _surface_infer_const_type(dict_pairs[idx].0, span, module_local, visiting)
+                val v_opt = _surface_infer_const_type(dict_pairs[idx].1, span, module_local, visiting)
+                if k_opt.is_none() or v_opt.is_none():
+                    return None
+                if not module_surface_parser_types_equal(kt, k_opt.unwrap()) or not module_surface_parser_types_equal(vt, v_opt.unwrap()):
+                    return None
+                idx = idx + 1
+            Some(Type(kind: TypeKind.Named("Dict", [kt, vt]), span: span))
+        case ExprKind.StructLit(name, _):
+            if _surface_const_nongeneric_record(name, module_local):
+                return Some(_surface_const_named_type(name, span))
+            None
+        case ExprKind.Call(callee, _):
+            if expr.explicit_call_types.len() > 0:
+                return None
+            val call_callee: Expr = callee
+            match call_callee.kind:
+                case ExprKind.Ident(name):
+                    if _surface_const_nongeneric_record(name, module_local):
+                        return Some(_surface_const_named_type(name, span))
+                    if module_local.functions.contains_key(name):
+                        val fn_: ParserFunction = module_local.functions[name]
+                        if fn_.type_params.len() == 0 and fn_.has_return_type and _surface_parser_type_settled(fn_.return_type):
+                            return Some(fn_.return_type)
+                    None
+                case _: None
+        case ExprKind.Ident(name):
+            _surface_const_local_decl_type(name, span, module_local, visiting)
+        case _: None
+
+fn _surface_const_leaf_ref(expr: Expr, span: Span, module_local: ParserModule, visiting: [text]) -> (bool, Type?, text):
+    if val settled = _surface_infer_const_type(expr, span, module_local, visiting):
+        return (true, Some(settled), "")
+    match expr.kind:
+        case ExprKind.Ident(name):
+            if module_local.constants.contains_key(name):
+                if visiting.contains(name):
+                    return (false, None, "")
+                val local_const: ParserConst = module_local.constants[name]
+                if local_const.has_type_:
+                    if _surface_parser_type_settled(local_const.type_):
+                        return (true, Some(local_const.type_), "")
+                    return (false, None, "")
+                var next_visiting = visiting
+                next_visiting.push(name)
+                return _surface_const_leaf_ref(local_const.value, span, module_local, next_visiting)
+            (true, None, name)
+        case _: (false, None, "")
+
+fn _surface_infer_const_ref_chain(expr: Expr, span: Span, module_local: ParserModule, visiting: [text], depth: i64) -> (bool, Type?, [text], i64):
+    if depth > 8:
+        return (false, None, [], 0)
+    match expr.kind:
+        case ExprKind.Ident(name):
+            val leaf = _surface_const_leaf_ref(expr, span, module_local, visiting)
+            if leaf.0 and leaf.2 != "":
+                return (true, None, [leaf.2], depth)
+            if module_local.constants.contains_key(name) and not visiting.contains(name):
+                val local_const: ParserConst = module_local.constants[name]
+                if not local_const.has_type_:
+                    var next_visiting = visiting
+                    next_visiting.push(name)
+                    return _surface_infer_const_ref_chain(local_const.value, span, module_local, next_visiting, depth)
+            (false, None, [], 0)
+        case ExprKind.ArrayLit(elements):
+            val array_elems: [Expr] = elements
+            if array_elems.len() == 0:
+                return (false, None, [], 0)
+            if depth == 0:
+                var known_elem: Type? = None
+                var refs: [text] = []
+                var idx = 0
+                while idx < array_elems.len():
+                    val leaf = _surface_const_leaf_ref(array_elems[idx], span, module_local, visiting)
+                    if not leaf.0:
+                        known_elem = None
+                        refs = []
+                        break
+                    if val t = leaf.1:
+                        if val kt = known_elem:
+                            if not module_surface_parser_types_equal(kt, t):
+                                return (false, None, [], 0)
+                        else:
+                            known_elem = Some(t)
+                    elif leaf.2 != "":
+                        if not refs.contains(leaf.2):
+                            refs = refs.push(leaf.2)
+                    idx = idx + 1
+                if refs.len() > 0:
+                    return (true, known_elem, refs, 1)
+            val first_ref = _surface_infer_const_ref_chain(array_elems[0], span, module_local, visiting, depth + 1)
+            if not first_ref.0 or first_ref.1.is_some() or first_ref.2.len() != 1:
+                return (false, None, [], 0)
+            val want_ref = first_ref.2[0]
+            var idx = 1
+            while idx < array_elems.len():
+                val elem_ref = _surface_infer_const_ref_chain(array_elems[idx], span, module_local, visiting, depth + 1)
+                if not elem_ref.0 or elem_ref.1.is_some() or elem_ref.2.len() != 1 or elem_ref.2[0] != want_ref or elem_ref.3 != first_ref.3:
+                    return (false, None, [], 0)
+                idx = idx + 1
+            first_ref
+        case ExprKind.ArrayRepeat(elem, _):
+            val rep_elem: Expr = elem
+            _surface_infer_const_ref_chain(rep_elem, span, module_local, visiting, depth + 1)
+        case _: (false, None, [], 0)
 
 fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
@@ -481,6 +740,23 @@ pub fn module_surface_from_owner(
     var constants: Dict<text, ModuleSurfaceConst> = {}
     for name in module_local.constants.keys():
         val constant: ParserConst = module_local.constants[name]
+        var has_inferred = false
+        var inferred_type = constant.type_
+        var inferred_has_elem_hint = false
+        var inferred_ref_names: [text] = []
+        var inferred_array_depth = 0
+        if not constant.has_type_:
+            if val settled = _surface_infer_const_type(constant.value, constant.span, module_local, [name]):
+                has_inferred = true
+                inferred_type = settled
+            else:
+                val ref_chain = _surface_infer_const_ref_chain(constant.value, constant.span, module_local, [name], 0)
+                if ref_chain.0:
+                    if val hint_t = ref_chain.1:
+                        inferred_has_elem_hint = true
+                        inferred_type = hint_t
+                    inferred_ref_names = ref_chain.2
+                    inferred_array_depth = ref_chain.3
         constants[name] = ModuleSurfaceConst(
             name: constant.name,
             has_type_: constant.has_type_,
@@ -491,7 +767,12 @@ pub fn module_surface_from_owner(
             is_volatile: constant.is_volatile,
             has_fixed_address: constant.has_fixed_address,
             fixed_address: constant.fixed_address,
-            span: constant.span
+            span: constant.span,
+            has_inferred_type_: has_inferred,
+            inferred_type_: inferred_type,
+            inferred_has_elem_hint: inferred_has_elem_hint,
+            inferred_ref_names: inferred_ref_names,
+            inferred_array_depth: inferred_array_depth
         )
 
     # Keep the class payload caller-owned. Native generic Result payload

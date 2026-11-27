@@ -60,6 +60,48 @@ fn native_test_artifact_path_v1(temp_dir: text, spec: text, backend: text, produ
     val roots_digest = sha256_text(native_test_source_identity_v1(roots, library_mode))[0:16]
     temp_dir + "/native-" + sha256_text(spec)[0:16] + "-" + backend + "-" + producer[0:16] + "-" + roots_digest + "-{start}.exe"
 
+# Shared native artifact cache (bug sffi_manifest_signature_native_test_compile_cost_2026-08-21).
+# The per-invocation artifact paths above embed PID/start time and are deleted
+# after each run, so a focused native spec -- e.g. the executable manifest
+# signature verifier, whose closure carries Ed25519 + SHA-256 + the manifest
+# codec -- recompiled its whole closure on EVERY admission. The slots below are
+# content-addressed over every byte-relevant input (spec path + authored source
+# digest + producer digest + backend + source roots + library mode + runtime
+# path + SIMPLE_LIB), so an unchanged closure reuses the previously compiled
+# executable instead of recompiling it.
+val NATIVE_SHARED_ARTIFACT_MIN_BYTES: i64 = 4096
+val NATIVE_SHARED_ARTIFACT_READY_SUFFIX: text = ".ready"
+val NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX: text = ".mcdc"
+
+fn native_test_shared_artifact_key_v1(spec: text, source_digest: text, backend: text,
+        producer: text, roots: [text], library_mode: text = "",
+        runtime_path: text = "", lib_env: text = "") -> text:
+    """Content address of one compiled native test closure. Pure and stable:
+    no time, PID, or nonce component, so equal inputs name one shared slot."""
+    sha256_text(
+        "native-shared-artifact-v1\n" +
+        spec.len().to_text() + ":" + spec + "\n" +
+        source_digest + "\n" +
+        backend + "\n" +
+        producer + "\n" +
+        native_test_source_identity_v1(roots, library_mode) + "\n" +
+        runtime_path + "\n" +
+        lib_env + "\n")
+
+fn native_test_shared_artifact_path_v1(temp_dir: text, spec: text, source_digest: text,
+        backend: text, producer: text, roots: [text], library_mode: text = "",
+        runtime_path: text = "", lib_env: text = "") -> text:
+    """Stable shared-cache slot for a compiled native test executable.
+
+    The slot is reused across admissions while the key inputs are unchanged.
+    It stays a single path component under temp_dir, keeps the native- prefix
+    and the .exe suffix, so the existing private-cache cleanup contract and
+    its no-subdir leaf check keep applying to it."""
+    val key = native_test_shared_artifact_key_v1(
+        spec, source_digest, backend, producer, roots, library_mode,
+        runtime_path, lib_env)
+    temp_dir + "/native-shared-" + key + ".exe"
+
 fn native_test_temporary_artifact_path(temp_dir: text, spec: text, process_id: i64,
         started: i64, coverage: bool, mcdc: bool, invocation_identity: text) -> text:
     """Bound the SMF/coverage artifact component while retaining exact source identity.
@@ -141,3 +183,5 @@ export native_test_library_mode_error, native_test_library_lanes_error
 export native_test_library_resume_error
 export native_test_source_identity_v1, native_test_artifact_path_v1
 export native_test_temporary_artifact_path
+export native_test_shared_artifact_key_v1, native_test_shared_artifact_path_v1
+export NATIVE_SHARED_ARTIFACT_MIN_BYTES, NATIVE_SHARED_ARTIFACT_READY_SUFFIX, NATIVE_SHARED_ARTIFACT_MCDC_SUFFIX

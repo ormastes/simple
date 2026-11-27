@@ -904,3 +904,48 @@ plain parameters still accept the same value silently. Red/green in about 30 s o
   a transient scratch scope cannot be promoted and dangles
   (`test/fixtures/native_transient_scope_raw_text_escape/`); see
   `doc/08_tracking/bug/stage3_selfbuild_raw_text_strict_extern_2026-11-18.md`.
+
+## 2026-11-27 — Rust seed: typed `f64?` locals are an inline (tag, bits) pair
+
+`src/compiler_rust/compiler/src/mir/float_option_inline.rs` runs at the
+`lower_module` choke point (next to `apply_string_accumulation_to_module`), so
+JIT, native archive and LLVM share it. Each declared `f64?` / `Option<f64>`
+local loses its one-word slot and gets two hidden locals, `<name>$tag: i64`
+(`0` nil, `4` None enum, `1` Some raw-bits enum, `2` flat float, `3` Some over a
+boxed float; presence = `tag & 3`) and `<name>$bits: f64`.
+
+- Default boxed, allowlist inline: a read stays a pair only for `rt_is_some`,
+  `rt_is_none`, `rt_option_float_bits`, `rt_unwrap_or_self` + raw self-cast and
+  a store into another pair local. Any other consumer gets the one-word form
+  from `rt_option_float_pack`. Adding a typed reader means adding it to that
+  allowlist, not teaching a consumer about raw bits.
+- A local with an escaping read also has `<name>$word`, its one-word form,
+  written AT EVERY STORE: the `Some` / flat float / nil the one-word slot
+  stored, or the very word that came in. Two traps this closes. (1) Packing at
+  each escaping read boxed again per read (a loop-invariant local passed to a
+  call 2e7 times grew 843 MB where the one-word slot grew 0). (2) Packing
+  lazily at the FIRST escaping read tied the box to the transient scope open
+  at that read: assigned outside a scope, read inside one, read again after
+  `rt_transient_array_scope_end` returned a freed pointer (1081.0 for 1.25).
+  A copy into such a local makes the source read an escaping read, so the word
+  is copied, not rebuilt.
+- `c.unwrap_or(d)` on an `f64?` local with a literal or local `d` is lowered
+  in HIR (`lower_builtin_method_call`) as the typed coalesce; other receivers
+  still reach the lossy dynamic `rt_unwrap_or_value`.
+- The lowering marks a typed `Some(<f64>)` payload with an F64 self-cast
+  (`mark_typed_f64_option_payload`); the pass keys on that, never on a guess
+  about a vreg's type.
+- Traps: a local captured by a lambda must keep the one-word slot (the
+  outliner binds captures through the parent `LocalAddr` + `Load` of the SAME
+  local index); functions with implicit local slots, redefinitions, `EndScope`
+  on the local, futures/actors/generators/`Yield`/`Await` are skipped.
+- No ABI change: params, returns, struct fields, `[f64?]` elements and
+  closure captures are still the one-word form. `f32?` is untouched.
+- Kill switch `SIMPLE_NO_F64_OPTION_INLINE=1` (covers the pass, the typed
+  `Some` marker cast and the HIR `unwrap_or` rewrite). Measured on aarch64: a 4e7
+  `Some` + `??` + `.unwrap()` loop 2043 MB / 11.5 s -> 214 MB / 0.87 s; compile
+  of a 3000-function all-`f64?` file +4.7% time, +14% peak RSS; a float loop
+  with no option 4.68 s -> 4.70 s.
+- Tests: `mir::float_option_inline::tests`,
+  `native_inline_f64_option_carriers_and_readers_are_exact_against_c_runtime`,
+  `test/01_unit/language/f64_option_inline_layout_spec.spl`.

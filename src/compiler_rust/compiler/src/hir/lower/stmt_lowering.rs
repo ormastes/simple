@@ -820,6 +820,9 @@ impl Lowerer {
                 };
                 ctx.bind_local_unit_facts(&name, unit_kind, type_name, lambda_sig);
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability);
+                if let_stmt.ty.is_none() && pattern_type.is_none() {
+                    self.bind_uninferred_local(local_index, value.as_ref(), ctx);
+                }
                 ctx.locals[local_index].trait_dispatch_owner = trait_dispatch_owner;
                 if let Some(HirExprKind::Lambda { params, body, .. }) = value.as_ref().map(|v| &v.kind) {
                     let fn_ty = self.module.types.register(HirType::Function {
@@ -834,6 +837,31 @@ impl Lowerer {
                 }
                 if is_untyped_empty_array_binding {
                     self.untyped_empty_array_locals.insert(local_index);
+                }
+
+                // An explicitly annotated numeric binding whose initializer
+                // lowers to a DIFFERENT numeric type used to reach the backend
+                // as a bare store of the initializer's value: the JIT slot then
+                // read back 0 (`val m: i64 = 7.9` printed 0, and the
+                // renderer's `var ix0: i64 = min_x` rasterized with a zeroed
+                // origin), while the interpreter coerced at the binding. Reuse
+                // the explicit `as` cast so both engines honour the annotation
+                // identically: truncate toward zero and narrow to the declared
+                // width, exactly like `x as T` in both engines.
+                // Bug: engine_specs_spec_runner_interpreter_divergence_2026-09-16 (shape 4).
+                if has_explicit_type
+                    && value
+                        .as_ref()
+                        .is_some_and(|v| v.ty != ty && Self::is_numeric_type_id(v.ty) && Self::is_numeric_type_id(ty))
+                {
+                    let init = value.take().expect("checked above");
+                    value = Some(HirExpr {
+                        kind: HirExprKind::Cast {
+                            expr: Box::new(init),
+                            target: ty,
+                        },
+                        ty,
+                    });
                 }
 
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
@@ -2079,6 +2107,7 @@ impl Lowerer {
     ) -> LowerResult<Vec<HirStmt>> {
         // Lower the subject expression once
         let subject_hir = self.lower_subject_for_patterns(&match_stmt.subject, match_stmt.arms.iter().map(|a| &a.pattern), false, ctx)?;
+        self.reject_uninferred(&subject_hir, "a match subject", ctx)?;
         let subject_ty = subject_hir.ty;
 
         // Create a temporary local to hold the subject value

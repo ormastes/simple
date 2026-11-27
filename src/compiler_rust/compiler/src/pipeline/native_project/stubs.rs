@@ -133,6 +133,8 @@ fn is_unstubbable_core_runtime_symbol(sym: &str) -> bool {
             | "rt_enum_discriminant"
             | "rt_enum_payload"
             | "rt_option_float_bits"
+            | "rt_option_float_pack"
+            | "rt_option_float_tag"
     )
 }
 

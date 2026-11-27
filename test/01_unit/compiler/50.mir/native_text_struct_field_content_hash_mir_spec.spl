@@ -1,0 +1,119 @@
+# @req REQ-SSPEC-COMPILER
+# @tag: unit, compiler, mir, regression
+"""
+MIR regression for `native_text_struct_field_reads_garbage_int_content_hash_2026-09-07`:
+a `text` struct field (`FileFingerprint.content_hash`) printed as a garbage
+decimal integer under native codegen. Every native lane was re-verified correct
+on the fresh HEAD seed (see the bug record's addenda); this spec pins the
+pure-Simple MIR properties that keep the symptom fixed for the exact
+FileFingerprint content-hash shape:
+
+1. `if val fp = <FileFingerprint?>` unwrap followed by `fp.content_hash`
+   lowers to GetField index 1 whose destination local keeps the text
+   representation `Opaque("str")` — the typing whose loss routed the field
+   through raw-i64 rendering in the symptom family
+   (native_struct_text_field_interp_misrender_2026-07-23).
+2. The named-field constructor lowers to a 4-field Aggregate (declaration
+   order), so the write side stores the hash text at slot 1.
+3. No HIR/MIR lowering errors for the whole shape.
+"""
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.common.config.{Logger}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val CONTENT_HASH_SHAPE = "extern fn rt_file_hash_sha256(path: text) -> text?\n" +
+    "extern fn rt_file_size(path: text) -> i64?\n" +
+    "struct FileFingerprint:\n" +
+    "    path: text\n" +
+    "    content_hash: text\n" +
+    "    modified_time: i64\n" +
+    "    size: i64\n" +
+    "fn from_file(path: text) -> FileFingerprint?:\n" +
+    "    if val hash = rt_file_hash_sha256(path):\n" +
+    "        val sz = rt_file_size(path) ?? -1\n" +
+    "        Some(FileFingerprint(path: path, content_hash: hash, modified_time: 0, size: sz))\n" +
+    "    else:\n" +
+    "        None\n" +
+    "fn takes_text(t: text) -> text:\n" +
+    "    \"GOT:\" + t\n" +
+    "fn main():\n" +
+    "    val object_fp = from_file(\"x\")\n" +
+    "    if val fp = object_fp:\n" +
+    "        print(fp.path)\n" +
+    "        print(fp.size)\n" +
+    "        print(fp.content_hash)\n" +
+    "        print(takes_text(fp.content_hash))\n"
+
+fn _local_is_opaque_str(func: MirFunction, id: LocalId) -> bool:
+    for local in func.locals:
+        if local.id == id:
+            match local.type_.kind:
+                case MirTypeKind.Opaque(name):
+                    return name == "str"
+                case _: ()
+    false
+
+fn _field_read_report(source: text, target_fn: text) -> ([i64], [i64], i64):
+    """(text-typed GetField indices, all GetField indices, error count)."""
+    val ast = parse_full_frontend(source, "content_hash_shape.spl", "content_hash_shape", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("content_hash_shape.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var text_fields: [i64] = []
+    var all_fields: [i64] = []
+    for func in mir.functions.values():
+        if func.name == target_fn or func.name.ends_with("::" + target_fn) or func.name.ends_with("." + target_fn):
+            for blk in func.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.GetField(dest, _, idx):
+                            all_fields.push(idx)
+                            if _local_is_opaque_str(func, dest):
+                                text_fields.push(idx)
+                        case _: ()
+    (text_fields, all_fields, hir_lowering.errors.len() + mir_lowering.errors.len())
+
+fn _aggregate_arity_report(source: text, target_fn: text) -> ([i64], i64):
+    val ast = parse_full_frontend(source, "content_hash_shape.spl", "content_hash_shape", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("content_hash_shape.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var arities: [i64] = []
+    for func in mir.functions.values():
+        if func.name == target_fn or func.name.ends_with("::" + target_fn) or func.name.ends_with("." + target_fn):
+            for blk in func.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.Aggregate(_, _, ops):
+                            arities.push(ops.len())
+                        case _: ()
+    (arities, hir_lowering.errors.len() + mir_lowering.errors.len())
+
+describe "MIR text-struct-field regression (native_text_struct_field_reads_garbage_int_content_hash_2026-09-07)":
+    it "lowers the FileFingerprint content-hash shape without errors":
+        val (_t, _a, errs) = _field_read_report(CONTENT_HASH_SHAPE, "main")
+        expect(errs).to_equal(0)
+
+    it "reads content_hash at field 1 with the text representation in main":
+        val (text_fields, all_fields, errs) = _field_read_report(CONTENT_HASH_SHAPE, "main")
+        expect(errs).to_equal(0)
+        expect(all_fields.contains(1)).to_equal(true)
+        expect(text_fields.contains(1)).to_equal(true)
+        expect(text_fields.contains(0)).to_equal(true)
+
+    it "reads size at field 3 in main":
+        val (_text_fields, all_fields, errs) = _field_read_report(CONTENT_HASH_SHAPE, "main")
+        expect(errs).to_equal(0)
+        expect(all_fields.contains(3)).to_equal(true)
+
+    it "builds the named-field constructor as a 4-field aggregate in from_file":
+        val (arities, errs) = _aggregate_arity_report(CONTENT_HASH_SHAPE, "from_file")
+        expect(errs).to_equal(0)
+        expect(arities.contains(4)).to_equal(true)

@@ -2,7 +2,8 @@ use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface
 # Frozen registry indexes and import/export route projections.
 use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1, library_mode_import_key_v1}
 
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, module_surface_allocate_generation, module_surface_export_origin_index_position, module_surface_declaration_authority_lookup_typed_v1, module_surface_authority_category_v1}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfacesByName, ModuleSurfaceConst, module_surface_allocate_generation, module_surface_export_origin_index_position, module_surface_declaration_authority_lookup_typed_v1, module_surface_authority_category_v1, module_surface_name_position, module_surface_parser_types_equal}
+use compiler.frontend.parser_types_expr.{Type, TypeKind, parser_type_named_dependencies}
 use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_logical_name_from_path, module_surface_fold_std_alias, module_surface_package_name_from_name}
 use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_hex_limb, module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
 use compiler.common.cache.native_resolution_trace.{NativeResolutionProbeV1, NativeResolutionTraceV1}
@@ -1224,6 +1225,8 @@ pub(package) fn module_surfaces_freeze(
         registry.surfaces[surface_index] = surface
         surface_index = surface_index + 1
 
+    _msri_propagate_inferred_const_types(registry)
+
     surface_index = 0
     while surface_index < registry.surfaces.len():
         if not module_surface_route_arrays_aligned(registry.surfaces[surface_index]):
@@ -1284,4 +1287,172 @@ pub(package) fn module_surfaces_freeze(
     registry.generation = generation
     registry.frozen = true
     Ok(registry)
+
+fn _msri_is_builtin_surface_dep(name: text) -> bool:
+    (name == "text" or name == "str" or name == "i8" or name == "i16" or
+     name == "i32" or name == "i64" or name == "u8" or name == "u16" or
+     name == "u32" or name == "u64" or name == "f32" or name == "f64" or
+     name == "bool" or name == "char" or name == "void" or name == "nil" or
+     name == "Dict" or name == "Array" or name == "Result" or name == "Option")
+
+fn _msri_surface_declares_type_name(surface: ModuleSurface, name: text) -> bool:
+    (module_surface_name_position(surface.composite_names, name) >= 0 or
+     module_surface_name_position(surface.enum_names, name) >= 0 or
+     module_surface_name_position(surface.trait_names, name) >= 0 or
+     module_surface_name_position(surface.type_alias_names, name) >= 0)
+
+fn _msri_surface_can_name_type(registry: ModuleSurfacesByName, surface: ModuleSurface, name: text) -> bool:
+    if _msri_is_builtin_surface_dep(name) or _msri_surface_declares_type_name(surface, name):
+        return true
+    var imp_idx = 0
+    while imp_idx < surface.imports.len() and imp_idx + 1 < surface.import_item_offsets.len():
+        val item_start = surface.import_item_offsets[imp_idx]
+        val item_end = surface.import_item_offsets[imp_idx + 1]
+        var item = item_start
+        while item < item_end:
+            val local_nm = if surface.import_item_has_alias[item]: surface.import_item_aliases[item] else: surface.import_item_names[item]
+            if local_nm == name:
+                return true
+            item = item + 1
+        if item_start == item_end and imp_idx < surface.import_target_indices.len():
+            val target_idx = surface.import_target_indices[imp_idx]
+            if target_idx >= 0 and target_idx < registry.surfaces.len():
+                if _msri_surface_declares_type_name(registry.surfaces[target_idx], name):
+                    return true
+        imp_idx = imp_idx + 1
+    false
+
+fn _msri_surface_can_name_all_deps(registry: ModuleSurfacesByName, surface: ModuleSurface, type_: Type) -> bool:
+    for dep in parser_type_named_dependencies(type_):
+        if not _msri_surface_can_name_type(registry, surface, dep):
+            return false
+    true
+
+fn _msri_resolve_const_export_route(registry: ModuleSurfacesByName, surface_idx: i64, name: text, depth: i64) -> (i64, text):
+    if depth > 8 or surface_idx < 0 or surface_idx >= registry.surfaces.len():
+        return (-1, "")
+    val surf = registry.surfaces[surface_idx]
+    if module_surface_name_position(surf.constant_names, name) >= 0:
+        return (surface_idx, name)
+    var r_idx = 0
+    while r_idx < surf.export_route_locals.len():
+        if not surf.export_route_is_glob[r_idx] and surf.export_route_locals[r_idx] == name:
+            val tgt_idx = if r_idx < surf.export_route_target_indices.len(): surf.export_route_target_indices[r_idx] else: -1
+            if tgt_idx >= 0 and tgt_idx != surface_idx:
+                val resolved = _msri_resolve_const_export_route(registry, tgt_idx, surf.export_route_sources[r_idx], depth + 1)
+                if resolved.0 >= 0:
+                    return resolved
+        elif surf.export_route_is_glob[r_idx]:
+            val tgt_idx = if r_idx < surf.export_route_target_indices.len(): surf.export_route_target_indices[r_idx] else: -1
+            if tgt_idx >= 0 and tgt_idx != surface_idx:
+                val resolved = _msri_resolve_const_export_route(registry, tgt_idx, name, depth + 1)
+                if resolved.0 >= 0:
+                    return resolved
+        r_idx = r_idx + 1
+    (-1, "")
+
+fn _msri_resolve_imported_const_owner(registry: ModuleSurfacesByName, surface: ModuleSurface, local_name: text) -> (i64, text):
+    var imp_idx = 0
+    while imp_idx < surface.imports.len() and imp_idx + 1 < surface.import_item_offsets.len():
+        val item_start = surface.import_item_offsets[imp_idx]
+        val item_end = surface.import_item_offsets[imp_idx + 1]
+        val tgt_idx = if imp_idx < surface.import_target_indices.len(): surface.import_target_indices[imp_idx] else: -1
+        if tgt_idx >= 0:
+            var item = item_start
+            while item < item_end:
+                val imp_name = surface.import_item_names[item]
+                val imp_local = if surface.import_item_has_alias[item]: surface.import_item_aliases[item] else: imp_name
+                if imp_local == local_name:
+                    val found = _msri_resolve_const_export_route(registry, tgt_idx, imp_name, 0)
+                    if found.0 >= 0:
+                        return found
+                item = item + 1
+        imp_idx = imp_idx + 1
+    imp_idx = 0
+    while imp_idx < surface.imports.len() and imp_idx + 1 < surface.import_item_offsets.len():
+        val item_start = surface.import_item_offsets[imp_idx]
+        val item_end = surface.import_item_offsets[imp_idx + 1]
+        val tgt_idx = if imp_idx < surface.import_target_indices.len(): surface.import_target_indices[imp_idx] else: -1
+        if item_start == item_end and tgt_idx >= 0:
+            val found = _msri_resolve_const_export_route(registry, tgt_idx, local_name, 0)
+            if found.0 >= 0:
+                return found
+        imp_idx = imp_idx + 1
+    (-1, "")
+
+fn _msri_resolve_const_refs_type(registry: ModuleSurfacesByName, surf: ModuleSurface, c: ModuleSurfaceConst) -> Type?:
+    var common: Type? = if c.inferred_has_elem_hint: Some(c.inferred_type_) else: None
+    var idx = 0
+    while idx < c.inferred_ref_names.len():
+        val owner = _msri_resolve_imported_const_owner(registry, surf, c.inferred_ref_names[idx])
+        if owner.0 < 0 or owner.0 >= registry.surfaces.len():
+            return None
+        val owner_surf = registry.surfaces[owner.0]
+        val owner_c_pos = module_surface_name_position(owner_surf.constant_names, owner.1)
+        if owner_c_pos < 0 or owner_c_pos >= owner_surf.constant_values.len():
+            return None
+        val owner_c = owner_surf.constant_values[owner_c_pos]
+        var ref_opt: Type? = None
+        if owner_c.has_type_:
+            ref_opt = Some(owner_c.type_)
+        elif owner_c.has_inferred_type_:
+            ref_opt = Some(owner_c.inferred_type_)
+        if ref_opt.is_none():
+            return None
+        val ref_t = ref_opt.unwrap()
+        if val expected = common:
+            if not module_surface_parser_types_equal(expected, ref_t):
+                return None
+        else:
+            common = Some(ref_t)
+        idx = idx + 1
+    common
+
+fn _msri_propagate_inferred_const_types(registry: ModuleSurfacesByName):
+    """Propagate inferred types across imported unannotated ModuleSurfaceConst chains."""
+    var has_pending = false
+    var s_idx = 0
+    while s_idx < registry.surfaces.len() and not has_pending:
+        val surf = registry.surfaces[s_idx]
+        var c_idx = 0
+        while c_idx < surf.constant_values.len():
+            val c = surf.constant_values[c_idx]
+            if not c.has_type_ and not c.has_inferred_type_ and c.inferred_ref_names.len() > 0:
+                has_pending = true
+                break
+            c_idx = c_idx + 1
+        s_idx = s_idx + 1
+    if not has_pending:
+        return
+    var pass_idx = 0
+    var changed = true
+    while changed and pass_idx < 16:
+        changed = false
+        s_idx = 0
+        while s_idx < registry.surfaces.len():
+            var surf = registry.surfaces[s_idx]
+            var surf_dirty = false
+            var c_idx = 0
+            while c_idx < surf.constant_values.len():
+                var c = surf.constant_values[c_idx]
+                if not c.has_type_ and not c.has_inferred_type_ and c.inferred_ref_names.len() > 0:
+                    if val resolved = _msri_resolve_const_refs_type(registry, surf, c):
+                        if _msri_surface_can_name_all_deps(registry, surf, resolved):
+                            var wrapped = resolved
+                            var d = 0
+                            while d < c.inferred_array_depth:
+                                wrapped = Type(kind: TypeKind.Array(wrapped, None), span: c.span)
+                                d = d + 1
+                            c.has_inferred_type_ = true
+                            c.inferred_type_ = wrapped
+                            surf.constant_values[c_idx] = c
+                            if surf.constants.contains_key(c.name):
+                                surf.constants[c.name] = c
+                            surf_dirty = true
+                            changed = true
+                c_idx = c_idx + 1
+            if surf_dirty:
+                registry.surfaces[s_idx] = surf
+            s_idx = s_idx + 1
+        pass_idx = pass_idx + 1
 use compiler.hir.hir_lowering.module_surface_manifest_evidence_v1.{module_surface_manifest_digest_v1}
