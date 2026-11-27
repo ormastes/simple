@@ -332,7 +332,52 @@ fn option_wrapped_arrays_do_not_defer_when_not_weak_or_not_collections() {
         );
         let module = parse_and_lower(&source).unwrap();
         let r_ty = local_type(&module, "r");
+        if matches!(r_ty, HirType::Any) {
+            continue; // untyped Some(..) stays erased: nothing adopted from the sibling
+        }
         let HirType::Array { element, .. } = option_payload(&module, r_ty) else { panic!("{expression}: payload is not an array") };
         assert_ne!(*element, TypeId::F64, "{expression}: must not adopt the sibling element type");
     }
+}
+
+fn assert_not_i32_array_option(module: &crate::hir::HirModule, ty: &HirType, what: &str) {
+    if let HirType::Enum { name, .. } = ty {
+        if name == "Option" {
+            let HirType::Array { element, .. } = option_payload(module, ty) else { return };
+            assert_ne!(*element, TypeId::I32, "{what}: bare `Some([])` must not become authoritative Option<[i32]>");
+        }
+    }
+    if let HirType::Array { element, .. } = ty {
+        assert_ne!(*element, TypeId::I32, "{what}: payload must not be the i32 default");
+    }
+}
+
+#[test]
+fn some_empty_array_stays_weak_when_later_replaced_or_filled() {
+    // a02: `var o = Some([]); o = Some([1.5, 2.5])`, a18: fill through the bound payload,
+    // c04: `if c: Some([]) else: None` then push.
+    for (source, local) in [
+        ("fn probe() -> f64:\n    var o = Some([])\n    o = Some([1.5, 2.5])\n    match o:\n        case Some(v): v[0] + 0.25\n        case None: 0.0\n", "o"),
+        ("fn probe() -> f64:\n    var o = Some([])\n    match o:\n        case Some(v):\n            var w = v\n            w.push(2.5)\n            w[0]\n        case None: 0.0\n", "o"),
+        ("fn probe() -> f64:\n    var o = Some([])\n    match o:\n        case Some(v):\n            var w = v\n            w.push(2.5)\n            w[0]\n        case None: 0.0\n", "v"),
+        ("fn probe(c: bool) -> f64:\n    val r = if c: Some([]) else: None\n    match r:\n        case Some(v):\n            var w = v\n            w.push(1.5)\n            w[0]\n        case None: 0.0\n", "r"),
+    ] {
+        let module = parse_and_lower(source).unwrap();
+        let ty = local_type(&module, local);
+        assert_not_i32_array_option(&module, ty, local);
+    }
+}
+
+#[test]
+fn option_wrapped_empty_dict_defers_and_option_never_adopts_result() {
+    let source = "fn probe(c: bool, base: Dict<text, f64>) -> f64:\n    val r = if c: Some({}) else: Some(base)\n    match r:\n        case Some(v): v[\"k\"]\n        case None: 0.0\n";
+    let module = parse_and_lower(source).unwrap();
+    let ty = local_type(&module, "r");
+    let payload = option_payload(&module, ty);
+    assert!(matches!(payload, HirType::Dict { .. }), "dict join must follow the concrete sibling: {payload:?}");
+
+    let source = "fn probe(c: bool, xs: [f64]) -> i64:\n    val r = if c: Some([]) else: Ok(xs)\n    0\n";
+    let module = parse_and_lower(source).unwrap();
+    let ty = local_type(&module, "r");
+    assert!(!matches!(ty, HirType::Enum { name, .. } if name == "Result"), "Some([]) must not adopt a Result type: {ty:?}");
 }

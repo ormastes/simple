@@ -35,3 +35,17 @@ probe files differ. Fixed: `p_opt` o1/o2 (`0.0 0.0` -> `-2.0 1.75` / `1.75 -2.0`
 BOTH seeds (differ run to run: uninitialised/address-like reads) and stay wrong
 (sibling lanes). No probe that was correct on r changed on v. Specs on v:
 storage_view_v1 34/34, parsers_json_core 101/101, match_empty_array_bug 10/10.
+
+### (B) revision after review (c41c12ff143 blocked)
+
+The first fix typed `Some([])` as `Option<[i32;0]>` (the empty-array default became
+authoritative), so an untyped `Some([])` later replaced or filled read garbage (probes
+rvd a02/a03/a18/b02/b03/b05/c04). Revised: `Some(<weak empty literal>)` is NOT typed
+(it keeps the pre-existing erased type, exactly as before the change; `Some([x; 0])`
+still types), only `Some(<concrete array|dict>)` becomes `Option<T>`. The join treats
+the erased weak `Some([])` as weak and adopts the concrete sibling's Option type
+(`same_collection_kind` now looks through Option only, never Result).
+`hir_types_compatible` admits pointer-form `T?` vs `Option<T>` (no more "declared
+return type mismatch admitted" for `-> [T]?`). Dict sibling (a15) uses the same path.
+Tests: `some_empty_array_stays_weak_when_later_replaced_or_filled`,
+`option_wrapped_empty_dict_defers_and_option_never_adopts_result`.

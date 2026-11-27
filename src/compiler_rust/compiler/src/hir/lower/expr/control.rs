@@ -45,7 +45,7 @@ fn hir_arm_is_bottom(expr: &HirExpr) -> bool {
 /// Its default element/key type is not evidence about the join type, so a
 /// concrete sibling must win (same rule `lower_if` applies to `[]`).
 /// Bottom arms (`return`, NIL) are ignored; at least one arm must be weak.
-fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
+pub(super) fn hir_value_is_weak_empty(expr: &HirExpr) -> bool {
     weak_expr(expr) == Some(true)
 }
 
@@ -139,7 +139,7 @@ fn hir_tail_if_value_type(stmts: &[HirStmt]) -> Option<TypeId> {
 /// True when the tail value of `expr` (through do-blocks, nested if/match) is
 /// an explicit `[x; n]` repeat. That form carries real element evidence even
 /// when `n` is 0 (it lowers to an empty HIR array), so it is never "weak".
-fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
+pub(super) fn ast_expr_tail_is_array_repeat(expr: &Expr) -> bool {
     match expr {
         Expr::ArrayRepeat { .. } => true,
         // `Some([x; 0])` keeps the repeat evidence through the Option wrapper.
@@ -287,6 +287,19 @@ impl Lowerer {
         }
     }
 
+    /// Payload type of an `Option` enum (only `Option`, never `Result`).
+    pub(crate) fn option_enum_payload(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Enum { name, variants, .. }) if name == "Option" => variants
+                .iter()
+                .find(|(variant, _)| variant == "Some")
+                .and_then(|(_, payload)| payload.as_ref())
+                .and_then(|fields| fields.first())
+                .copied(),
+            _ => None,
+        }
+    }
+
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Enum { name, variants, .. }) if name == "Result" => {
@@ -315,8 +328,12 @@ impl Lowerer {
     /// Both types are arrays, or both are dicts: only then may a weak empty
     /// literal defer to its sibling (an unrelated aggregate keeps the default).
     fn same_collection_kind(&self, a: TypeId, b: TypeId) -> bool {
-        if let (Some(pa), Some(pb)) = (self.result_like_payload_type(a), self.result_like_payload_type(b)) {
-            return self.same_collection_kind(pa, pb);
+        // Option vs Option (or the ANY-typed `Some([])` vs an Option): compare payloads.
+        // Only Option enums are looked through, never Result.
+        match (self.option_enum_payload(a), self.option_enum_payload(b)) {
+            (Some(pa), Some(pb)) => return self.same_collection_kind(pa, pb),
+            (None, Some(pb)) if a == TypeId::ANY => return self.same_collection_kind(TypeId::ANY, pb),
+            _ => {}
         }
         matches!(
             (self.module.types.get(a), self.module.types.get(b)),

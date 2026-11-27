@@ -89,7 +89,9 @@ impl Lowerer {
                     };
                     let ty = match (name.as_str(), payload_ty) {
                         ("Some", Some(payload_ty))
-                            if matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. } | HirType::Array { .. } | HirType::Dict { .. })) =>
+                            if (!args_hir.first().is_some_and(super::control::hir_value_is_weak_empty)
+                                || args.first().is_some_and(|a| super::control::ast_expr_tail_is_array_repeat(&a.value)))
+                                && matches!(self.module.types.get(payload_ty), Some(HirType::Function { .. } | HirType::Struct { .. } | HirType::Array { .. } | HirType::Dict { .. })) =>
                         {
                             self.module.types.register(HirType::Enum {
                                 name: "Option".to_string(),
