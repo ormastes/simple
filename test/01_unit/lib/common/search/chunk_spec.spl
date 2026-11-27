@@ -1,0 +1,163 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+
+"""
+## Purpose and audience
+Purpose: close gap 1 of
+doc/08_tracking/bug/spipe_lacks_context_mode_chunking_and_surfaces_2026-08-31.md —
+the search document model gains addressable chunk ids (one chunk per matching
+section, as context-mode returns) and SearchHit gains a snippet field, so a
+caller reads a bounded excerpt near the match instead of the whole file.
+Audience: engineers wiring snippet-carrying, chunk-addressed results into the
+spipe knowledge provider and its surfaces.
+"""
+
+use std.spec.step
+use std.spec
+
+use lib.common.search.chunk.{ChunkBudget, SnippetBudget, chunk_document_v1, snippet_for_chunk_v1, attach_document_snippets_v1}
+use lib.common.search.document.{SearchDocument, SearchField, SearchHit, SearchSnippet}
+use lib.common.search.query.{SearchQuery}
+use lib.common.search.top_k.{TextScoredDoc, text_top_k}
+use lib.common.search.types.{Score}
+
+fn _body_doc(id: text, body: text) -> SearchDocument:
+    SearchDocument.of(id, "rev-1", [SearchField.of("body", body, 1000)], [])
+
+fn _repeated(part: text, count: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < count:
+        out = out + part
+        i = i + 1
+    out
+
+describe "search chunking and hit snippets (context-mode gap 1)":
+    it "splits fields into byte-budgeted chunks with deterministic chunk ids":
+        step("chunk a two-field document under a 20-byte budget")
+        val doc = SearchDocument.of("guide", "rev-1", [
+            SearchField.of("title", "bootstrap guide", 4000),
+            SearchField.of("body", "alpha one\nalpha two\nalpha three", 1000)], [])
+        val chunks = chunk_document_v1(doc, ChunkBudget.of(20, 16)).unwrap()
+        expect(chunks.len()).to_equal(3)
+        expect(chunks[0].chunk_id).to_equal("guide/title#1")
+        expect(chunks[1].chunk_id).to_equal("guide/body#1")
+        expect(chunks[2].chunk_id).to_equal("guide/body#2")
+        expect(chunks[1].ordinal).to_equal(1)
+        expect(chunks[2].ordinal).to_equal(2)
+        expect(chunks[1].document_id).to_equal("guide")
+        expect(chunks[1].field_name).to_equal("body")
+        var i = 0
+        while i < chunks.len():
+            expect(chunks[i].body.bytes().len()).to_be_less_than(21)
+            i = i + 1
+        expect(chunks[1].body + "\n" + chunks[2].body).to_equal("alpha one\nalpha two\nalpha three")
+
+    it "returns one whole-document chunk when the value fits the budget":
+        step("a short body stays a single chunk")
+        val chunks = chunk_document_v1(_body_doc("doc-1", "short text"), ChunkBudget.of(64, 8)).unwrap()
+        expect(chunks.len()).to_equal(1)
+        expect(chunks[0].chunk_id).to_equal("doc-1/body#1")
+        expect(chunks[0].body).to_equal("short text")
+
+    it "hard-splits one over-long line into consecutive byte-exact pieces":
+        step("a 36-byte line under a 16-byte budget yields three pieces")
+        val long_line = "0123456789abcdef" + "0123456789abcdef" + "0123"
+        val chunks = chunk_document_v1(_body_doc("spec-1", long_line), ChunkBudget.of(16, 16)).unwrap()
+        expect(chunks.len()).to_equal(3)
+        expect(chunks[0].body.bytes().len()).to_equal(16)
+        expect(chunks[2].body).to_equal("0123")
+        var whole = ""
+        var i = 0
+        while i < chunks.len():
+            whole = whole + chunks[i].body
+            i = i + 1
+        expect(whole).to_equal(long_line)
+
+    it "never splits a multi-byte sequence across a hard piece boundary":
+        step("a 2-byte sequence crossing the budget joins the preceding piece")
+        val line = "0123456789abcde" + "é" + "0123456789abcde"
+        val chunks = chunk_document_v1(_body_doc("spec-2", line), ChunkBudget.of(16, 16)).unwrap()
+        expect(chunks.len()).to_equal(2)
+        expect(chunks[0].body.bytes().len()).to_be_less_than(20)
+        expect(chunks[0].body + chunks[1].body).to_equal(line)
+
+    it "fails closed when the chunk count exceeds the budget":
+        step("a 2-chunk body under a 1-chunk ceiling is an error, not silent elision")
+        val doc = _body_doc("doc-2", "alpha one\nalpha two\nalpha three")
+        val result = chunk_document_v1(doc, ChunkBudget.of(10, 1))
+        expect(result.is_ok()).to_equal(false)
+
+    it "rejects a chunk budget that cannot keep sequences whole":
+        step("budgets under 4 bytes are invalid")
+        val result = chunk_document_v1(_body_doc("doc-3", "text"), ChunkBudget.of(2, 8))
+        expect(result.is_ok()).to_equal(false)
+
+    it "keeps the snippet absent by default and present via of_snippet":
+        step("legacy three-argument hits carry no snippet")
+        val legacy = SearchHit.of("doc-a", Score.from_milli(9000), 1)
+        expect(legacy.has_snippet()).to_equal(false)
+        step("of_snippet attaches the snippet field")
+        val snippet = SearchSnippet.of("doc-a/body#1", "alpha one")
+        val hit = SearchHit.of_snippet("doc-a", Score.from_milli(9000), 1, snippet)
+        expect(hit.has_snippet()).to_equal(true)
+        expect(hit.snippet.unwrap().chunk_id).to_equal("doc-a/body#1")
+        expect(hit.snippet.unwrap().excerpt).to_equal("alpha one")
+        expect(hit.snippet.unwrap().equals(snippet)).to_equal(true)
+        expect(SearchSnippet.absent().is_present()).to_equal(false)
+
+    it "extracts a bounded excerpt centred on the first query term":
+        step("window the chunk body around the term instead of returning it whole")
+        val body = _repeated("hay ", 12) + "needle " + _repeated("hay ", 12)
+        val doc = _body_doc("doc-4", body)
+        val chunk = chunk_document_v1(doc, ChunkBudget.default()).unwrap()[0]
+        val query = SearchQuery.of("needle", [], 10, "", false)
+        val made = snippet_for_chunk_v1(chunk, query, SnippetBudget.of(30)).unwrap()
+        expect(made.chunk_id).to_equal("doc-4/body#1")
+        expect(made.excerpt.bytes().len()).to_be_less_than(31)
+        expect(made.excerpt.index_of("needle") >= 0).to_equal(true)
+        step("a chunk inside the budget excerpts whole")
+        val small = snippet_for_chunk_v1(chunk_document_v1(_body_doc("doc-5", "tiny hay"), ChunkBudget.default()).unwrap()[0],
+            query, SnippetBudget.of(240)).unwrap()
+        expect(small.excerpt).to_equal("tiny hay")
+
+    it "falls back to the chunk head when no query term occurs":
+        step("an unmatched query still previews the chunk from its start")
+        val body = "alpha beta gamma delta epsilon zeta eta theta"
+        val chunk = chunk_document_v1(_body_doc("doc-6", body), ChunkBudget.default()).unwrap()[0]
+        val query = SearchQuery.of("missingterm", [], 10, "", false)
+        val made = snippet_for_chunk_v1(chunk, query, SnippetBudget.of(20)).unwrap()
+        expect(made.excerpt).to_equal(body.slice(0, 20))
+
+    it "attaches the best-matching chunk's snippet to ranked hits end to end":
+        step("rank hits, then address the winning chunk per hit document")
+        val d1 = _body_doc("guide-1", "bootstrap compiler intro\nfiller one\nfiller two")
+        val d2 = _body_doc("guide-2", "alpha\nbeta\ngamma")
+        val hits = text_top_k([
+            TextScoredDoc.of("guide-1", Score.from_milli(9000)),
+            TextScoredDoc.of("guide-2", Score.from_milli(1000)),
+        ], 2)
+        val query = SearchQuery.of("bootstrap compiler", [], 10, "", false)
+        val attached = attach_document_snippets_v1(hits, [d1, d2], query,
+            ChunkBudget.of(24, 16), SnippetBudget.of(240)).unwrap()
+        expect(attached.len()).to_equal(2)
+        step("ranks and scores are preserved")
+        expect(attached[0].rank).to_equal(1)
+        expect(attached[1].rank).to_equal(2)
+        expect(attached[0].score.raw_value()).to_equal(9000)
+        step("the matching document addresses its winning chunk")
+        expect(attached[0].has_snippet()).to_equal(true)
+        expect(attached[0].snippet.unwrap().chunk_id).to_equal("guide-1/body#1")
+        expect(attached[0].snippet.unwrap().excerpt).to_equal("bootstrap compiler intro")
+        step("a document with no matching term still previews its first chunk")
+        expect(attached[1].has_snippet()).to_equal(true)
+        expect(attached[1].snippet.unwrap().chunk_id).to_equal("guide-2/body#1")
+
+    it "passes hits through unchanged when the document is unknown":
+        step("a hit whose document left the corpus keeps its rank, no snippet")
+        val hits = [SearchHit.of("gone", Score.from_milli(500), 1)]
+        val attached = attach_document_snippets_v1(hits, [], SearchQuery.of("alpha", [], 10, "", false),
+            ChunkBudget.default(), SnippetBudget.default()).unwrap()
+        expect(attached.len()).to_equal(1)
+        expect(attached[0].has_snippet()).to_equal(false)
+        expect(attached[0].rank).to_equal(1)

@@ -199,7 +199,7 @@ fn _compiler_inventory_event_for_path_cost_v1(
     # control-character names even with core.quotePath=false; that encoding
     # cannot be treated as the canonical source identity, so refuse the batch.
     if path.starts_with("\""):
-        return Err("invalid")
+        return Err("quoted-path:" + path)
     val normalized = if path.contains("\\"): path.replace("\\", "/") else: path
     if normalized == "" or normalized.starts_with("build/scv/") or
             normalized.starts_with(".simple/scv/"):
@@ -212,7 +212,7 @@ fn _compiler_inventory_event_for_path_cost_v1(
     if not compile_source_inventory_path_valid_v1(normalized):
         return Ok(None)
     if compiler_inventory_family_v1(normalized) == "":
-        return Err("invalid")
+        return Err("family-invalid:" + normalized)
     if operation == "delete":
         val started = scv_cost_now_v1(cost)
         val deleted = compile_source_inventory_git_event_cost_v1("delete", normalized, "", cost)
@@ -237,7 +237,7 @@ fn _compiler_inventory_event_for_path_cost_v1(
     # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md).
     val event = compiler_inventory_file_event_cost_v1(operation, normalized, absolute, cost)
     if event.is_none():
-        return Err("invalid")
+        return Err("file-event-failed:" + normalized)
     Ok(Some(event!))
 
 fn compiler_inventory_event_push_cost_v1(
@@ -406,16 +406,33 @@ fn _compiler_inventory_git_events_traced_v1(
     source_roots: [text], cold_init: bool,
     trace: CompilerInventoryTraceV1?
 ) -> CompilerInventoryGitEventsV1?:
-    _compiler_inventory_git_events_traced_cost_v1(root, previous_head, head, source_roots, cold_init, trace, nil)
+    match _compiler_inventory_git_events_traced_cost_v1(root, previous_head, head, source_roots, cold_init, trace, None):
+        case Ok(batch): Some(batch)
+        case Err(_): None
+
+# Shape check for one `git ls-files -t` row (`<tag> <path>`). Returns "" for an
+# accepted row, else the refusal reason naming the branch and the row. The
+# measured byte length is part of the reason on purpose: a miscompiled
+# `byte_len()` (it has read 0 and `true` for a text in Stage 2 candidates)
+# is then visible in the refusal itself instead of a bare admission error.
+fn compiler_inventory_listed_row_refusal_v1(line: text) -> text:
+    val row_bytes = line.byte_len()
+    if row_bytes <= 2 or line.substring(1, 2) != " ":
+        return "row-shape:byte_len={row_bytes}:" + line
+    val tag = line.substring(0, 1)
+    if tag != "?" and tag != "H" and tag != "S" and tag != "M" and
+            tag != "R" and tag != "C":
+        return "row-tag:" + line
+    ""
 
 fn _compiler_inventory_git_events_traced_cost_v1(
     root: text, previous_head: text, head: text,
     source_roots: [text], cold_init: bool,
     trace: CompilerInventoryTraceV1?,
     cost: ScvCompileCostV1?
-) -> CompilerInventoryGitEventsV1?:
+) -> Result<CompilerInventoryGitEventsV1, text>:
     for scope in source_roots:
-        if not compiler_inventory_scope_valid_v1(scope): return None
+        if not compiler_inventory_scope_valid_v1(scope): return Err("scope-invalid:" + scope)
     # Reuse the refresh owner's captured HEAD for both diffs. A second
     # rev-parse costs a process on every warm request and can bind events from
     # one revision to a cursor naming another if a commit lands mid-refresh.
@@ -432,12 +449,12 @@ fn _compiler_inventory_git_events_traced_cost_v1(
             root, ["-c", "core.quotePath=false", "ls-files", "-t",
                 "--cached", "--others", "--modified", "--exclude-standard", "--"] + source_roots, trace, 1)
         if listed.is_none():
-            return None
+            return Err("git-ls-files-failed")
         val staged = compiler_inventory_git_lines_v1(
             root, ["-c", "core.quotePath=false", "diff", "--cached", "--name-only",
                 "--no-renames", head, "--"] + source_roots)
         if staged.is_none():
-            return None
+            return Err("git-diff-cached-failed")
         var untracked_paths: [text] = []
         var dirty_paths: [text] = []
         var dirty_seen: Dict<text, bool> = {}
@@ -456,12 +473,10 @@ fn _compiler_inventory_git_events_traced_cost_v1(
                 stderr_write("[scv] cold-init scan progress={listed_idx}/{listed_lines.len()} events={events.len()}\n")
             if line == "":
                 continue
-            if line.byte_len() <= 2 or line.substring(1, 2) != " ":
-                return None
+            val row_refusal = compiler_inventory_listed_row_refusal_v1(line)
+            if row_refusal != "":
+                return Err(row_refusal)
             val tag = line.substring(0, 1)
-            if tag != "?" and tag != "H" and tag != "S" and tag != "M" and
-                    tag != "R" and tag != "C":
-                return None
             val path = line.substring(2)
             if tag == "C":
                 # The `H` row of this path already pushed its event.
@@ -472,7 +487,7 @@ fn _compiler_inventory_git_events_traced_cost_v1(
             if tag == "?":
                 untracked_paths.push(path)
             match _compiler_inventory_event_for_path_cost_v1(root, "create", path, cost):
-                case Err(_): return None
+                case Err(why): return Err(why)
                 case Ok(item):
                     # Not `Ok(Some(ev))` / `Ok(None)` arms: under the JIT'd
                     # coordinator the nested-Option patterns matched neither
@@ -485,12 +500,12 @@ fn _compiler_inventory_git_events_traced_cost_v1(
         val digests = compiler_inventory_untracked_digests_v1(
             untracked_paths.join("\n"), source_roots)
         if not digests.valid:
-            return None
-        return Some(CompilerInventoryGitEventsV1(
+            return Err("untracked-digests-invalid")
+        return Ok(CompilerInventoryGitEventsV1(
             events, digests.src_digest, digests.test_digest,
             digests.paths, digests.examples_tooling_digest, dirty_paths))
     if head == "" or previous_head == "":
-        return None
+        return Err("head-missing")
     if head != previous_head:
         # One cursor HEAD covers the complete closed inventory. Restricting
         # this diff to today's selectors would permanently skip a committed
@@ -500,10 +515,10 @@ fn _compiler_inventory_git_events_traced_cost_v1(
                 "--no-renames", previous_head, head, "--", "src", "test",
                 "examples/10_tooling"], trace, 2)
         if committed.is_none():
-            return None
+            return Err("git-diff-name-status-failed")
         val next = compiler_inventory_parse_name_status_cost_v1(root, committed!, events, cost)
         if next.is_none():
-            return None
+            return Err("name-status-row-invalid")
         events = next!
     # One porcelain listing replaces the separate tracked diff and untracked
     # ls-files processes on every warm request. The captured HEAD above still
@@ -512,9 +527,12 @@ fn _compiler_inventory_git_events_traced_cost_v1(
         root, ["-c", "core.quotePath=false", "status", "--porcelain=v1",
             "--untracked-files=all", "--no-renames", "--"] + source_roots, trace, 3)
     if working.is_none():
-        return None
-    compiler_inventory_parse_porcelain_cost_v1(
+        return Err("git-status-failed")
+    val parsed = compiler_inventory_parse_porcelain_cost_v1(
         root, working!, events, source_roots, cost)
+    if parsed.is_none():
+        return Err("porcelain-row-invalid")
+    Ok(parsed!)
 
 fn compiler_inventory_decode_v1(value: text) -> text:
     if value == "%empty":
@@ -871,8 +889,8 @@ fn _compiler_inventory_refresh_observed_cost_v1(
     val direct = match _compiler_inventory_git_events_traced_cost_v1(
             root, if cursor.valid: cursor.git_head else: head, head,
             source_roots, cold_init, trace, cost):
-        case Some(batch): batch
-        case _: return compiler_inventory_invalid_v1("git-event-refresh-failed")
+        case Ok(batch): batch
+        case Err(why): return compiler_inventory_invalid_v1("git-event-refresh-failed:" + why)
     val aliases: CompilerInventoryAliasesV1 = match compiler_inventory_aliases_checked_v1(root, source_roots):
         case Ok(value): value
         case Err(reason):
@@ -1345,6 +1363,7 @@ export compiler_inventory_refresh_traced_cost_v1
 export CompilerInventoryRefreshV1
 export compiler_inventory_refresh_v1
 export compiler_inventory_parse_name_status_v1
+export compiler_inventory_listed_row_refusal_v1
 export compiler_inventory_parse_porcelain_v1
 export compiler_inventory_journal_rows_v1
 export compiler_inventory_journal_prefix_digest_v1

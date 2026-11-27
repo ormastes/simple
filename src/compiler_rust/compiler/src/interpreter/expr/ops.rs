@@ -139,12 +139,21 @@ fn as_f32(v: &Value) -> Result<f32, CompileError> {
     }
 }
 
-fn division_by_zero_error(message: &'static str, help: &'static str) -> CompileError {
+/// Division/modulo by zero carries the evaluating node's position in the
+/// message text itself, not only in the error context: the CLI renders
+/// `file:line:col`, and the documented span contract for this diagnostic is
+/// the literal `line N` phrase (gap 3, error-location reporting;
+/// doc/08_tracking/bug/compiler_interpreter_integration_real_gaps_found_2026-09-06.md).
+pub(super) fn division_by_zero_error(message: &'static str, help: &'static str) -> CompileError {
+    let message = match crate::interpreter::get_current_node_span() {
+        Some(span) => format!("{message} (at line {}, column {})", span.line, span.column),
+        None => message.to_string(),
+    };
     let ctx = ErrorContext::new()
         .with_code(codes::DIVISION_BY_ZERO)
         .with_help(help)
         .with_note("check that the divisor is not zero before the operation");
-    CompileError::semantic_with_context(message.to_string(), ctx)
+    CompileError::semantic_with_context(message, ctx)
 }
 
 /// Static integer width of an expression, as the pure-Simple type checker

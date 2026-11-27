@@ -1,0 +1,559 @@
+# Renderer-neutral text-control paint and clip helpers for the Simple web
+# renderer: single-line `<input>` value painting, the reviewed text-input
+# overlay plan (selection, caret, horizontal scroll window), password masking
+# and shared object-fit image geometry.
+#
+# Owner graph (review hard stop simple_web_textarea_overlay_review_hard_stop_
+# 2026-07-27, final review blocker 1): the CPU framebuffer owner
+# (simple_web_html_layout_renderer_paint_raster.spl) and the Draw IR owner
+# (simple_web_html_layout_renderer_paint_draw_ir.spl) must BOTH consume these
+# helpers from this neutral owner and must never import each other. This
+# module holds no framebuffer writes, no Draw IR commands and no renderer
+# state; it depends only on layout text metrics and the renderer-neutral
+# paint/clip primitives.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{HNode, attr_value, attr_key_index, attr_present}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{style_text_advance, style_space_advance, style_text_line_advance_width, text_line_aligned_x}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{ClipRect, clip_intersect, web_glyph_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{apply_text_transform_for_paint, bidi_visual_text_for_rtl, text_has_rtl_strong}
+use std.common.encoding.utf8.{text_codepoint_len, text_is_valid_utf8, utf8_seq_len}
+use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_style}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+
+fn input_uses_accent_color(nd: HNode) -> bool:
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    input_type == "checkbox" or input_type == "radio"
+
+# Chrome 159 paints no author border or background under an `appearance:auto`
+# checkbox / radio: its vector parts are the whole control. `appearance:none`
+# keeps the author box. Draw IR twin: paint_layout `_html_draw_ir_commands`.
+fn checkable_author_box_hidden(nd: HNode, st: Style) -> bool:
+    nd.tag == "input" and not st.appearance_none and input_uses_accent_color(nd)
+
+fn input_is_checked(nd: HNode) -> bool:
+    attr_present(nd.attrs_raw, "checked")
+
+fn input_paints_text(nd: HNode) -> bool:
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val declared_value = attr_value(nd.attrs_raw, "value")
+    if declared_value != "" and not text_is_valid_utf8(declared_value):
+        return false
+    input_type == "" or input_type == "text" or input_type == "search" or
+        input_type == "url" or input_type == "tel" or
+        input_type == "email" or input_type == "password" or
+        input_type == "number" or input_type == "button" or
+        input_type == "submit" or input_type == "reset"
+
+pub fn input_accepts_text_overlay(nd: HNode) -> bool:
+    val disabled_at = attr_key_index(nd.attrs_raw, "disabled", 8)
+    if disabled_at >= 0:
+        val disabled_end = disabled_at + 8
+        if disabled_end >= nd.attrs_raw.byte_len():
+            return false
+        val after_disabled = nd.attrs_raw.substring(disabled_end, disabled_end + 1)
+        if (
+            after_disabled == "=" or after_disabled == " " or
+            after_disabled == "\t" or after_disabled == "\n" or
+            after_disabled == "\r" or after_disabled == "/"
+        ):
+            return false
+    if not text_is_valid_utf8(attr_value(nd.attrs_raw, "value")):
+        return false
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    input_type == "" or input_type == "text" or input_type == "search" or
+        input_type == "url" or input_type == "tel" or
+        input_type == "email" or input_type == "password" or
+        input_type == "number"
+
+fn input_text_prefix(value: text, max_glyphs: i32) -> text:
+    if max_glyphs <= 0:
+        return ""
+    if text_codepoint_len(value) <= max_glyphs:
+        return value
+    val bytes = value.bytes()
+    var byte_index: i64 = 0
+    var glyph_index: i32 = 0
+    # cpu-lane-loop-ok: UTF-8 sequence walk to find the byte offset of the max_glyphs-th glyph so the value can be sliced on a codepoint boundary; bound is min(value bytes, max_glyphs) where max_glyphs is the glyph count that fits the input's content box
+    while byte_index < bytes.len() and glyph_index < max_glyphs:
+        val sequence_length = utf8_seq_len(bytes[byte_index])
+        if sequence_length > 0:
+            byte_index = byte_index + sequence_length
+        else:
+            byte_index = byte_index + 1
+        glyph_index = glyph_index + 1
+    value.substring(0, byte_index)
+
+# Chrome 159 masks a password value with U+2022 BULLET, one per codepoint
+# (computed `-webkit-text-security: disc`; 8px Arial: 2.8px advance, ink in
+# the vertical middle of the box, not the top-heavy `*`).
+pub val INPUT_PASSWORD_MASK_GLYPH: text = "•"
+
+# Advance of one password mask disc: the face's U+2022 advance at the
+# control's font size, rounded to whole px. Chrome 159: 8px Arial 2.80, so
+# three discs ink columns 3..10 (the 5x7 cell's 5px put them at 4..16).
+# Measured at 10x the size and rounded, like the control-label widths. A
+# lane with no resolvable face keeps the bitmap-cell advance.
+fn _input_password_mask_advance(st: Style) -> i32:
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language(family, INPUT_PASSWORD_MASK_GLYPH, st.font_size * 10, "")
+    if not metrics.valid or metrics.width <= 0:
+        return style_text_advance(st)
+    var out = (metrics.width + 5) / 10 + st.letter_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+# Per-glyph advance an input's painted value steps by: the mask advance for
+# a masked password, else the style's flat advance. Every consumer -- the
+# raster walk, the measured width, the caret/visual map -- takes it from here
+# so they cannot disagree.
+# reason: whole-px glyph advance shared by the raster walk, caret map and Draw IR producer
+# @allow(primitive_api)
+pub fn input_text_glyph_advance(nd: HNode, st: Style) -> i32:
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    if input_type == "password" and _input_text_declared_value(nd) != "":
+        return _input_password_mask_advance(st)
+    style_text_advance(st)
+
+# The whole value is painted; the caller clips it at the content box. Chrome
+# 159 keeps an overflowing value intact (scrollWidth 56 for an 11-char 8px
+# Arial value in a 36px content box) and clips it, it never truncates it.
+fn input_text_for_paint(nd: HNode) -> text:
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val declared_value = attr_value(nd.attrs_raw, "value")
+    if not text_is_valid_utf8(declared_value):
+        return ""
+    var value = declared_value
+    if value == "":
+        if input_type == "submit":
+            value = "Submit"
+        elif input_type == "reset":
+            value = "Reset"
+        else:
+            value = attr_value(nd.attrs_raw, "placeholder")
+    if input_type == "password" and declared_value != "":
+        return INPUT_PASSWORD_MASK_GLYPH.repeat(text_codepoint_len(declared_value))
+    value
+
+# Shared resolved input text geometry used by the CPU pixel painter and the
+# Draw IR producer. It contains only durable layout semantics: the executor
+# receives the final text and clip, never renderer-local font/cache state.
+pub struct InputTextPaintPlan:
+    text_value: text
+    baseline_x: i32
+    baseline_y: i32
+    measured_width: i32
+    clip: ClipRect
+    color: u32
+    source_window_start_byte: i64
+    source_window_end_byte: i64
+    source_boundary_bytes: [i64]
+    boundary_x_px: [i32]
+    selection_present: bool
+    selection_rect: ClipRect
+    selection_color: u32
+    caret_present: bool
+    caret_rect: ClipRect
+    caret_color: u32
+    resolved_view_start_byte: i64
+
+pub struct InputTextVisualMap:
+    display_text: text
+    source_boundary_bytes: [i64]
+    boundary_x_px: [i32]
+
+pub val INPUT_TEXT_SELECTION_ALPHA: u32 = 0x66u32
+
+pub fn input_caret_color(st: Style) -> u32:
+    if st.caret_color != 0u32: st.caret_color else: st.fg
+
+pub fn input_selection_color(st: Style) -> u32:
+    (INPUT_TEXT_SELECTION_ALPHA << 24) |
+        (input_caret_color(st) & 0x00FFFFFFu32)
+
+fn _input_text_empty_rect() -> ClipRect:
+    ClipRect(x0: 0, y0: 0, x1: 0, y1: 0)
+
+fn _input_text_declared_value(nd: HNode) -> text:
+    attr_value(nd.attrs_raw, "value")
+
+fn _input_text_source_boundaries(value: text) -> [i64]:
+    var boundaries: [i64] = [0]
+    val bytes = value.bytes()
+    var cursor: i64 = 0
+    # cpu-lane-loop-ok: one UTF-8 decode pass over a single input element's declared value building its codepoint boundary table; bound is that value's byte length, not page content
+    while cursor < bytes.len():
+        var count = utf8_seq_len(bytes[cursor])
+        if count <= 0 or cursor + count > bytes.len():
+            count = 1
+        cursor = cursor + count
+        boundaries.push(cursor)
+    boundaries
+
+pub fn input_text_visual_map(nd: HNode, st: Style) -> InputTextVisualMap:
+    val source = _input_text_declared_value(nd)
+    if not text_is_valid_utf8(source):
+        return InputTextVisualMap(
+            display_text: "",
+            source_boundary_bytes: [],
+            boundary_x_px: []
+        )
+    val source_boundaries = _input_text_source_boundaries(source)
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val transformed = if input_type == "password":
+        INPUT_PASSWORD_MASK_GLYPH.repeat(source_boundaries.len() - 1)
+    else:
+        apply_text_transform_for_paint(source, st.text_transform)
+    val display_text = if st.direction_rtl:
+        bidi_visual_text_for_rtl(transformed)
+    else:
+        transformed
+    val advance = input_text_glyph_advance(nd, st)
+    val space_advance = style_space_advance(st)
+    val total_width = style_text_line_advance_width(
+        transformed, 0, transformed.byte_len(), st, advance, space_advance
+    )
+    # Carets mirror only for right-to-left text. A Latin/digit value keeps its
+    # logical order under direction:rtl (Chrome 159), so its source
+    # boundaries ascend left to right exactly as in ltr.
+    val mirrored = st.direction_rtl and text_has_rtl_strong(transformed)
+    var boundary_x_px: [i32] = []
+    var boundary_index = 0
+    while boundary_index < source_boundaries.len():
+        val source_end = source_boundaries[boundary_index]
+        val prefix = if input_type == "password":
+            INPUT_PASSWORD_MASK_GLYPH.repeat(boundary_index)
+        else:
+            apply_text_transform_for_paint(
+                source.substring(0, source_end), st.text_transform
+            )
+        val prefix_width = style_text_line_advance_width(
+            prefix, 0, prefix.byte_len(), st, advance, space_advance
+        )
+        boundary_x_px.push(
+            if mirrored:
+                total_width - prefix_width
+            else:
+                prefix_width
+        )
+        boundary_index = boundary_index + 1
+    InputTextVisualMap(
+        display_text: display_text,
+        source_boundary_bytes: source_boundaries,
+        boundary_x_px: boundary_x_px
+    )
+
+fn _input_text_boundary_index(
+    visual_map: InputTextVisualMap, source_byte: i64
+) -> i32:
+    var i = 0
+    while i < visual_map.source_boundary_bytes.len():
+        if visual_map.source_boundary_bytes[i] == source_byte:
+            return i
+        i = i + 1
+    -1
+
+pub fn input_text_x_at_source_byte(
+    visual_map: InputTextVisualMap, source_byte: i64
+) -> i32:
+    val index = _input_text_boundary_index(visual_map, source_byte)
+    if index < 0:
+        return 0
+    visual_map.boundary_x_px[index]
+
+pub fn input_text_source_byte_at_x(
+    visual_map: InputTextVisualMap, x: i32
+) -> i64:
+    if visual_map.source_boundary_bytes.len() == 0:
+        return 0
+    var best_index = 0
+    var best_distance = visual_map.boundary_x_px[0] - x
+    if best_distance < 0:
+        best_distance = 0 - best_distance
+    var i = 1
+    while i < visual_map.source_boundary_bytes.len():
+        var distance = visual_map.boundary_x_px[i] - x
+        if distance < 0:
+            distance = 0 - distance
+        if distance < best_distance:
+            best_index = i
+            best_distance = distance
+        i = i + 1
+    visual_map.source_boundary_bytes[best_index]
+
+fn _input_text_content_clip(ancestor_clip: ClipRect, x: i32, y: i32, w: i32, h: i32) -> ClipRect:
+    val raw_clip = clip_intersect(ancestor_clip, x, y, x + w, y + h)
+    var x1 = raw_clip.x1
+    var y1 = raw_clip.y1
+    if x1 < raw_clip.x0:
+        x1 = raw_clip.x0
+    if y1 < raw_clip.y0:
+        y1 = raw_clip.y0
+    ClipRect(x0: raw_clip.x0, y0: raw_clip.y0, x1: x1, y1: y1)
+
+pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, ancestor_clip: ClipRect) -> InputTextPaintPlan:
+    val raw_text = input_text_for_paint(nd)
+    val transformed_text = apply_text_transform_for_paint(
+        raw_text, st.text_transform
+    )
+    val text_value = if st.direction_rtl:
+        bidi_visual_text_for_rtl(transformed_text)
+    else:
+        transformed_text
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+    val scale = web_glyph_scale(st.font_size)
+    val baseline_y = content_y + if content_h > 7 * scale:
+        (content_h - 7 * scale) / 2
+    else:
+        0
+    val adv = input_text_glyph_advance(nd, st)
+    val space_adv = style_space_advance(st)
+    val measured_width = style_text_line_advance_width(
+        text_value, 0, text_value.byte_len(), st, adv, space_adv
+    )
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val button_label = (
+        input_type == "button" or input_type == "submit" or
+        input_type == "reset"
+    )
+    val baseline_x = if button_label and measured_width <= content_w:
+        content_x + (content_w - measured_width) / 2
+    elif measured_width > content_w and st.direction_rtl:
+        # An overflowing value is start-aligned whatever text-align says
+        # (CSS Text 3 §6.1). Chrome 159: a centered 56px value in a 36px
+        # content box paints ink columns 3..38, the same as start alignment;
+        # RTL center/start/left overflow paint identical columns too.
+        content_x + content_w - measured_width
+    elif measured_width > content_w:
+        content_x
+    else:
+        text_line_aligned_x(
+            content_x, content_w, measured_width, st, 0, 1
+        )
+    # A button label is clipped at the padding box, not the content box.
+    # Chrome 159, 30px submit (1px border, 2px padding, 8px Arial,
+    # `ABCDEFGHIJ`, 58px): ink columns 3..28 (start-aligned, into the right
+    # padding); under RTL 1..26 (end-anchored at the content right edge 27,
+    # into the left padding). A label that fits stays centred.
+    val clip = if button_label:
+        _input_text_content_clip(
+            ancestor_clip, x + st.border_l, y + st.border_t,
+            w - st.border_l - st.border_r, h - st.border_t - st.border_b
+        )
+    else:
+        _input_text_content_clip(
+            ancestor_clip, content_x, content_y, content_w, content_h
+        )
+    val visual_map = input_text_visual_map(nd, st)
+    var absolute_boundaries: [i32] = []
+    # cpu-lane-loop-ok: maps one input's glyph-boundary x offsets to absolute x; bound is the boundary count of that input's own value, a single linear map with no nesting
+    for boundary_x in visual_map.boundary_x_px:
+        absolute_boundaries.push(baseline_x + boundary_x)
+    # There is no computed ::placeholder color in Style yet. st.fg is the
+    # canonical theme-derived fail-safe rather than a renderer-only gray.
+    InputTextPaintPlan(
+        text_value: text_value,
+        baseline_x: baseline_x,
+        baseline_y: baseline_y,
+        measured_width: measured_width,
+        clip: clip,
+        color: st.fg,
+        source_window_start_byte: 0,
+        source_window_end_byte: if text_is_valid_utf8(
+            _input_text_declared_value(nd)
+        ):
+            _input_text_declared_value(nd).len()
+        else:
+            0,
+        source_boundary_bytes: visual_map.source_boundary_bytes,
+        boundary_x_px: absolute_boundaries,
+        selection_present: false,
+        selection_rect: _input_text_empty_rect(),
+        selection_color: input_selection_color(st),
+        caret_present: false,
+        caret_rect: _input_text_empty_rect(),
+        caret_color: input_caret_color(st),
+        resolved_view_start_byte: 0
+    )
+
+pub fn input_text_paint_plan_with_overlay(
+    nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i32,
+    ancestor_clip: ClipRect, overlay: BrowserTextInputOverlay
+) -> InputTextPaintPlan:
+    if overlay.target_key == "":
+        return input_text_paint_plan(nd, st, x, y, w, h, ancestor_clip)
+    val visual_map = input_text_visual_map(nd, st)
+    if visual_map.source_boundary_bytes.len() == 0:
+        # Only an invalid-UTF-8 value has no boundaries; the static plan
+        # paints nothing for it.
+        return input_text_paint_plan(nd, st, x, y, w, h, ancestor_clip)
+    var view_index = _input_text_boundary_index(
+        visual_map, overlay.view_start_byte
+    )
+    if view_index < 0:
+        view_index = 0
+    var focus_index = _input_text_boundary_index(
+        visual_map, overlay.focus_byte
+    )
+    if focus_index < 0:
+        focus_index = visual_map.source_boundary_bytes.len() - 1
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+    if focus_index < view_index:
+        view_index = focus_index
+    var focus_distance = (
+        visual_map.boundary_x_px[focus_index] -
+        visual_map.boundary_x_px[view_index]
+    )
+    if focus_distance < 0:
+        focus_distance = 0 - focus_distance
+    # cpu-lane-loop-ok: advances the horizontal scroll window start until the focused caret fits content_w; bound is focus_index inside one input's boundary table, and view_index only ever moves forward
+    while view_index < focus_index and focus_distance >= content_w:
+        view_index = view_index + 1
+        focus_distance = (
+            visual_map.boundary_x_px[focus_index] -
+            visual_map.boundary_x_px[view_index]
+        )
+        if focus_distance < 0:
+            focus_distance = 0 - focus_distance
+    val resolved_view_start = visual_map.source_boundary_bytes[view_index]
+    var window_end_index = view_index
+    # cpu-lane-loop-ok: extends the visible window end while it still fits content_w; bound is one input's boundary count, single monotone forward scan
+    while window_end_index + 1 < visual_map.source_boundary_bytes.len():
+        var window_width = (
+            visual_map.boundary_x_px[window_end_index + 1] -
+            visual_map.boundary_x_px[view_index]
+        )
+        if window_width < 0:
+            window_width = 0 - window_width
+        if window_width > content_w:
+            break
+        window_end_index = window_end_index + 1
+    val resolved_window_end = (
+        visual_map.source_boundary_bytes[window_end_index]
+    )
+    val advance = input_text_glyph_advance(nd, st)
+    val space_advance = style_space_advance(st)
+    val visual_width = style_text_line_advance_width(
+        visual_map.display_text, 0, visual_map.display_text.byte_len(),
+        st, advance, space_advance
+    )
+    val static_plan = input_text_paint_plan(
+        nd, st, x, y, w, h, ancestor_clip
+    )
+    val baseline_x = if view_index == 0:
+        static_plan.baseline_x
+    elif st.direction_rtl:
+        content_x + content_w - visual_map.boundary_x_px[view_index]
+    else:
+        content_x - visual_map.boundary_x_px[view_index]
+    val scale = web_glyph_scale(st.font_size)
+    val text_height = 7 * scale
+    val baseline_y = content_y + if content_h > text_height:
+        (content_h - text_height) / 2
+    else:
+        0
+    var absolute_boundaries: [i32] = []
+    # cpu-lane-loop-ok: same absolute-x boundary mapping as input_text_paint_plan, overlay variant; bound is the boundary count of that one input's value
+    for boundary_x in visual_map.boundary_x_px:
+        absolute_boundaries.push(baseline_x + boundary_x)
+    var anchor_x = baseline_x + input_text_x_at_source_byte(
+        visual_map, overlay.anchor_byte
+    )
+    var focus_x = baseline_x + input_text_x_at_source_byte(
+        visual_map, overlay.focus_byte
+    )
+    val selection_present = overlay.anchor_byte != overlay.focus_byte
+    if anchor_x > focus_x:
+        val swap = anchor_x
+        anchor_x = focus_x
+        focus_x = swap
+    val caret_x = baseline_x + input_text_x_at_source_byte(
+        visual_map, overlay.focus_byte
+    )
+    val clip = _input_text_content_clip(
+        ancestor_clip, content_x, content_y, content_w, content_h
+    )
+    InputTextPaintPlan(
+        text_value: visual_map.display_text,
+        baseline_x: baseline_x,
+        baseline_y: baseline_y,
+        measured_width: visual_width,
+        clip: clip,
+        color: st.fg,
+        source_window_start_byte: resolved_view_start,
+        source_window_end_byte: resolved_window_end,
+        source_boundary_bytes: visual_map.source_boundary_bytes,
+        boundary_x_px: absolute_boundaries,
+        selection_present: selection_present,
+        selection_rect: ClipRect(
+            x0: anchor_x, y0: baseline_y,
+            x1: focus_x, y1: baseline_y + text_height
+        ),
+        selection_color: input_selection_color(st),
+        caret_present: overlay.caret_visible and not selection_present,
+        caret_rect: ClipRect(
+            x0: caret_x, y0: baseline_y,
+            x1: caret_x + 1, y1: baseline_y + text_height
+        ),
+        caret_color: input_caret_color(st),
+        resolved_view_start_byte: resolved_view_start
+    )
+
+# x of a vector-font input value whose glyphs really advance `real_w` px.
+# The plan aligned the run with its fixed-pitch cell width; a centred or
+# end-aligned run is re-anchored on the real width (Chrome 159 centres a
+# `Go` submit label on its 15 px shaped width).
+# reason: px coordinates and widths of one input's content box.
+# @allow(primitive_api)
+pub fn input_value_vector_x(plan: InputTextPaintPlan, content_x: i32, content_w: i32, real_w: i32) -> i32:
+    val flat_slack = content_w - plan.measured_width
+    val flat_offset = plan.baseline_x - content_x
+    if flat_offset != 0 and flat_offset == flat_slack:
+        return content_x + content_w - real_w
+    if flat_offset != 0 and flat_offset == flat_slack / 2:
+        return content_x + (content_w - real_w) / 2
+    plan.baseline_x
+
+# Shared by Draw IR image lowering (`_html_draw_ir_fit_size`) and the raster <img> painter.
+# reason: object-fit geometry helper over raw box/image extents
+# @allow(primitive_api)
+pub fn html_image_fit_size(
+    object_fit: text, box_w: i32, box_h: i32,
+    image_w: i32, image_h: i32
+) -> (i32, i32):
+    if object_fit == "fill":
+        return (box_w, box_h)
+    if object_fit == "none":
+        return (image_w, image_h)
+    val box_w64 = box_w.to_i64()
+    val box_h64 = box_h.to_i64()
+    val image_w64 = image_w.to_i64()
+    val image_h64 = image_h.to_i64()
+    val contain_by_width = box_w64 * image_h64 <= box_h64 * image_w64
+    var contain_w = box_w
+    var contain_h = (
+        (box_w64 * image_h64) / image_w64
+    ).to_i32()
+    if not contain_by_width:
+        contain_h = box_h
+        contain_w = ((box_h64 * image_w64) / image_h64).to_i32()
+    if object_fit == "contain":
+        return (contain_w, contain_h)
+    if object_fit == "scale-down":
+        if image_w <= box_w and image_h <= box_h:
+            return (image_w, image_h)
+        return (contain_w, contain_h)
+    val cover_by_width = box_w64 * image_h64 >= box_h64 * image_w64
+    if cover_by_width:
+        return (
+            box_w, ((box_w64 * image_h64) / image_w64).to_i32()
+        )
+    (((box_h64 * image_w64) / image_h64).to_i32(), box_h)

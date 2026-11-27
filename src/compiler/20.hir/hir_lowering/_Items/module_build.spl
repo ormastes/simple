@@ -100,6 +100,28 @@ impl HirLowering:
                     return surf_path
         module_surface_canonical_path(self.module_filename)
 
+    me lower_const_decls_with_settle_v1(parser_constants: [ParserConst], exported_names: Dict<text, bool>, source_intents: Dict<text, text>, bind_origin: bool) -> [HirConst]:
+        """Lower module constants and run a bounded fixed-point pass so unordered references settle."""
+        var lowered: [HirConst] = []
+        var idx = 0
+        while idx < parser_constants.len():
+            val const_src = parser_constants[idx]
+            val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(const_src), exported_names)
+            if bind_origin:
+                self.bind_source_declaration_origin_v1(source_intents, hir_const.symbol, "constant", const_src.name)
+            lowered = lowered.push(hir_const)
+            idx = idx + 1
+        self.settle_const_decls_v1(lowered)
+
+    fn parser_constants_from_module_v1(module: ParserModule) -> [ParserConst]:
+        var out: [ParserConst] = []
+        val keys = module.constants.keys()
+        var idx = 0
+        while idx < keys.len():
+            out = out.push(module.constants[keys[idx]])
+            idx = idx + 1
+        out
+
     fn parsed_module_matches_owner_v1(parsed_name: text) -> bool:
         if self.module_filename == "":
             return true
@@ -217,22 +239,14 @@ impl HirLowering:
         val focused_future_diag = bootstrap_mode and module.name == "src/lib/nogc_async_mut/async/future.spl"
         if focused_future_diag:
             eprint("[hir-finalize] returned future")
-        if bootstrap_mode and parser_constants.len() > 0:
+        if (bootstrap_mode or lowered_module.constants.keys().len() == 0) and parser_constants.len() > 0:
             var recovered_constants: Dict<SymbolId, HirConst> = {}
             val recovered_exported_names = hir_module_exported_names(module)
+            val settled_constants = self.lower_const_decls_with_settle_v1(
+                parser_constants, recovered_exported_names, {}, false)
             var const_idx = 0
-            while const_idx < parser_constants.len():
-                val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
-                val recovered_key: SymbolId = if hir_const.symbol.is_valid(): hir_const.symbol else: SymbolId(id: const_idx)
-                recovered_constants[recovered_key] = hir_const
-                const_idx = const_idx + 1
-            lowered_module.constants = recovered_constants
-        elif lowered_module.constants.keys().len() == 0 and parser_constants.len() > 0:
-            var recovered_constants: Dict<SymbolId, HirConst> = {}
-            val recovered_exported_names = hir_module_exported_names(module)
-            var const_idx = 0
-            while const_idx < parser_constants.len():
-                val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(parser_constants[const_idx]), recovered_exported_names)
+            while const_idx < settled_constants.len():
+                val hir_const = settled_constants[const_idx]
                 val recovered_key: SymbolId = if hir_const.symbol.is_valid(): hir_const.symbol else: SymbolId(id: const_idx)
                 recovered_constants[recovered_key] = hir_const
                 const_idx = const_idx + 1
@@ -845,15 +859,15 @@ impl HirLowering:
             # native_module_val_globals 2026-07-23). Lower them here exactly
             # like the non-bootstrap path below (line ~1284).
             var bootstrap_constants: Dict<SymbolId, HirConst> = {}
-            val bootstrap_const_names = module.constants.keys()
+            val bootstrap_parser_constants = self.parser_constants_from_module_v1(module)
             val bootstrap_exported_names = hir_module_exported_names(module)
-            if bootstrap_diag and bootstrap_const_names.len() > 0:
-                eprint("[hir-lower] bootstrap-constants:count module={module.name} count={bootstrap_const_names.len()}")
+            if bootstrap_diag and bootstrap_parser_constants.len() > 0:
+                eprint("[hir-lower] bootstrap-constants:count module={module.name} count={bootstrap_parser_constants.len()}")
+            val settled_bootstrap_constants = self.lower_const_decls_with_settle_v1(
+                bootstrap_parser_constants, bootstrap_exported_names, source_intents, true)
             var bootstrap_const_idx = 0
-            while bootstrap_const_idx < bootstrap_const_names.len():
-                val bootstrap_const_src: ParserConst = module.constants[bootstrap_const_names[bootstrap_const_idx]]
-                val bootstrap_hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(bootstrap_const_src), bootstrap_exported_names)
-                self.bind_source_declaration_origin_v1(source_intents, bootstrap_hir_const.symbol, "constant", bootstrap_const_src.name)
+            while bootstrap_const_idx < settled_bootstrap_constants.len():
+                val bootstrap_hir_const = settled_bootstrap_constants[bootstrap_const_idx]
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
             if bootstrap_diag:
@@ -965,14 +979,13 @@ impl HirLowering:
             functions[method.symbol] = method
             lower_idx = lower_idx + 1
 
-        val lower_const_names = module.constants.keys()
+        val lower_parser_constants = self.parser_constants_from_module_v1(module)
         val exported_names = hir_module_exported_names(module)
+        val settled_constants = self.lower_const_decls_with_settle_v1(
+            lower_parser_constants, exported_names, source_intents, true)
         lower_idx = 0
-        while lower_idx < lower_const_names.len():
-            val const_: ParserConst = module.constants[lower_const_names[lower_idx]]
-            val hir_const = hir_const_with_export_visibility(self.lower_hir_const_decl(const_), exported_names)
-            self.bind_source_declaration_origin_v1(source_intents, hir_const.symbol, "constant", const_.name)
-            constants[SymbolId(id: lower_idx)] = hir_const
+        while lower_idx < settled_constants.len():
+            constants[SymbolId(id: lower_idx)] = settled_constants[lower_idx]
             lower_idx = lower_idx + 1
 
         # Lower static assertions

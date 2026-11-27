@@ -1,0 +1,93 @@
+# Purpose and audience: executable regression specification for the F27 RISC-V formal lib contract and import resolution.
+# @req REQ-SSPEC-HARDWARE
+# @tag:unit
+# @tag:hardware
+# @tag:riscv
+
+use std.spec.{describe, it, expect}
+use std.hardware.riscv_common.core.riscv_formal.{
+    check_retire_chain,
+    render_retire_chain_report,
+    verify_rv64_qemu_user_proof_contract
+}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn _full_rv64_qemu_transcript() -> text:
+    "[KERNEL] trap vector installed\n" +
+    "[KERNEL] trap runtime installed\n" +
+    "[KERNEL] spawned user task id=1 entry=0x400000\n" +
+    "[KERNEL] entering U-mode at sepc=0x400000\n" +
+    "P\n" +
+    "[BOOT] RISC-V 64 boot complete\n"
+
+describe "RISC-V formal stdlib owner and F27 overlay retirement":
+    it "accepts a complete RV64 QEMU user-mode proof transcript":
+        val res = verify_rv64_qemu_user_proof_contract(_full_rv64_qemu_transcript())
+        expect(res.is_ok()).to_equal(true)
+        expect(res.unwrap()).to_equal("[rv64-qemu] verified 6 proof markers")
+
+    it "fails closed naming the first missing RV64 proof marker":
+        val missing_vec = "[KERNEL] trap runtime installed\n[KERNEL] spawned user task\n[KERNEL] entering U-mode\nP\nboot complete\n"
+        val r_vec = verify_rv64_qemu_user_proof_contract(missing_vec)
+        expect(r_vec.is_err()).to_equal(true)
+        expect(r_vec.unwrap_err()).to_equal("[rv64-qemu] missing proof marker: trap vector installed")
+
+        val missing_rt = "[KERNEL] trap vector installed\n[KERNEL] spawned user task\n[KERNEL] entering U-mode\nP\nboot complete\n"
+        expect(verify_rv64_qemu_user_proof_contract(missing_rt).unwrap_err()).to_equal("[rv64-qemu] missing proof marker: trap runtime installed")
+
+        val missing_spawn = "[KERNEL] trap vector installed\n[KERNEL] trap runtime installed\n[KERNEL] entering U-mode\nP\nboot complete\n"
+        expect(verify_rv64_qemu_user_proof_contract(missing_spawn).unwrap_err()).to_equal("[rv64-qemu] missing proof marker: spawned user task")
+
+        val missing_umode = "[KERNEL] trap vector installed\n[KERNEL] trap runtime installed\n[KERNEL] spawned user task\nP\nboot complete\n"
+        expect(verify_rv64_qemu_user_proof_contract(missing_umode).unwrap_err()).to_equal("[rv64-qemu] missing proof marker: entering U-mode")
+
+        val missing_p = "[KERNEL] trap vector installed\n[KERNEL] trap runtime installed\n[KERNEL] spawned user task\n[KERNEL] entering U-mode\nboot complete\n"
+        expect(verify_rv64_qemu_user_proof_contract(missing_p).unwrap_err()).to_equal("[rv64-qemu] missing proof marker: P")
+
+        val missing_boot = "[KERNEL] trap vector installed\n[KERNEL] trap runtime installed\n[KERNEL] spawned user task\n[KERNEL] entering U-mode\nP\n"
+        expect(verify_rv64_qemu_user_proof_contract(missing_boot).unwrap_err()).to_equal("[rv64-qemu] missing proof marker: boot complete")
+
+        expect(verify_rv64_qemu_user_proof_contract("").unwrap_err()).to_equal("[rv64-qemu] missing proof marker: trap vector installed")
+
+    it "exposes retire-chain report helper publicly":
+        val report = check_retire_chain([1, 2], [0x1000, 0x1004], [0x1004, 0x1008], [false, false])
+        expect(report.ok).to_equal(true)
+        expect(render_retire_chain_report(report)).to_contain("PASS")
+
+    it "pins pub visibility in stdlib riscv_formal and os_build_run":
+        val rf = file_read("src/lib/hardware/riscv_common/core/riscv_formal.spl") ?? ""
+        expect(rf).to_contain("pub fn render_retire_chain_report(")
+        expect(rf).to_contain("pub fn verify_rv32_default_vhdl_constraints(")
+        expect(rf).to_contain("pub fn verify_rv32_ghdl_return_zero_contract(")
+        expect(rf).to_contain("pub fn verify_rv64_qemu_user_proof_contract(output: text)")
+        expect(rf).to_contain("pub fn probe_riscv_external_formal(")
+
+        val obr = file_read("src/os/_QemuRunner/os_build_run.spl") ?? ""
+        expect(obr).to_contain("pub fn verify_qemu_formal_output(")
+
+    it "eliminates bare hardware.riscv_common split-brain imports across os and lib consumers":
+        val bare = "use hardware.riscv_common.core.riscv_formal."
+        val canonical = "use std.hardware.riscv_common.core.riscv_formal."
+
+        val obr = file_read("src/os/_QemuRunner/os_build_run.spl") ?? ""
+        val part2 = file_read("src/os/qemu_runner_part2.spl") ?? ""
+        val sync_ghdl = file_read("src/lib/nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl") ?? ""
+        val async_ghdl = file_read("src/lib/nogc_async_mut/debug/remote/exec/adapter_ghdl_rv32.spl") ?? ""
+
+        expect(obr).to_contain(canonical + "{{verify_rv64_qemu_user_proof_contract}}")
+        expect(part2).to_contain(canonical + "{{verify_rv64_qemu_user_proof_contract}}")
+        expect(sync_ghdl).to_contain(canonical + "{{verify_rv32_default_vhdl_constraints, verify_rv32_ghdl_return_zero_contract}}")
+        expect(async_ghdl).to_contain(canonical + "{{verify_rv32_default_vhdl_constraints, verify_rv32_ghdl_return_zero_contract}}")
+
+        for p in [
+            "src/os/_QemuRunner/os_build_run.spl",
+            "src/os/qemu_runner_part2.spl",
+            "src/os/_QemuRunner/runner_targets.spl",
+            "src/os/_QemuRunner/scenario_catalog.spl",
+            "src/os/_QemuRunner/scenario_disks.spl",
+            "src/os/_QemuRunner/scenario_exec.spl",
+            "src/lib/nogc_sync_mut/debug/remote/exec/adapter_ghdl_rv32.spl",
+            "src/lib/nogc_async_mut/debug/remote/exec/adapter_ghdl_rv32.spl"
+        ]:
+            val txt = file_read(p) ?? ""
+            expect(txt.contains(bare)).to_equal(false)

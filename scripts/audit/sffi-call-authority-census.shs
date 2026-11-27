@@ -3,7 +3,10 @@
 #
 # This is a migration index, not ABI proof. It recognizes declarations local
 # to a file plus rt_*/spl_* names explicitly imported from an `sffi` module,
-# matching the bounded source lint. Resolved HIR ownership remains the final
+# matching the bounded source lint. Calls to rt_*/spl_* names with no local
+# declaration or sffi import in the file are reported as `ambient` rows, and
+# calls to pure-Simple functions defined in the same file are not classified
+# as foreign. Coverage is partial: resolved HIR ownership remains the final
 # authority for aliases, re-exports, and generated declarations.
 set -eu
 
@@ -91,9 +94,18 @@ xargs -0 -r -n 200 perl -0ne '
         push @code_lines, $code;
     }
 
+    my %pure;
+    my $has_candidate = 0;
     for my $line (@code_lines) {
+        $has_candidate = 1 if !$has_candidate &&
+            $line =~ /(?<![A-Za-z0-9_])(?:rt|spl)_[A-Za-z_]\w*(?![A-Za-z0-9_])\s*\(/;
         if ($line =~ /^\s*(?:pub\s+)?(?:unsafe\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) {
             $raw{$1} = 1;
+        }
+        elsif ($line =~ /^\s*(?:(?:pub|static)\s+)*(?:fn|me)\s+((?:rt|spl)_[A-Za-z_]\w*)/) {
+            # A pure-Simple function that merely uses an rt_*/spl_* name is not
+            # a foreign symbol; its call sites must not become census rows.
+            $pure{$1} = 1;
         }
         if ($line =~ /^\s*use\s+[^\n]*sffi[^\n]*\{(.*)$/) {
             $in_sffi_use = 1;
@@ -111,13 +123,21 @@ xargs -0 -r -n 200 perl -0ne '
         }
     }
 
+    # A name both pure-defined and extern-declared in this file keeps its
+    # declaration: body-local `extern fn` re-declarations shadow a pure-Simple
+    # top-level definition, so their call sites must stay visible.
+    delete @pure{keys %raw};
+
     # Compile the file-local raw symbol set once. Most files have no raw
-    # declarations/imports and need no function-body scan at all; files that
-    # do should match only candidate foreign names rather than parsing every
-    # ordinary call and rejecting it through a hash lookup afterward.
-    next unless %raw || $sffi_glob;
+    # declarations/imports and no rt_*/spl_*-shaped call candidate and need no
+    # function-body scan at all. The generic rt_*/spl_* alternative always
+    # enters the per-file regex so that ambient calls (no local declaration,
+    # no sffi import) are inventoried instead of silently omitted; match-time
+    # classification separates declared, glob-imported, ambient, and locally
+    # defined pure-Simple names.
+    next unless %raw || $sffi_glob || $has_candidate;
     my @raw_patterns = map { quotemeta($_) } sort keys %raw;
-    push @raw_patterns, "(?:rt|spl)_[A-Za-z_]\\w*" if $sffi_glob;
+    push @raw_patterns, "(?:rt|spl)_[A-Za-z_]\\w*";
     my $raw_names = join("|", @raw_patterns);
     my $raw_call_re = qr/(?<![A-Za-z0-9_])($raw_names)(?![A-Za-z0-9_])\s*\(/;
     (my $relative = $file) =~ s/^\Q$ENV{SFFI_ROOT}\E\///;
@@ -168,8 +188,19 @@ xargs -0 -r -n 200 perl -0ne '
             my $code = $body;
             while ($code =~ /$raw_call_re/g) {
                 my $name = $1;
-                my $state = $fn_unsafe ? "function_unsafe" :
-                    ($lexical_indent >= 0 ? "lexical_unsafe" : "missing");
+                next if $pure{$name};
+                my $declared = $raw{$name} || $sffi_glob;
+                my $state;
+                if (!$declared) {
+                    # Ambient raw call: no local extern declaration and no sffi
+                    # import in this file, so the scanner cannot name a
+                    # provider owner. Reported as its own authority state so
+                    # the ratchet on `missing` stays meaningful.
+                    $state = "ambient";
+                } else {
+                    $state = $fn_unsafe ? "function_unsafe" :
+                        ($lexical_indent >= 0 ? "lexical_unsafe" : "missing");
+                }
                 print join("\t", $relative, $j + 1, $name, $state), "\n";
             }
         }
@@ -201,6 +232,8 @@ awk -F '\t' 'BEGIN { OFS="\t" }
         print "lexical_unsafe_call_sites", authority["lexical_unsafe"] + 0
         print "function_unsafe_call_sites", authority["function_unsafe"] + 0
         print "missing_authority_call_sites", authority["missing"] + 0
+        print "ambient_call_sites", authority["ambient"] + 0
+        print "coverage", "partial: source scanner; ambient rows lack resolved HIR owner"
     }
 ' "$out" >"$summary_out"
 
@@ -219,13 +252,15 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     END {
         print "symbol", "call_sites", "caller_files", "production_calls", \
               "bootstrap_library_calls", "test_calls", \
-              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
+              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls", \
+              "ambient_calls"
         for (symbol in rows)
             print symbol, rows[symbol], files[symbol], production[symbol] + 0, \
                   bootstrap[symbol] + 0, tests[symbol] + 0, \
                   authority_count[symbol SUBSEP "lexical_unsafe"] + 0, \
                   authority_count[symbol SUBSEP "function_unsafe"] + 0, \
-                  authority_count[symbol SUBSEP "missing"] + 0
+                  authority_count[symbol SUBSEP "missing"] + 0, \
+                  authority_count[symbol SUBSEP "ambient"] + 0
     }
 ' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort -t "$(printf '\t')" -k4,4nr -k2,2nr -k1,1; } >"$symbols_out"
 
@@ -244,13 +279,14 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     END {
         print "family", "call_sites", "distinct_symbols", "production_calls", \
               "bootstrap_library_calls", "test_calls", \
-              "explicit_authority_calls", "missing_authority_calls"
+              "explicit_authority_calls", "missing_authority_calls", "ambient_calls"
         for (family in rows)
             print family, rows[family], symbols[family], production[family] + 0, \
                   bootstrap[family] + 0, tests[family] + 0, \
                   authority_count[family SUBSEP "lexical_unsafe"] + \
                       authority_count[family SUBSEP "function_unsafe"], \
-                  authority_count[family SUBSEP "missing"] + 0
+                  authority_count[family SUBSEP "missing"] + 0, \
+                  authority_count[family SUBSEP "ambient"] + 0
     }
 ' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort -t "$(printf '\t')" -k4,4nr -k2,2nr -k1,1; } >"$families_out"
 
@@ -266,12 +302,14 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     }
     END {
         print "scope", "call_sites", "distinct_symbols", \
-              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
+              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls", \
+              "ambient_calls"
         for (scope in rows)
             print scope, rows[scope], symbols[scope], \
                   authority_count[scope SUBSEP "lexical_unsafe"] + 0, \
                   authority_count[scope SUBSEP "function_unsafe"] + 0, \
-                  authority_count[scope SUBSEP "missing"] + 0
+                  authority_count[scope SUBSEP "missing"] + 0, \
+                  authority_count[scope SUBSEP "ambient"] + 0
     }
 ' "$out" | { IFS= read -r header; printf '%s\n' "$header"; sort; } >"$scopes_out"
 
@@ -284,12 +322,14 @@ awk -F '\t' 'BEGIN { OFS="\t" }
     }
     END {
         print "file", "call_sites", "distinct_symbols", \
-              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls"
+              "lexical_unsafe_calls", "function_unsafe_calls", "missing_authority_calls", \
+              "ambient_calls"
         for (file in rows)
             print file, rows[file], symbols[file], \
                   authority_count[file SUBSEP "lexical_unsafe"] + 0, \
                   authority_count[file SUBSEP "function_unsafe"] + 0, \
-                  authority_count[file SUBSEP "missing"] + 0
+                  authority_count[file SUBSEP "missing"] + 0, \
+                  authority_count[file SUBSEP "ambient"] + 0
     }
 ' "$out" | {
     IFS= read -r header

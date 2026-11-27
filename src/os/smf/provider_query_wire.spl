@@ -1,22 +1,30 @@
-# Canonical packed wire codec for SimpleProviderQueryV1.
+# Canonical packed wire codec for SimpleProviderQueryV1 and the V2 result
+# extension.
 #
 # This module serializes fixed-width scalars only.  It never takes an address
 # of a Simple struct/object and does not invoke a provider function pointer.
 # V1 requests have no reserved bytes. V1 results preserve their original
 # 48-byte scalar prefix, carry the complete ABI SHA-256 in bytes 48..79, and
 # reserve bytes 80..83. Strict total-size checks reject trailing material.
+# V2 results are the verbatim V1 bytes followed by the 256-bit ABI digest as
+# four big-endian u64 words (abi_digest.spl's frozen w0..w3 byte order), for
+# 116 bytes total; a V1-only writer leaves the digest words undeclared (zero).
 
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_QUERY_V1_SIZE,
     SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+    SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE,
     SIMPLE_PROVIDER_OK,
     SIMPLE_PROVIDER_MINOR_UNSUPPORTED,
     SimpleProviderQueryV1,
     SimpleProviderQueryResultV1,
+    SimpleProviderQueryResultV2,
     SimpleProviderDigestV1,
+    SimpleAbiDigest256V1,
     simple_provider_digest_zero_v1,
     simple_provider_digest_is_zero_v1
 }
+use std.nogc_sync_mut.composition.abi_digest.{simple_abi_digest_zero_v1}
 
 val PROVIDER_QUERY_V1_DESCRIPTOR_SIZE_OFFSET: i64 = 0
 val PROVIDER_QUERY_V1_INTERFACE_ID_OFFSET: i64 = 4
@@ -38,6 +46,13 @@ val PROVIDER_QUERY_RESULT_V1_IMPLEMENTATION_DIGEST_OFFSET: i64 = 40
 val PROVIDER_QUERY_RESULT_V1_ABI_DIGEST_OFFSET: i64 = 48
 val PROVIDER_QUERY_RESULT_V1_RESERVED_OFFSET: i64 = 80
 
+# The V2 digest words follow the verbatim V1 record immediately; each word is
+# written big-endian so the byte stream reads in w0..w3 order.
+val PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W0_OFFSET: i64 = 84
+val PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W1_OFFSET: i64 = 92
+val PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W2_OFFSET: i64 = 100
+val PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W3_OFFSET: i64 = 108
+
 class ProviderQueryWireWriteV1:
     ok: bool
     bytes: [u8]
@@ -51,6 +66,11 @@ class ProviderQueryWireRequestReadV1:
 class ProviderQueryWireResultReadV1:
     ok: bool
     value: SimpleProviderQueryResultV1
+    diagnostic: text
+
+class ProviderQueryWireResultReadV2:
+    ok: bool
+    value: SimpleProviderQueryResultV2
     diagnostic: text
 
 # Array parameters are value bindings: helpers return the grown array so the
@@ -70,6 +90,14 @@ fn _push_u64_le(out: [u8], value: u64) -> [u8]:
     while index < 8:
         o.push(((value >> (index * 8)) & 255) as u8)
         index = index + 1
+    o
+
+fn _push_u64_be(out: [u8], value: u64) -> [u8]:
+    var o = out
+    var shift: i64 = 56
+    while shift >= 0:
+        o.push(((value >> (shift as u64)) & 255) as u8)
+        shift = shift - 8
     o
 
 fn _push_digest_word_v1(out: [u8], value: u32) -> [u8]:
@@ -103,6 +131,14 @@ fn _read_u64_le(data: [u8], offset: i64) -> u64:
     var index = 0
     while index < 8:
         value = value | ((data[offset + index] as u64) << (index * 8))
+        index = index + 1
+    value
+
+fn _read_u64_be(data: [u8], offset: i64) -> u64:
+    var value: u64 = 0
+    var index = 0
+    while index < 8:
+        value = (value << 8) | (data[offset + index] as u64)
         index = index + 1
     value
 
@@ -147,6 +183,12 @@ fn _empty_result() -> SimpleProviderQueryResultV1:
         provider_identity_digest: 0,
         implementation_digest: 0,
         abi_digest: simple_provider_digest_zero_v1()
+    )
+
+fn _empty_result_v2() -> SimpleProviderQueryResultV2:
+    SimpleProviderQueryResultV2(
+        base: _empty_result(),
+        abi_digest_256: simple_abi_digest_zero_v1()
     )
 
 fn _request_valid(value: SimpleProviderQueryV1) -> text:
@@ -244,6 +286,41 @@ fn decode_provider_query_result_v1(data: [u8]) -> ProviderQueryWireResultReadV1:
     val diagnostic = _result_valid(value)
     ProviderQueryWireResultReadV1(ok: diagnostic == "", value: value, diagnostic: diagnostic)
 
+fn encode_provider_query_result_v2(value: SimpleProviderQueryResultV2) -> ProviderQueryWireWriteV1:
+    # The V1 record is written by the V1 codec itself so the two encodings can
+    # never disagree on a V1 offset; V2 appends only the digest words.
+    val base = encode_provider_query_result_v1(value.base)
+    if not base.ok:
+        return ProviderQueryWireWriteV1(ok: false, bytes: [], diagnostic: base.diagnostic)
+    var out = base.bytes
+    out = _push_u64_be(out, value.abi_digest_256.w0)
+    out = _push_u64_be(out, value.abi_digest_256.w1)
+    out = _push_u64_be(out, value.abi_digest_256.w2)
+    out = _push_u64_be(out, value.abi_digest_256.w3)
+    ProviderQueryWireWriteV1(ok: true, bytes: out, diagnostic: "")
+
+fn decode_provider_query_result_v2(data: [u8]) -> ProviderQueryWireResultReadV2:
+    if data.len() != SIMPLE_PROVIDER_QUERY_RESULT_V2_SIZE as i64:
+        return ProviderQueryWireResultReadV2(ok: false, value: _empty_result_v2(), diagnostic: "result-wire-size-invalid")
+    # The V1 view is decoded and validated by the V1 codec, so V2 inherits its
+    # reserved-bytes and fail-closed status checks verbatim.
+    val base = decode_provider_query_result_v1(data[0..SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64])
+    if not base.ok:
+        return ProviderQueryWireResultReadV2(ok: false, value: _empty_result_v2(), diagnostic: base.diagnostic)
+    # An all-zero tail is a V1-only provider's "digest not declared" sentinel
+    # and decodes successfully; admission, not the codec, rejects it.
+    val digest = SimpleProviderQueryResultV2(
+        base: base.value,
+        abi_digest_256: SimpleAbiDigest256V1(
+            w0: _read_u64_be(data, PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W0_OFFSET),
+            w1: _read_u64_be(data, PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W1_OFFSET),
+            w2: _read_u64_be(data, PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W2_OFFSET),
+            w3: _read_u64_be(data, PROVIDER_QUERY_RESULT_V2_ABI_DIGEST_W3_OFFSET))
+    )
+    ProviderQueryWireResultReadV2(ok: true, value: digest, diagnostic: "")
+
 export ProviderQueryWireWriteV1, ProviderQueryWireRequestReadV1, ProviderQueryWireResultReadV1
+export ProviderQueryWireResultReadV2
 export encode_provider_query_request_v1, decode_provider_query_request_v1
 export encode_provider_query_result_v1, decode_provider_query_result_v1
+export encode_provider_query_result_v2, decode_provider_query_result_v2

@@ -193,6 +193,25 @@ pub(crate) extern "C" fn jit_rt_process_spawn_piped_generation_v1(cmd: i64, cmd_
     }
 }
 
+pub(crate) extern "C" fn jit_rt_process_spawn_piped_environment_v1(cmd: i64, args: i64, environment: i64, mode: i64) -> i64 {
+    match system::rt_process_spawn_piped_environment_v1(&[
+        rv_to_value(cmd),
+        rv_to_value(args),
+        rv_to_value(environment),
+        Value::Int(mode),
+    ]) {
+        Ok(Value::Int(pid)) => pid,
+        _ => -1,
+    }
+}
+
+pub(crate) extern "C" fn jit_rt_process_wait_readable_v1(pid: i64, stream: i64, timeout_ms: i64) -> i64 {
+    match system::rt_process_wait_readable_v1(&[Value::Int(pid), Value::Int(stream), Value::Int(timeout_ms)]) {
+        Ok(Value::Int(code)) => code,
+        _ => -5,
+    }
+}
+
 pub(crate) extern "C" fn jit_rt_process_piped_pid_for_generation_v1(generation: i64) -> i64 {
     match system::rt_process_piped_pid_for_generation_v1(&[Value::Int(generation)]) {
         Ok(Value::Int(pid)) => pid,

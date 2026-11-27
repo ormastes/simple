@@ -1,0 +1,74 @@
+"""
+## Purpose and audience
+Purpose: pin the collapsing of a `white-space:nowrap` run's LEADING
+collapsible space into a space already in the pen, against Chrome 159.
+Chrome: `x <span style=white-space:nowrap> y</span><span>B</span>` renders
+exactly like `x <span style=white-space:nowrap>y</span>B` — the sequence
+collapses to ONE space, the nowrap span's box holds `y` only, and the box
+after it starts right after `y` (CSS Text 3 4.1.1; bug
+web_render_nowrap_lead_space_after_space_not_collapsed_2026-11-27: Chrome
+puts the box at 20, Simple put it at 25 — the lead-space charge in
+layout_engine skips nowrap runs, whose metrics are measured over the RAW
+text, so the space stayed measured into the nowrap box and pushed every
+later box one space to the right).
+
+Mechanism under test: the inline run loop drops the lead space's in-run
+advance from the item's predicted width and hands the skip to the run, whose
+single wrap range then starts past the space so the paint loops (which slice
+by wrap ranges) drop it from the drawn text too.
+
+Scope notes, measured not guessed: the assertion is on the FOLLOWER box,
+not the span's own width — the surviving pen space and the removed lead
+space are the same advance, so their sum (what the follower position sees)
+is stable, while the pen-vs-box decomposition can differ by one space
+advance when the test host resolves the face's standalone space differently
+from its in-run pair (the y-alone and y-in-pair measures may then differ by
+<= 1 px, which is the engine's documented sub-pixel tolerance; the two
+fixtures' followers are asserted within that 1 px).
+Audience: browser-engine inline layout maintainers.
+"""
+
+"""
+Traceability: web_render_nowrap_lead_space_after_space_not_collapsed_2026-11-27
+-- a nowrap run's leading collapsible space collapses into a space already
+in the pen, and the boxes after the run sit one space to the left of the
+pre-fix layout.
+"""
+# @tag: unit, browser_engine, layout, inline, whitespace, nowrap, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+
+val CW: i32 = 400
+val CH: i32 = 200
+val CHEAD: text = "<html><head><style>body{margin:0;font:16px sans-serif}</style></head><body>"
+val CTAIL: text = "</body></html>"
+
+fn cw_box_x(inner: text, id: text) -> i32:
+    parse_int(simple_web_layout_debug_layout_by_id(CHEAD + inner + CTAIL, CW, CH, id, "x"))
+
+describe "a nowrap run's lead space collapses into a space already in the pen":
+    it "AC-1: the box after `x <span nowrap> y</span>` sits where `x <span nowrap>y</span>` puts it (within the 1 px sub-pixel tolerance)":
+        step("two divs, one layout: collapsed vs sabotage control without the lead space")
+        val page = "<div>x <span id=\"a\" style=\"white-space:nowrap\"> y</span><span id=\"fa\">B</span></div>" +
+            "<div>x <span id=\"b\" style=\"white-space:nowrap\">y</span><span id=\"fb\">B</span></div>"
+        val diff = cw_box_x(page, "fb") - cw_box_x(page, "fa")
+        expect(diff + 2).to_be_greater_than(0)
+        expect(diff).to_be_less_than(2)
+
+    it "AC-2: the same through a <b>, still within 1 px of the no-lead-space control":
+        step("<b style=white-space:nowrap> y</b> after 'x ' collapses the same way")
+        val page = "<div>x <b style=\"white-space:nowrap\"> y</b><span id=\"fc\">B</span></div>" +
+            "<div>x <span id=\"b\" style=\"white-space:nowrap\">y</span><span id=\"fb\">B</span></div>"
+        val diff = cw_box_x(page, "fb") - cw_box_x(page, "fc")
+        expect(diff + 2).to_be_greater_than(0)
+        expect(diff).to_be_less_than(2)
+
+    it "AC-3 (control): with NO space before the span the lead space survives inside the nowrap box":
+        step("x<span nowrap> y</span> keeps its space: the follower sits a full space later than x<span nowrap>y</span>")
+        val page = "<div>x<span id=\"d\" style=\"white-space:nowrap\"> y</span><span id=\"fd\">B</span></div>" +
+            "<div>x<span id=\"e\" style=\"white-space:nowrap\">y</span><span id=\"fe\">B</span></div>"
+        expect(cw_box_x(page, "fd") - cw_box_x(page, "fe")).to_be_greater_than(1)

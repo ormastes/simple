@@ -244,6 +244,10 @@ pub(crate) fn function_module_owner(func: &FunctionDef) -> Option<Arc<str>> {
 // (cached per-owner env template + write-log patching, 2026-08-21) still
 // cloned a growing overlay per call and rescanned every binding per changed
 // global; measured at 2.1 GB RSS and >150 s on `lint driver_types.spl`.
+// The caller-side publish/refresh walks that still run on every call out of a
+// frame iterate `publish_candidate_entries` (names the frame wrote or
+// synced), so a wide module-level caller frame no longer pays
+// O(module globals) per call either (2026-11-27, same bug doc).
 // doc/08_tracking/bug/seed_interpreter_env_rebuild_per_call_o_globals_2026-08-21.md
 
 /// The module scope for functions owned by `owner`, over the CURRENT live
@@ -331,20 +335,20 @@ fn env_audit_enabled() -> bool {
 }
 
 pub(crate) fn publish_live_bound_globals(env: &Env) {
-    // Counted, not guessed: this scan is O(caller frame width) and runs on
-    // every call out of the frame. See the PUBLISH_GLOBALS_* comment in
-    // perf_counters.rs.
+    // Counted, not guessed: this scan is O(names the frame wrote or synced)
+    // and runs on every call out of the frame. See the PUBLISH_GLOBALS_*
+    // comment in perf_counters.rs.
     // This runs on EVERY call out of a frame, so the instrumentation is behind
     // ONE `enabled()` load rather than one per counter.
     if crate::perf_counters::enabled() {
         crate::perf_counters::bump(&crate::perf_counters::PUBLISH_GLOBALS_CALLS, 1);
         crate::perf_counters::bump(
             &crate::perf_counters::PUBLISH_GLOBALS_SCANNED,
-            env.nonlocal_overlay_len() as u64,
+            env.publish_candidate_len() as u64,
         );
         crate::perf_counters::bump(
             &crate::perf_counters::PUBLISH_GLOBALS_NONLOCAL,
-            env.nonlocal_overlay_entries().count() as u64,
+            env.nonlocal_overlay_len() as u64,
         );
         // Fail-closed audit of the superset invariant: any overlay name the
         // superset does not cover would have its global write dropped here.
@@ -359,9 +363,14 @@ pub(crate) fn publish_live_bound_globals(env: &Env) {
         }
     }
     // Empty for the ordinary frame, and `Vec::new()` does not allocate, so the
-    // common path here is a single `is_empty` on the superset.
+    // common path here is a single pass over an empty candidate set.
+    // Candidate-driven (see CowEnv::publish_candidate_entries): O(names this
+    // frame wrote or synced), not O(superset) — a module-level caller frame's
+    // superset holds every declared global, and this scan runs on EVERY call
+    // out of the frame. `changed` is identical to the superset walk: the
+    // candidates are exactly the overlay entries a publish can act on.
     let changed = env
-        .nonlocal_overlay_entries()
+        .publish_candidate_entries()
         .filter(|(name, _)| !env.is_refreshed_global(name))
         .filter_map(|(name, value)| {
             env.global_binding(name)
@@ -390,10 +399,11 @@ pub(crate) fn publish_live_bound_globals(env: &Env) {
 /// refresh of any stale global copy sitting in the frame's own overlay.
 pub(crate) fn refresh_live_bound_globals(env: &mut Env) {
     env.refresh_scope(owned_globals_snapshot());
-    // Same set the overlay walk produced, off the `nonlocal_overlay` superset
-    // (see CowEnv::nonlocal_overlay): O(aliases) instead of O(frame width).
+    // Same set the superset walk produced, off the publish candidates
+    // (see CowEnv::publish_candidate_entries): O(names written or synced)
+    // instead of O(frame width).
     let stale = env
-        .nonlocal_overlay_entries()
+        .publish_candidate_entries()
         .filter_map(|(name, _)| env.global_binding(name))
         .collect::<HashSet<_>>();
     for (owner, name) in stale {
@@ -410,7 +420,7 @@ pub(crate) fn sync_live_bound_globals(local_env: &Env, outer_env: &mut Env) {
         .forwarded_globals()
         .map(|((owner, name), value)| ((Arc::clone(owner), name.clone()), value.clone()))
         .collect::<HashMap<_, _>>();
-    for (local_name, _) in local_env.nonlocal_overlay_entries() {
+    for (local_name, _) in local_env.publish_candidate_entries() {
         let Some((owner, source_name)) = local_env.global_binding(local_name) else {
             continue;
         };
@@ -447,10 +457,10 @@ pub(crate) fn sync_owned_captured_globals(func: &FunctionDef, local_env: &Env, o
     }
     let mut changed = Vec::new();
     let mut live_for_caller = Vec::new();
-    // Superset-driven (see CowEnv::nonlocal_overlay): the `is_local` half of
-    // this filter is now structural, so the walk is O(aliases), not O(callee
-    // frame width).
-    for (local_name, value) in local_env.nonlocal_overlay_entries() {
+    // Candidate-driven (see CowEnv::publish_candidate_entries): the `is_local`
+    // half of this filter is now structural, so the walk is O(names written or
+    // synced), not O(callee frame width).
+    for (local_name, value) in local_env.publish_candidate_entries() {
         if func.params.iter().any(|param| param.name == *local_name) {
             continue;
         }

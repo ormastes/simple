@@ -1,0 +1,68 @@
+# Piped spawn with explicit child environment + bounded stdout readiness.
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{process_spawn_piped_environment_result, process_read_stdout_timeout_result, process_read_stderr_timeout_result, process_close_piped, ChildEnvironmentModeV1, PipedReadV1}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.io_runtime.{time_now_monotonic_ms}
+
+fn _shell() -> text:
+    if host_is_windows_host(): "cmd.exe" else: "/bin/sh"
+
+fn _script(posix: text, windows: text) -> [text]:
+    if host_is_windows_host(): ["/c", windows] else: ["-c", posix]
+
+fn _collect(pid: i64) -> text:
+    var output = ""
+    val deadline = time_now_monotonic_ms() + 10000
+    while time_now_monotonic_ms() < deadline:
+        match process_read_stdout_timeout_result(pid, 200):
+            case Ok(PipedReadV1.Data(chunk)):
+                output = output + chunk
+            case Ok(PipedReadV1.Timeout):
+                pass
+            case Ok(PipedReadV1.Eof):
+                return output
+            case Err(error):
+                fail("bounded read failed: " + error)
+    fail("child never reached EOF")
+
+describe "piped spawn with explicit environment":
+    it "overlays selected variables on the parent environment":
+        val env = [("SIMPLE_PIPED_ENV_A", "alpha"), ("SIMPLE_PIPED_ENV_B", "beta")]
+        val pid = process_spawn_piped_environment_result(_shell(), _script("printf '%s:%s' \"$SIMPLE_PIPED_ENV_A\" \"$SIMPLE_PIPED_ENV_B\"", "echo %SIMPLE_PIPED_ENV_A%:%SIMPLE_PIPED_ENV_B%"), env, ChildEnvironmentModeV1.Overlay).unwrap()
+        expect(_collect(pid).trim()).to_equal("alpha:beta")
+        process_close_piped(pid)
+
+    it "replaces the environment exactly":
+        val env = [("SIMPLE_PIPED_ENV_ONLY", "solo"), ("PATH", "/usr/bin:/bin"), ("SYSTEMROOT", "C:\\Windows")]
+        val pid = process_spawn_piped_environment_result(_shell(), _script("printf '%s|%s' \"$SIMPLE_PIPED_ENV_ONLY\" \"${HOME-unset}\"", "echo %SIMPLE_PIPED_ENV_ONLY%^|%USERPROFILE%"), env, ChildEnvironmentModeV1.Replace).unwrap()
+        val out = _collect(pid).trim()
+        if host_is_windows_host():
+            expect(out).to_equal("solo|%USERPROFILE%")
+        else:
+            expect(out).to_equal("solo|unset")
+        process_close_piped(pid)
+
+    it "rejects a key containing '='":
+        val result = process_spawn_piped_environment_result(_shell(), _script("true", "exit 0"), [("A=B", "x")], ChildEnvironmentModeV1.Overlay)
+        expect(result.is_err()).to_equal(true)
+
+describe "bounded stdout read":
+    it "times out on a sleeping child within tolerance":
+        val pid = process_spawn_piped_environment_result(_shell(), _script("sleep 3", "ping -n 4 127.0.0.1 >nul"), [], ChildEnvironmentModeV1.Overlay).unwrap()
+        val start = time_now_monotonic_ms()
+        val read = process_read_stdout_timeout_result(pid, 150).unwrap()
+        val elapsed = time_now_monotonic_ms() - start
+        expect(read == PipedReadV1.Timeout).to_equal(true)
+        expect(elapsed >= 140).to_equal(true)
+        expect(elapsed < 1000).to_equal(true)
+        process_close_piped(pid)
+
+    it "reports EOF, not timeout, for an early-exit child":
+        val pid = process_spawn_piped_environment_result(_shell(), _script("exit 0", "exit 0"), [], ChildEnvironmentModeV1.Overlay).unwrap()
+        expect(_collect(pid)).to_equal("")
+        process_close_piped(pid)
+
+    it "reports stderr as not piped":
+        val pid = process_spawn_piped_environment_result(_shell(), _script("exit 0", "exit 0"), [], ChildEnvironmentModeV1.Overlay).unwrap()
+        expect(process_read_stderr_timeout_result(pid, 0).unwrap_err()).to_equal("stderr_not_piped")
+        process_close_piped(pid)

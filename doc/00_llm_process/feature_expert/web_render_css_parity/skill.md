@@ -6013,3 +6013,79 @@ pins the border-box form, the default-UA gap is unfiled.
     `ui_showcase/hosts/host_2d_vulkan`), not the web catalog. The web
     opaque-box qualifier already refused base's dashes (clipped overlay rects
     without the required paint keys), so nothing changes there.
+
+## 2026-11-28 — "svg 3 device rows high at 4x" is the block cursor dropping an authored height's fraction
+
+- **The svg is not the cause, and the catalog `animation` svg was never off.** On
+  base `d40623d3f59` its rect is 76800 px at x 678..1157, y 1179..1338 in both
+  frames (1x: 169..288 / 295..334) and nothing in the box differs by more than 3.
+  A whole-px svg on the baseline, with or without text, and with
+  `vertical-align: top/bottom`, matches Chrome, as do canvas and inline-block
+  twins (each case in its own block, k=4).
+- **Cause:** a block that follows a sibling with an authored fractional `height`
+  started at the sibling's whole-px height. `height: 10.25 / 10.5 / 10.75px` put
+  the next block, its line and any svg on it 1 / 2 / 3 device rows high at k=4,
+  and one CSS px high at k=1 from .5 up. A text-only block moved the same way.
+  The block's return said "an authored height ends at start + h exactly" and
+  handed back the start fraction, while paint already extended the box's own
+  bottom by the fraction (`authored_height_frac_milli`), so only the box itself
+  was right.
+- **Fix (layout_engine block return + block cursor):** the end residual of an
+  authored-height box is start + its sub-pixel part. The parent cursor takes the
+  whole px once the residual reaches half a px. At k=1 the box itself takes the
+  snapped px (10.5px from a whole-px top is 11 rows in Chrome), so no seam row
+  opens above the next block. `authored_height_frac_milli` and
+  `layout_root_font_px` moved from paint_layout to layout_foundation; one copy.
+- Spec: `test/01_unit/browser_engine/block_after_fractional_height_chrome159_spec.spl`
+  (1/6 -> 8/8; k=4 and k=1, Chrome values in its header).
+- **Clamp trap (review catch):** `height:10.75px; max-height:10px` is 10px in
+  Chrome. `h == explicit_h` does not see that clamp (max 10 is not below the
+  whole-px 10), so the fraction is dropped when `max_height_px <= height_px`,
+  in layout and in paint's `_html_box_device_extra_h` (it used `<`). AC-8.
+- **Floats still drop the fraction** (on base too): a 10.75px float paints
+  1400..1439 at k=4, Chrome ..1442, and a `clear:both` sibling starts at 1440,
+  Chrome 1443. Bug: `doc/08_tracking/bug/web_render_float_fractional_height_dropped_2026-11-28.md`.
+- **Not covered, measured in the same sweep (k=4, unowned):**
+  - a flex container or form control with an authored fractional height (other
+    return paths);
+  - fractional `padding` (`padding-top: 2.5px` is 2 px: 2 device rows short);
+  - `height: 0.65em` at 16px paints 36 device rows, Chrome 42;
+  - svg-specific, red handoff spec
+    `svg_fractional_size_and_middle_4x_chrome159_spec` (in-development, 1/5):
+    a viewBox-derived height is rounded to whole px (`width=49`, 4:1 is 12 px,
+    Chrome 12.25; `width=50`, 3:1 is 17 px, Chrome 16.667; at most 2 device
+    rows); `width="40.5" height="20.3"` is 160 x 80 device px, Chrome 162 x 81;
+    `vertical-align: middle` is 1 device row high.
+- **Separate regression found on the way (not fixed here):** 4x `animation` raw
+  mismatch went 15997 -> 18267 px (0.14 -> 0.16) between `17351eb0855` and
+  `589d7493a0c` (13 first-parent commits; #12215, W5-5 layout fixes, is the only
+  one touching render paths). First-parent bisect on raw `mismatch_px`; frames
+  at `17351eb0855` and `95ed8f463d6` are byte-identical. The two Simple frames
+  differ in 2985 px on three feature-list text rows (device y 1984..2052,
+  2304..2367, 2736..2783); ink boxes are unchanged, so it is a pen sub-pixel
+  phase change in those lines, not a row shift.
+- Method: give every case its own fixed-height block and a unique background
+  and fill, then read first..last device row per colour in both frames. One
+  page with stacked cases hides which case moved, because the error accumulates.
+## 2026-11-28 — text `<input>` value on Chrome's device line at k>1 (`work/webrender-input-row-20261128`)
+
+- **Finding first.** On the catalog forms-media page the `Name` value is NOT a row high at 4x: Chrome and Simple both ink rows 528..577, and shifting Simple by -1/0/+1 rows gives 1465/1101/1519 mismatched px in that crop (0 is best). What is left there is column/AA edge difference (glyph raster). The one-row-high value is real for other inputs (the `font-family:monospace` probe of the 2026-11-27 note).
+- **Rule (Chrome 159, UA control font 13.333px, k = 2..4).** The value's `normal` line is the face's DEVICE line, centred in the DEVICE content box with the half px rounding down the page, and the text hangs from the device strut baseline: `baseline = (k x content_h + extra_h - L_dev + 1) / 2 + strut_dev`, with no centring term when the box is not taller than the line.
+  - Simple centred in CSS px, multiplied by k, and added the painter's ascent at the rounded device size, with no device correction.
+  - DejaVu Sans Mono k=4: line 63, strut 50, painter ascent 49: one row high (330 vs 331).
+  - `height:40px` Liberation Sans k=4: 4 x 13 = 52 vs (160 - 61 + 1) / 2 = 50: two rows low. `height:41px` is 52 on both sides.
+  - Liberation Sans k=3: strut 35, painter 36: one row low, every auto-height sans input.
+  - Liberation Sans auto height k=4: 48 and 48. That is why the catalog page already matched.
+- **Fix (paint side).** `input_value_line_device_dy(st, content_h, extra_h)` in layout_foundation returns Chrome's baseline minus the painter's; `_html_draw_ir_input_value_command` pushes it as `device-y-offset` (it sums with the box's device top in `_html_draw_ir_device_top`). `extra_h` is `box_device_extra_h_at(i)`. Flat, password and overlay paths are untouched; k=1 returns 0.
+- **Pin.** `input_value_device_line_dpr4_chrome159_spec`: 4x abspos cells, 4x in-flow label lines, 3x, 2x, and a 1x guard. Red on base 4/5, green 5/5.
+- **Open, not fixed here.**
+  - Author font size inputs are excluded (`style_is_ua_control_font` guard): a 16px Liberation Sans input is 19 CSS / 76 device px tall here, 18 / 74 (k=2 37, k=3 55) in Chrome, so the formula on Simple's line moves the value the wrong way. Fix the control's `normal` line first (layout), then drop the guard. Base rows there: 16px k=4 614 vs Chrome 615; 20px monospace k=2/3 one row low.
+  - In-flow `height:40px` input on a label line: value one row low at 1x (151 vs 150), 2 device rows at k=4 after this fix (605 vs 603). Line/box placement, layout-owned.
+  - k=3 40 px DejaVu Sans Mono `E` is one row taller at the top than Chrome's (rasterizer); the spec pins that cell by its last row.
+  - The default UA input paints a dark bottom-border run Chrome does not (1x rows 239..240).
+  - Arabic value (DejaVu Sans fallback) at k=2 is one row high (164..189 vs 165..190) and at k=4 inks 330..379 vs 328..380; a CJK value is not on Chrome's rows at any k, 1x included. Glyph extents / fallback face, not this rule.
+  - An author `font-size:13.333px; line-height:1.2` is taken for the UA font by `style_is_ua_control_font` and gets the `normal` line. Recorded, not fixed.
+- **Review follow-up (same branch).**
+  - The offset goes through `_html_draw_ir_add_device_dy`, not a second `device-y-offset` prop: `_html_draw_ir_resolved_text_command` already adds one for a fallback face, `_dir_device_y_offset` reads the first and `_html_draw_ir_device_top` the last, so one was lost. Arabic value at k=3: 247..284 with two props, 246..284 (Chrome) summed.
+  - Button-type values (`submit`, `button`, `reset`) and placeholders share the command and the rule. Chrome agrees at k = 2..4 (k=3 submit 46..73, button 247..274, reset in 40px 495..522; placeholders by baseline row), so the scope stays; AC-6 pins them.
+  - Baseline: dpr4 forms-media row lowered 0.27 -> 0.19, the value base and head both measure. The drop is from earlier landed work, not this change.

@@ -1,0 +1,138 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+#
+# Function argument types are checked — REGRESSION spec.
+#
+# Bug: doc/08_tracking/bug/function_argument_types_unchecked_2026-09-01.md
+#
+# The bug doc repro (`takes_i("hello")` against `fn takes_i(x: i64)`) runs on
+# the Rust bootstrap seed, exit 0, printing a raw string pointer + 1, because
+# the seed lowers call arguments with no nominal type admission (its only
+# argument admissions are the bool-literal and None-literal special cases in
+# src/compiler_rust/compiler/src/hir/lower/expr/calls.rs). The seed lane is
+# owner-lane work and is NOT covered here.
+#
+# This spec pins the pure-Simple lane, exercised in-process: the spec runner
+# (any binary, seed included) parses/lowers small fixtures and runs the
+# self-hosted HM inferencer (src/compiler/30.types) over them, so no
+# subprocess or self-hosted deployment is required.
+#
+# ROOT CAUSE covered by this spec, fixed in
+# src/compiler/30.types/type_infer/inference_control.spl: intra-module
+# wrong-typed arguments were already rejected by infer_function_call's
+# Check-mode inference (src/compiler/30.types/type_infer/inference_expr_calls.spl),
+# but a call through a `use` bound its callee to `undefined: <name>`: infer_module
+# only forward-declared signatures for module.functions (the module's OWN
+# functions), while the caller's symbol table already carried every imported
+# function's declared Function type from the module surface. The fix binds
+# those imported function symbols into the inference environment by their
+# module-local SymbolId, so cross-module argument checking runs through the
+# same Check-mode path as intra-module calls. Local functions still shadow
+# imports (bound later, by their own SymbolId and by name); generic imports
+# (type_ = nil, generic_param_count > 0) stay unbound as before.
+
+# @tag:unit
+# @tag:compiler
+# @tag:types
+# @tag:imports
+
+use std.spec.{describe, it, expect, step, assert_false}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.types.type_infer.{HmInferContext}
+use compiler.types.type_infer.format_error.{format_type_infer_error_v1}
+
+fn argtypes_lower_single(source: text) -> HirModule:
+    val parsed = parse_full_frontend(source, "src/argtypes.spl", "argtypes", Logger(level: 0))
+    var lowering = HirLowering.with_filename("src/argtypes.spl")
+    lowering.use_explicit_semantic_policy()
+    lowering.lower_module(parsed)
+
+fn argtypes_infer_errors(m: HirModule) -> [text]:
+    var ctx = HmInferContext.with_builtins()
+    ctx.infer_module(m)
+    var out: [text] = []
+    var i = 0
+    while i < ctx.errors.len():
+        out.push(format_type_infer_error_v1(ctx.errors[i]))
+        i = i + 1
+    out
+
+fn argtypes_joined(errs: [text]) -> text:
+    var out = ""
+    for e in errs:
+        out = out + e + "\n"
+    out
+
+fn argtypes_cross_errors(caller_src: text) -> [text]:
+    val callee_src = "pub fn takes_i(x: i64) -> i64:\n    x + 1\n"
+    val log = Logger(level: 0)
+    val callee_ast = parse_full_frontend(callee_src, "lib/callee.spl", "lib.callee", log)
+    val caller_ast = parse_full_frontend(caller_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.callee"] = callee_ast
+    modules["app.main"] = caller_ast
+    val sources = [SourceFile(path: "lib/callee.spl", content: callee_src, module_name: "lib.callee"), SourceFile(path: "app/main.spl", content: caller_src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var callee_lowering = hirlowering_for_module("lib.callee", surfaces)
+    var caller_lowering = hirlowering_for_module("app.main", surfaces)
+    val callee_hir = callee_lowering.lower_module(callee_ast)
+    val caller_hir = caller_lowering.lower_module(caller_ast)
+    expect(callee_lowering.errors.len()).to_equal(0)
+    expect(caller_lowering.errors.len()).to_equal(0)
+    argtypes_infer_errors(caller_hir)
+
+describe "function argument types are checked":
+    # @manual scenario evidence
+
+    it "rejects a text literal argument at an i64 parameter":
+        # @req REQ-SSPEC-COMPILER
+        step("reject a text literal argument at an i64 parameter")
+        step("Lower the bug doc repro shape and run the self-hosted type inference over it")
+        val m = argtypes_lower_single("fn takes_i(x: i64) -> i64:\n    x + 1\n\nfn main():\n    val b = takes_i(\"hello\")\n    print(b.to_text())\n")
+        val errs = argtypes_infer_errors(m)
+        step("The argument check must diagnose a nominal mismatch, not run a raw pointer + 1")
+        expect(argtypes_joined(errs)).to_contain("type mismatch")
+        expect(argtypes_joined(errs)).to_contain("Str")
+
+    it "rejects a text variable argument at an i64 parameter":
+        # @req REQ-SSPEC-COMPILER
+        step("reject a text variable argument at an i64 parameter")
+        step("Bind the text to a local first so the argument is a Var read, not a literal")
+        val m = argtypes_lower_single("fn takes_i(x: i64) -> i64:\n    x + 1\n\nfn main():\n    val s = \"hello\"\n    val b = takes_i(s)\n    print(b.to_text())\n")
+        val errs = argtypes_infer_errors(m)
+        step("A wrong-typed variable argument is the same nominal mismatch")
+        expect(argtypes_joined(errs)).to_contain("type mismatch")
+        expect(argtypes_joined(errs)).to_contain("Str")
+
+    it "rejects a wrong-typed argument in a cross-module call":
+        # @req REQ-SSPEC-COMPILER
+        step("reject a wrong-typed argument in a cross-module call")
+        step("Import takes_i from a provider module and pass it a text literal")
+        val errs = argtypes_cross_errors("use lib.callee.\{takes_i}\n\nfn main():\n    val b = takes_i(\"hello\")\n    print(b.to_text())\n")
+        step("The imported callee must resolve to its declared signature, not `undefined`")
+        expect(argtypes_joined(errs)).to_contain("type mismatch")
+        assert_false(argtypes_joined(errs).contains("undefined"))
+
+    it "accepts a matching argument in a cross-module call":
+        # @req REQ-SSPEC-COMPILER
+        step("accept a matching argument in a cross-module call")
+        step("Same import, correct i64 argument — the control proves the check discriminates")
+        val errs = argtypes_cross_errors("use lib.callee.\{takes_i}\n\nfn main():\n    val b = takes_i(41)\n    print(b.to_text())\n")
+        step("A correct cross-module call stays clean")
+        expect(errs.len()).to_equal(0)
+
+    it "accepts a matching intra-module argument":
+        # @req REQ-SSPEC-COMPILER
+        step("accept a matching intra-module argument")
+        step("Same-module control with a correct argument")
+        val m = argtypes_lower_single("fn takes_i(x: i64) -> i64:\n    x + 1\n\nfn main():\n    val b = takes_i(41)\n    print(b.to_text())\n")
+        val errs = argtypes_infer_errors(m)
+        step("No diagnostic is computed for a well-typed call")
+        expect(errs.len()).to_equal(0)

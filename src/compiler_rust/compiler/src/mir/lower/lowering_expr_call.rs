@@ -222,6 +222,26 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// Mark the payload of a typed `Some(<f64>)` as a native f64 with a
+    /// lossless self-cast, so `mir::float_option_inline` can store it straight
+    /// into an inline `f64?` local instead of allocating the Option enum. The
+    /// cast is an identity for codegen, so every other consumer is unaffected.
+    pub(super) fn mark_typed_f64_option_payload(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
+        if arg_ty != TypeId::F64 || crate::mir::float_option_inline::disabled() {
+            return Ok(value);
+        }
+        self.with_func(|func, current_block| {
+            let marked = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Cast {
+                dest: marked,
+                source: value,
+                from_ty: TypeId::F64,
+                to_ty: TypeId::F64,
+            });
+            marked
+        })
+    }
+
     pub(super) fn box_arg_for_any_param(&mut self, arg: VReg, arg_expr: &HirExpr) -> MirLowerResult<VReg> {
         let arg_ty = arg_expr.ty;
         let needs_int_box = matches!(
@@ -746,6 +766,7 @@ impl<'a> MirLowerer<'a> {
                 ("Some", [value]) => {
                     let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
                     let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
+                    let value = self.mark_typed_f64_option_payload(value, arg_ty)?;
                     return self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -879,6 +900,7 @@ impl<'a> MirLowerer<'a> {
                     ("Option", "Some" | "some", [value]) => {
                         let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
                         let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
+                        let value = self.mark_typed_f64_option_payload(value, arg_ty)?;
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();

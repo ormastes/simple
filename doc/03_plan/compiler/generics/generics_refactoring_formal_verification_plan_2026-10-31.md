@@ -1,5 +1,7 @@
 # Simple generics: full refactoring, hardening, and production-linked formal verification
 
+> **Forward pointer (2026-11-27):** the owner decision "one erased body per generic function" recorded here is **reversed**: generics are to be fully monomorphized. This document stays an accurate description of the code until plan stages S3-D/S3-E land. See `doc/05_design/language/type_system/no_any_inference_generics.md` §6 and `doc/03_plan/language/type_system/no_any_inference_plan.md` stage S3.
+
 <!-- codex-research -->
 <!-- codex-design -->
 

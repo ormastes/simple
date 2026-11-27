@@ -1,0 +1,159 @@
+"""Linked error contracts execute through the pure-Simple MIR interpreter.
+
+Regression for mir_result_type_erasure_blocks_execution_linked_error_contracts_2026-08-12
+(interpreter-execution arm). The MIR lowering retains `MirTypeKind.Result` and
+lowers typed Ok/Err construction, `?` propagation and Result matches to the
+tagged-enum runtime ABI (rt_enum_new / rt_enum_discriminant / rt_enum_payload /
+rt_enum_check_variant). Two interpreter defects blocked executing any of that:
+
+1. `_dispatch_call_operand` routed every Runtime-origin call to the fixed
+   native arity bridge and never consulted the caller-bound function table, so
+   the documented modeling pattern (bind Simple model fns under their runtime
+   names, see optional_scalar_static_some_spec.spl) died as
+   E-INTERP-RUNTIME-Unknown.
+2. The `ResultMatchSemantic` verification-witness arm returned a unit
+   fall-through, which the interpreter host coerces into a phantom Some(())
+   error and aborts the executed match.
+
+Both are fixed; this spec pins the executed behavior of Ok/Err construction,
+`?`-linked propagation across functions, explicit `return` of a linked Result,
+and match payload extraction. Runtime ops are modeled in Simple source and
+bound under their runtime names (handle = 2^60 + payload * 2 + discriminant,
+nil sentinel 3), the same bounded model the Option specs use.
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.interp.mir_interpreter.{MirInterpreter}
+
+val RESULT_MODEL = (
+    "fn m_enum_new(id: i64, disc: i64, payload: i64) -> i64:\n" +
+    "    1152921504606846976 + payload * 2 + disc\n\n" +
+    "fn m_enum_discriminant(v: i64) -> i64:\n" +
+    "    if v >= 1152921504606846976:\n" +
+    "        return (v - 1152921504606846976) % 2\n" +
+    "    -1\n\n" +
+    "fn m_enum_payload(v: i64) -> i64:\n" +
+    "    if v >= 1152921504606846976:\n" +
+    "        return (v - 1152921504606846976) / 2\n" +
+    "    v\n\n" +
+    "fn m_enum_check_variant(v: i64, id: i64, disc: i64) -> i64:\n" +
+    "    if v < 1152921504606846976:\n" +
+    "        return 0\n" +
+    "    if (v - 1152921504606846976) % 2 != disc:\n" +
+    "        return 0\n" +
+    "    1\n\n"
+)
+
+fn lower_result_graph(source: text) -> {text: MirFunction}:
+    val file = "linked_result_contract.spl"
+    val ast = parse_full_frontend(RESULT_MODEL + source, file, file, Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(ast)
+    var target = mir_target_context_from("x86_64-unknown-linux-gnu", "x86_64", "linux", "llvm", -1)
+    var ml = MirLowering.new_for_target(hir.symbols, target)
+    val mir = ml.lower_module(hir)
+    expect(hl.errors.len()).to_equal(0)
+    expect(ml.errors.len()).to_equal(0)
+    var bound: {text: MirFunction} = {}
+    for function in mir.functions.values():
+        bound[function.name] = function
+    # Bind the tagged-enum runtime models under their runtime names: the
+    # interpreter dispatches Runtime-origin calls to the bound table first.
+    bound["rt_enum_new"] = bound["linked_result_contract.m_enum_new"]
+    bound["rt_enum_discriminant"] = bound["linked_result_contract.m_enum_discriminant"]
+    bound["rt_enum_payload"] = bound["linked_result_contract.m_enum_payload"]
+    bound["rt_enum_check_variant"] = bound["linked_result_contract.m_enum_check_variant"]
+    bound
+
+fn run_linked(bound: {text: MirFunction}, entry: text) -> i64:
+    val key = if bound.contains("linked_result_contract.{entry}"): "linked_result_contract.{entry}" else: entry
+    var interp = MirInterpreter.create()
+    interp.set_function_table(bound)
+    val res = interp.execute_function(bound[key])
+    expect(res[1]).to_be_nil()
+    res[0] ?? -777
+
+describe "linked error contracts execute through the MIR interpreter":
+    it "keeps the Result type on the constructor destination instead of erasing it":
+        val bound = lower_result_graph(
+            "fn f() -> Result<i64, i64>:\n" +
+            "    if 1 > 0:\n" +
+            "        Err(41)\n" +
+            "    else:\n" +
+            "        Ok(7)\n")
+        val f_json = serialize_mir_function(bound["linked_result_contract.f"])
+        expect(f_json).to_contain("\"Result\":{\"ok\":\"I64\",\"err\":\"I64\"}")
+
+    it "executes typed Err construction and match payload extraction":
+        val bound = lower_result_graph(
+            "fn f() -> Result<i64, i64>:\n" +
+            "    Err(41)\n" +
+            "fn main() -> i64:\n" +
+            "    match f():\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(e): e * -1\n")
+        expect(run_linked(bound, "main")).to_equal(-41)
+
+    it "propagates a linked Err across a question-mark chain":
+        val bound = lower_result_graph(
+            "fn f() -> Result<i64, i64>:\n" +
+            "    if 1 > 0:\n" +
+            "        Err(41)\n" +
+            "    else:\n" +
+            "        Ok(7)\n" +
+            "fn g() -> Result<i64, i64>:\n" +
+            "    val a = f()?\n" +
+            "    Ok(a + 1)\n" +
+            "fn main() -> i64:\n" +
+            "    match g():\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(e): e * -1\n")
+        expect(run_linked(bound, "g")).to_equal(1152921504606846976 + 41 * 2 + 1)
+        expect(run_linked(bound, "main")).to_equal(-41)
+
+    it "extracts the Ok payload through a question-mark chain":
+        val bound = lower_result_graph(
+            "fn f() -> Result<i64, i64>:\n" +
+            "    if 1 > 2:\n" +
+            "        Err(41)\n" +
+            "    else:\n" +
+            "        Ok(7)\n" +
+            "fn g() -> Result<i64, i64>:\n" +
+            "    val a = f()?\n" +
+            "    Ok(a + 1)\n" +
+            "fn main() -> i64:\n" +
+            "    match g():\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(e): e * -1\n")
+        expect(run_linked(bound, "main")).to_equal(8)
+
+    it "executes an explicit early return of a linked Err":
+        val bound = lower_result_graph(
+            "fn f() -> Result<i64, i64>:\n" +
+            "    if 1 > 0:\n" +
+            "        return Err(9)\n" +
+            "    Ok(7)\n" +
+            "fn main() -> i64:\n" +
+            "    match f():\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(e): e * 10\n")
+        expect(run_linked(bound, "main")).to_equal(90)
+
+    it "executes returning a linked call result directly":
+        val bound = lower_result_graph(
+            "fn f() -> Result<i64, i64>:\n" +
+            "    Err(3)\n" +
+            "fn g() -> Result<i64, i64>:\n" +
+            "    return f()\n" +
+            "fn main() -> i64:\n" +
+            "    match g():\n" +
+            "        case Ok(v): v\n" +
+            "        case Err(e): e + 1\n")
+        expect(run_linked(bound, "main")).to_equal(4)

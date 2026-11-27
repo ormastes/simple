@@ -295,8 +295,19 @@ impl<'a> MirLowerer<'a> {
                                         ty: effective_declared_ty,
                                     });
                                 })?;
+                                if self.block_array_release
+                                    && self.array_move_sites.block_release_locals.contains(&local_idx)
+                                {
+                                    self.block_release_ready.insert(local_idx, effective_declared_ty);
+                                }
+                                self.record_len_local_source(*local_index, Some(val));
+                                self.record_array_capacity_local_source(*local_index, Some(val));
                                 return Ok(());
-                            } else {
+                            } else if self.array_push_returns_header
+                                || elements.len() <= super::lowering_expr_collection::ARRAY_LITERAL_REPEAT_MIN
+                                || !Self::repeat_scalar_element(&elements[0])
+                                || !elements.iter().all(|elem| elem == &elements[0])
+                            {
                                 // Non-empty [u8] literal: bare integer literals default to I64 in HIR,
                                 // so the element type check in lower_array_expr misses this case.
                                 // Use declared_ty here to emit packed byte storage.
@@ -349,6 +360,11 @@ impl<'a> MirLowerer<'a> {
                                         ty: effective_declared_ty,
                                     });
                                 })?;
+                                if self.block_array_release
+                                    && self.array_move_sites.block_release_locals.contains(&local_idx)
+                                {
+                                    self.block_release_ready.insert(local_idx, effective_declared_ty);
+                                }
                                 self.record_len_local_source(*local_index, Some(val));
                                 self.record_array_capacity_local_source(*local_index, Some(val));
                                 return Ok(());
@@ -356,7 +372,23 @@ impl<'a> MirLowerer<'a> {
                         }
                     }
 
-                    let raw_vreg = self.lower_expr(val)?;
+                    let raw_vreg = if is_u8_array_declared {
+                        match &val.kind {
+                            HirExprKind::ArrayRepeat { value, count } => {
+                                self.lower_array_repeat_expr(value, count, effective_declared_ty)?
+                            }
+                            HirExprKind::Array(elements) if !elements.is_empty() => {
+                                let count_expr = HirExpr {
+                                    kind: HirExprKind::Integer(elements.len() as i64),
+                                    ty: TypeId::I64,
+                                };
+                                self.lower_u8_array_repeat_expr(&elements[0], &count_expr)?
+                            }
+                            _ => self.lower_expr(val)?,
+                        }
+                    } else {
+                        self.lower_expr(val)?
+                    };
                     // `val y: f64 = 3` — the literal is a float constant.
                     let vreg = self.float_slot_from_int_literal(effective_declared_ty, val, raw_vreg)?;
                     let local_idx = *local_index;

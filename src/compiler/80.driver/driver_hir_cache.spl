@@ -156,9 +156,10 @@ fn hir_cache_dir() -> text:
     "{machine_cache_root()}/native-build/v1/{lane_name}/hir"
 
 # Digest of every frozen surface, computed ONCE per build. Folds the fields
-# that identify a surface's content: its canonical path and content hash plus
-# the names it is registered under (an alias change moves what a sibling
-# resolves to without changing any file hash).
+# that identify a surface's content (its canonical path and content hash, or
+# its frozen span-free semantic identity) plus the ordered registry mapping
+# (an alias change moves what a sibling resolves to without changing any file
+# hash or declaration semantics).
 # Per-surface neutrality token folded into the closure digest. Empty with
 # SIMPLE_HIR_CFG_SELECT off (digest unchanged). "N" = the preprocess run that
 # consumed this content made zero strip decisions; "D:<sha>" = it made some
@@ -195,7 +196,10 @@ fn hir_cache_side_table_counts_v1() -> [i64]:
     [hir_closure_all_neutral.len(), hir_source_text_hash_cache.len()]
 
 # rows: per-surface identity lines; tokens: hir_cache_surface_neutral_token per row.
-fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text]) -> text:
+# registry_rows: the ordered registry mapping folded after the surface rows;
+# empty for callers that have no registry context (row/token-only digests).
+fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text],
+        registry_rows: [text] = []) -> text:
     var parts: [text] = ["{rows.len()}\n"]
     var all_neutral = rows.len() > 0
     var i = 0
@@ -205,6 +209,9 @@ fn hir_cache_closure_digest_from_rows(rows: [text], tokens: [text]) -> text:
         if tok != "N":
             all_neutral = false
         i = i + 1
+    parts = parts.push("{registry_rows.len()}\n")
+    for registry_row in registry_rows:
+        parts = parts.push(registry_row + "\n")
     val digest = sha256_text(parts.join(""))
     if hir_closure_all_neutral.len() >= HIR_CACHE_SIDE_TABLE_MAX_ENTRIES_V1:
         hir_closure_all_neutral = {}
@@ -285,6 +292,16 @@ fn _hir_cache_sort_order_by_keys(sort_keys: [text]) -> [i64]:
 
 fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
     val content_rows = (sosix_env_get_nullable("SIMPLE_HIR_CACHE_CLOSURE_KEY") ?? "") != "interface"
+    # Fail closed on construction-time or stale registries. Routes, origins
+    # and alias mappings become authoritative only at freeze, so an unfrozen
+    # or unversioned registry, or a torn ordered name/index mapping, must
+    # never produce a key. A surface newer than its registry means the
+    # registry view is stale (mid-construction or post-swap); digesting it
+    # would key the cache on identity terms a sibling build does not share.
+    if not surfaces.frozen or surfaces.generation <= 0:
+        return ""
+    if surfaces.ordered_names.len() != surfaces.ordered_indices.len():
+        return ""
     var rows: [text] = []
     var tokens: [text] = []
     var sort_keys: [text] = []
@@ -295,7 +312,10 @@ fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
         # Repo-relative: the sharded route reads an absolute SCV snapshot, the
         # direct route the checkout; the same closure must digest equally.
         # Only physical path + content identify a row. Alias spellings and the
-        # order they were registered are worker-local and must not move the key.
+        # order they were registered are worker-local and must not move the
+        # key; the ordered registry mapping is folded below as its own term.
+        if s.generation > surfaces.generation:
+            return ""
         val rel = module_source_relative_path(s.canonical_path)
         if content_rows:
             rows = rows.push(rel + "|" + "{s.content_hash}" + "|" + "{s.content_length}")
@@ -313,7 +333,23 @@ fn hir_cache_closure_digest(surfaces: ModuleSurfacesByName) -> text:
     for index in order:
         sorted_rows = sorted_rows.push(rows[index])
         sorted_tokens = sorted_tokens.push(tokens[index])
-    val digest = hir_cache_closure_digest_from_rows(sorted_rows, sorted_tokens)
+    # Fold the ordered registry mapping: an alias-only remap (pkg.alpha ->
+    # pkg.beta) changes what siblings resolve to without changing any file
+    # bytes or declaration semantics, so the registered names are part of
+    # closure identity. Exact ordered order is kept (package-sibling and
+    # re-export traversal observe it); the mapping is inventory-derived, so
+    # every process of one build folds the same rows. A mapping pointing
+    # outside the surface array is a torn registry: fail closed.
+    var registry_rows: [text] = []
+    i = 0
+    while i < surfaces.ordered_names.len():
+        val surface_index = surfaces.ordered_indices[i]
+        if surface_index < 0 or surface_index >= surfaces.surfaces.len():
+            return ""
+        registry_rows = registry_rows.push(
+            "registry|" + surfaces.ordered_names[i] + "|{surface_index}")
+        i = i + 1
+    val digest = hir_cache_closure_digest_from_rows(sorted_rows, sorted_tokens, registry_rows)
     # Several build stages re-derive the same closure digest (archive schedule,
     # managed-runtime selection per source, body surfaces): count and print
     # once per distinct closure, i.e. once per build.
