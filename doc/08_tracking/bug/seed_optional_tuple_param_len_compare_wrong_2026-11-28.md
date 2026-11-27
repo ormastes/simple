@@ -6,7 +6,7 @@
   `if t == nil or t.len() < 4:` takes the default branch for a valid 4-tuple.
   `print t.len()` on the same value prints `4`, so the length is right but the
   comparison is wrong.
-- Repro (prints `-1`, `-2`, `-2`; expected `4`-path value `9` / `4` for a valid tuple):
+- Repro (prints `-1` then `-2`; expected `4` then `9`):
 
 ```
 fn a(t: (i64, i64, text, text)?) -> i64:
