@@ -18,24 +18,33 @@ set -u
 LC_ALL=C
 export LC_ALL
 
-die() { printf 'qmp-send-virtio-input: %s\n' "$1" >&2; exit 1; }
+die() {
+  printf 'qmp-send-virtio-input: %s\n' "$1" >&2
+  [ -z "${tmp:-}" ] || [ ! -s "$tmp/err" ] || cat "$tmp/err" >&2
+  exit 1
+}
 
 case $# in
   1) mode=input ;;
   5) mode=capture
      [ "$2" = "--capture-only" ] || die "unknown mode"
      capture=$3 want_w=$4 want_h=$5
-     case $want_w$want_h in *[!0-9]*|'') die "WIDTH and HEIGHT must be decimal integers" ;; esac ;;
+     case $want_w$want_h in *[!0-9]*|'') die "WIDTH and HEIGHT must be decimal integers" ;; esac
+     case $capture in *[!\ -~]*|'') die "capture path must be printable ASCII" ;; esac ;;
   *) die "usage: qmp-send-virtio-input.shs SOCKET [--capture-only CAPTURE.ppm WIDTH HEIGHT]" ;;
 esac
 sock=$1
 command -v nc >/dev/null 2>&1 || die "nc with -U (OpenBSD netcat) is required"
 command -v mkfifo >/dev/null 2>&1 || die "mkfifo is required"
 
+# dec N: decimal value with leading zeros stripped (never read as octal)
+dec() { v=${1#"${1%%[!0]*}"}; printf '%s' "${v:-0}"; }
+
 validate_ppm_capture() {
   # $1 path, $2 width, $3 height. Header tokens come from the first 64 bytes.
-  [ -f "$1" ] && [ -r "$1" ] || die "cannot read capture $1"
-  hdr=$(head -c 64 "$1" | od -An -v -tu1 | awk '
+  path=$1
+  [ -f "$path" ] && [ -r "$path" ] || die "cannot read capture $path"
+  hdr=$(head -c 64 "$path" | od -An -v -tu1 | awk '
     { for (i = 1; i <= NF; i++) b[n++] = $i }
     END {
       pos = 0; ntok = 0
@@ -50,16 +59,18 @@ validate_ppm_capture() {
       if (ntok < 4 || pos >= n) { print "BAD"; exit }
       print t[0], t[1], t[2], t[3], pos + 1
     }')
+  set -f
   set -- $hdr "$2" "$3"
+  set +f
   [ "$1" = "P6" ] || die "capture is not a binary PPM"
   [ $# -eq 7 ] || die "capture is not a binary PPM"
   case $2$3$4 in *[!0-9]*|'') die "capture is not a binary PPM" ;; esac
-  hw=$2 hh=$3 hmax=$4 off=$5 ew=$6 eh=$7
-  [ "$((hw + 0))" -eq "$ew" ] && [ "$((hh + 0))" -eq "$eh" ] && [ "$((hmax + 0))" -eq 255 ] ||
+  hw=$(dec "$2") hh=$(dec "$3") hmax=$(dec "$4") off=$5 ew=$(dec "$6") eh=$(dec "$7")
+  [ "$hw" -eq "$ew" ] && [ "$hh" -eq "$eh" ] && [ "$hmax" -eq 255 ] ||
     die "capture geometry or channel depth mismatch"
-  total=$(wc -c < "$capture" | tr -d ' ')
+  total=$(wc -c < "$path" | tr -d ' ')
   [ $((total - off)) -eq $((hw * hh * 3)) ] || die "capture pixel payload is incomplete"
-  differs=$(tail -c +$((off + 1)) "$capture" | od -An -v -tu1 | awk '
+  differs=$(tail -c +$((off + 1)) "$path" 2>/dev/null | od -An -v -tu1 2>/dev/null | awk '
     { for (i = 1; i <= NF; i++) {
         r = n % 3
         if (n < 3) first[r] = $i
@@ -129,7 +140,6 @@ if [ "$mode" = capture ]; then
   # the final serial/device receipt; leaving it stopped keeps a newer animation frame from
   # racing the wrapper's later receipt lookup and checksum correlation.
   qmp_execute stop
-  case $capture in *[!\ -~]*) die "capture path must be printable ASCII" ;; esac
   qmp_execute screendump "{\"filename\": \"$(json_escape "$capture")\"}"
   validate_ppm_capture "$capture" "$want_w" "$want_h"
   exit 0
